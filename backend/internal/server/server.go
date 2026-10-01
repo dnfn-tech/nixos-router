@@ -46,6 +46,11 @@ type Server struct {
 	applyReload bool
 	applyMu     sync.Mutex
 	runner      CommandRunner
+	// Live status helpers
+	sysClassNet string // base dir for /sys/class/net (overridable by env)
+	ifPrev      map[string]ifacePrev // in-memory last counters sample
+	// Traffic control apply (default off)
+	applyTrafficControl bool
 }
 
 type Options struct {
@@ -58,6 +63,9 @@ type Options struct {
 	WebFS      fs.FS
 	WebDir     string
 	ApplyReload bool
+	// ApplyTrafficControl: when true and ApplyReload is also true, attempt to run generated qos.sh.
+	// Defaults to false for safety.
+	ApplyTrafficControl bool
 }
 
 // CommandRunner abstracts command lookups and execution to allow tests to inject a mock
@@ -70,6 +78,12 @@ type defaultRunner struct{}
 
 func (defaultRunner) LookPath(name string) error { _, err := exec.LookPath(name); return err }
 func (defaultRunner) Run(name string, args ...string) error { return execRun(name, args...) }
+
+type ifacePrev struct {
+	rxBytes uint64
+	txBytes uint64
+	ts      time.Time
+}
 
 func New(opts Options) *Server {
 	s := &Server{
@@ -86,6 +100,8 @@ func New(opts Options) *Server {
 		loginFails:  make(map[string][]time.Time),
 		applyReload: opts.ApplyReload,
 		runner:      defaultRunner{},
+		ifPrev:      make(map[string]ifacePrev),
+		applyTrafficControl: opts.ApplyTrafficControl,
 	}
 	if s.devMode {
 		// allow all for local-dev unless overridden
@@ -93,6 +109,12 @@ func New(opts Options) *Server {
 		if v := os.Getenv("NIXOS_ROUTER_CORS_ORIGIN"); v != "" {
 			s.allowedCORS = v
 		}
+	}
+	// Resolve sysfs base for net interfaces
+	if v := os.Getenv("NIXOS_ROUTER_SYS_CLASS_NET"); strings.TrimSpace(v) != "" {
+		s.sysClassNet = strings.TrimSpace(v)
+	} else {
+		s.sysClassNet = "/sys/class/net"
 	}
 	return s
 }
@@ -206,6 +228,87 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// --- Live status helpers (best-effort; degrade gracefully) ---
+func (s *Server) readFileTrim(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func (s *Server) readIfaceSysfs(name string) (map[string]interface{}, bool) {
+	if name == "" {
+		return nil, false
+	}
+	base := filepath.Join(s.sysClassNet, name)
+	if fi, err := os.Stat(base); err != nil || !fi.IsDir() {
+		return nil, false
+	}
+	out := map[string]interface{}{
+		"name": name,
+	}
+	source := "sysfs"
+	// operstate
+	if v, err := s.readFileTrim(filepath.Join(base, "operstate")); err == nil && v != "" {
+		out["up"] = strings.EqualFold(v, "up")
+	}
+	// speed (Mbps)
+	if v, err := s.readFileTrim(filepath.Join(base, "speed")); err == nil && v != "" {
+		if n, err2 := strconv.Atoi(v); err2 == nil && n > 0 {
+			out["speedMbps"] = n
+		}
+	}
+	// duplex
+	if v, err := s.readFileTrim(filepath.Join(base, "duplex")); err == nil && v != "" {
+		out["duplex"] = v
+	}
+	// rx/tx bytes and estimate rate from previous sample
+	readUint := func(p string) (uint64, bool) {
+		if s, err := s.readFileTrim(p); err == nil && s != "" {
+			if n, err2 := strconv.ParseUint(s, 10, 64); err2 == nil {
+				return n, true
+			}
+		}
+		return 0, false
+	}
+	rx, okRx := readUint(filepath.Join(base, "statistics", "rx_bytes"))
+	tx, okTx := readUint(filepath.Join(base, "statistics", "tx_bytes"))
+	now := time.Now()
+	if okRx {
+		out["rxBytes"] = rx
+	}
+	if okTx {
+		out["txBytes"] = tx
+	}
+	ifPrev, okPrev := s.ifPrev[name]
+	if okPrev && (okRx || okTx) {
+		dt := now.Sub(ifPrev.ts).Seconds()
+		if dt > 0 {
+			if okRx {
+				drx := int64(rx) - int64(ifPrev.rxBytes)
+				if drx < 0 {
+					drx = 0
+				}
+				out["rxBps"] = int64(float64(drx) / dt)
+			}
+			if okTx {
+				dtx := int64(tx) - int64(ifPrev.txBytes)
+				if dtx < 0 {
+					dtx = 0
+				}
+				out["txBps"] = int64(float64(dtx) / dt)
+			}
+		}
+	}
+	// Update prev sample
+	if okRx || okTx {
+		s.ifPrev[name] = ifacePrev{rxBytes: rx, txBytes: tx, ts: now}
+	}
+	out["source"] = source
+	return out, true
 }
 
 // handleSPA serves the embedded (or local) UI with SPA fallback to index.html.
@@ -384,11 +487,86 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if ls := s.readDnsmasqLeases(); len(ls) > 0 {
 		clientCount = len(ls)
 	}
+	// Interfaces: best-effort live via sysfs + config roles
+	var interfaces []map[string]interface{}
+	// WAN
+	wanIf := s.cfg.WAN.Interface
+	if strings.TrimSpace(wanIf) == "" {
+		wanIf = "wan0"
+	}
+	wanItem := map[string]interface{}{"name": wanIf, "role": "wan", "mode": s.cfg.WAN.Mode}
+	if live, ok := s.readIfaceSysfs(wanIf); ok {
+		for k, v := range live {
+			wanItem[k] = v
+		}
+	}
+	interfaces = append(interfaces, wanItem)
+	// LAN (bridge)
+	lanIf := s.cfg.LAN.BridgeName
+	if strings.TrimSpace(lanIf) == "" {
+		lanIf = "br-lan"
+	}
+	lanItem := map[string]interface{}{"name": lanIf, "role": "lan", "cidr": lanCIDR}
+	if live, ok := s.readIfaceSysfs(lanIf); ok {
+		for k, v := range live {
+			lanItem[k] = v
+		}
+	}
+	interfaces = append(interfaces, lanItem)
+	// Determine sources summary
+	srcs := map[string]string{}
+	if (wanItem["source"] == "sysfs") || (lanItem["source"] == "sysfs") {
+		srcs["interfaces"] = "sysfs"
+	} else {
+		srcs["interfaces"] = "stub"
+	}
+	// Clients source for summary (from leases vs static)
+	clientsSource := "stub"
+	if ls := s.readDnsmasqLeases(); len(ls) > 0 {
+		clientsSource = "leases"
+	}
+	srcs["clients"] = clientsSource
+	// WiFi source (stub for now)
+	srcs["wifi"] = "stub"
+	// Last apply job summary if db present
+	var lastApply map[string]interface{}
+	if s.db != nil && s.db.SQL != nil {
+		if jobs, err := s.db.ListJobs(50); err == nil {
+			for _, j := range jobs {
+				if strings.EqualFold(j.Kind, "apply") {
+					// try parse mode from payload ({"mode":"..."})
+					mode := ""
+					if strings.TrimSpace(j.Payload) != "" {
+						var p map[string]interface{}
+						if json.Unmarshal([]byte(j.Payload), &p) == nil {
+							if mv, ok := p["mode"].(string); ok {
+								mode = mv
+							}
+						}
+					}
+					lastApply = map[string]interface{}{
+						"id":        j.ID,
+						"status":    j.Status,
+						"updatedAt": j.UpdatedAt.UTC().Format(time.RFC3339),
+					}
+					if mode != "" {
+						lastApply["mode"] = mode
+					}
+					srcs["apply"] = "db"
+					break
+				}
+			}
+		}
+	}
+	if lastApply == nil {
+		srcs["apply"] = "stub"
+	}
 	resp := map[string]interface{}{
 		"system": map[string]interface{}{
 			"hostname": s.cfg.System.Hostname,
 			"timezone": s.cfg.System.Timezone,
 		},
+		"interfaces": interfaces,
 		"wan": map[string]interface{}{
 			"iface": s.cfg.WAN.Interface,
 			"mode":  s.cfg.WAN.Mode,
@@ -419,6 +597,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				}
 				return c
 			}(),
+			"source": "stub",
 		},
 		"firewall": map[string]interface{}{
 			"enabled": s.cfg.Firewall.Enable,
@@ -434,6 +613,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"enabled":  s.cfg.DDNS.Enable,
 			"provider": s.cfg.DDNS.Provider,
 		},
+		"sources": srcs,
+	}
+	if lastApply != nil {
+		resp["lastApply"] = lastApply
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -580,6 +763,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		Hostname string `json:"hostname,omitempty"`
 		Source   string `json:"source"`
 		Expires  string `json:"expires,omitempty"`
+		LastSeen string `json:"lastSeen,omitempty"`
 		Blocked  bool   `json:"blocked"`
 	}
 	var clients []Client
@@ -617,7 +801,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 				expires = L.Expires.UTC().Format(time.RFC3339)
 			}
 			clients = append(clients, Client{
-				IP: L.IP, MAC: L.MAC, Hostname: h, Source: source, Expires: expires,
+				IP: L.IP, MAC: L.MAC, Hostname: h, Source: source, Expires: expires, LastSeen: expires,
 				Blocked: s.isMacBlocked(L.MAC),
 			})
 		}
@@ -1155,6 +1339,22 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		okReload, msg := s.reloadCoreUnits()
 		// plugin orchestration - non-fatal notes
 		notes := s.orchestratePlugins(cfg)
+		// Optional: traffic control script execution when explicitly enabled
+		if s.applyTrafficControl {
+			script := filepath.Join(genDir, "qos.sh")
+			if fi, err := os.Stat(script); err == nil && fi.Mode().Perm()&0o111 != 0 {
+				// Best-effort run; failures are noted but do not fail the apply
+				if err := s.runner.Run(script); err != nil {
+					notes = append(notes, "qos: failed to run qos.sh (ignored): "+err.Error())
+				} else {
+					notes = append(notes, "qos: executed qos.sh")
+				}
+			} else {
+				notes = append(notes, "qos: script not present or not executable; skipped")
+			}
+		} else {
+			notes = append(notes, "qos: applyTrafficControl=false; generation only")
+		}
 		if !okReload {
 			_ = s.db.UpdateJobStatus(jid, "failed", msg)
 			s.db.AddAudit(user, "apply", "reload failed: "+msg)
@@ -1288,22 +1488,102 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 	ddns := "# DDNS generate-only\n"
 	ddns += fmt.Sprintf("# provider=%s enabled=%v\n", cfg.DDNS.Provider, cfg.DDNS.Enable)
 	_ = os.WriteFile(filepath.Join(dir, "ddns.env.fragment"), []byte(ddns), 0o644)
-	// QoS notes
-	qos := "# QoS generate-only (notes)\n"
-	qos += fmt.Sprintf("# upMbps=%d downMbps=%d\n", cfg.QoS.UpMbps, cfg.QoS.DownMbps)
-	// Safe, non-executing examples (not applied): fq_codel skeletons
-	qos += "# example (egress): tc qdisc replace dev <wan-if> root fq_codel\n"
-	qos += "# example (ingress): tc qdisc replace dev <lan-bridge> handle ffff: ingress\n"
-	_ = os.WriteFile(filepath.Join(dir, "qos.conf.fragment"), []byte(qos), 0o644)
-	// Parental notes
-	par := "# Parental generate-only (notes)\n"
-	par += fmt.Sprintf("# rules=%d\n", len(cfg.Parental.Rules))
-	// Safe nftables skeleton for MAC-based blocking set (not active)
-	par += "\n# nftables skeleton:\n"
-	par += "# table inet routerd_parental { set blocked_macs { type ether_addr; flags interval; }\n"
-	par += "#   chain input { type filter hook input priority 1; policy accept; }\n"
-	par += "# }\n"
-	_ = os.WriteFile(filepath.Join(dir, "parental.conf.fragment"), []byte(par), 0o644)
+	// QoS: when enabled, generate concrete tc script; always also write notes
+	{
+		qosNotes := "# QoS generate-only (notes)\n"
+		qosNotes += fmt.Sprintf("# upMbps=%d downMbps=%d\n", cfg.QoS.UpMbps, cfg.QoS.DownMbps)
+		qosNotes += "# example (egress): tc qdisc replace dev <wan-if> root fq_codel\n"
+		qosNotes += "# example (ingress): tc qdisc replace dev <lan-bridge> handle ffff: ingress\n"
+		_ = os.WriteFile(filepath.Join(dir, "qos.conf.fragment"), []byte(qosNotes), 0o644)
+		if cfg.QoS.Enable && (cfg.QoS.UpMbps > 0 || cfg.QoS.DownMbps > 0) {
+			wan := s.cfg.WAN.Interface
+			if strings.TrimSpace(wan) == "" {
+				wan = "wan0"
+			}
+			lan := s.cfg.LAN.BridgeName
+			if strings.TrimSpace(lan) == "" {
+				lan = "br-lan"
+			}
+			var sb strings.Builder
+			sb.WriteString("#!/usr/bin/env sh\n")
+			sb.WriteString("# Generated by routerd (generate-only); idempotent-ish tc setup\n")
+			sb.WriteString("set -eu\n")
+			// Egress (WAN) shaping
+			if cfg.QoS.UpMbps > 0 {
+				up := cfg.QoS.UpMbps
+				sb.WriteString(fmt.Sprintf("tc qdisc replace dev %s root handle 1: htb default 30 || true\n", wan))
+				sb.WriteString(fmt.Sprintf("tc class replace dev %s parent 1: classid 1:1 htb rate %dmbit ceil %dmbit || true\n", wan, up, up))
+				sb.WriteString(fmt.Sprintf("tc qdisc replace dev %s parent 1:1 handle 10: fq_codel || true\n", wan))
+			}
+			// Ingress (LAN bridge) policing via ingress qdisc (simplified)
+			if cfg.QoS.DownMbps > 0 {
+				down := cfg.QoS.DownMbps
+				sb.WriteString(fmt.Sprintf("tc qdisc replace dev %s handle ffff: ingress || true\n", lan))
+				// Replace all u32 filters with a single police rule (simple cap)
+				sb.WriteString(fmt.Sprintf("tc filter replace dev %s parent ffff: protocol all u32 match u32 0 0 police rate %dmbit burst %dkbit drop flowid :1 || true\n",
+					lan, down, down*64))
+			}
+			path := filepath.Join(dir, "qos.sh")
+			_ = os.WriteFile(path, []byte(sb.String()), 0o755)
+		}
+	}
+	// Parental: when enabled, generate concrete nftables set+drop chain; else notes
+	{
+		if cfg.Parental.Enable {
+			var b strings.Builder
+			b.WriteString("# Generated by routerd (generate-only)\n")
+			b.WriteString("table inet routerd_parental {\n")
+			// Build blocked macs set from firewall.blockedMacs and parental rules with action=block
+			elem := []string{}
+			for _, m := range cfg.Firewall.BlockedMACs {
+				if strings.TrimSpace(m) != "" {
+					elem = append(elem, strings.ToLower(m))
+				}
+			}
+			for _, r := range cfg.Parental.Rules {
+				if strings.EqualFold(r.Action, "block") {
+					for _, m := range r.TargetMACs {
+						if strings.TrimSpace(m) != "" {
+							elem = append(elem, strings.ToLower(m))
+						}
+					}
+				}
+			}
+			b.WriteString("  set blocked_macs { type ether_addr; flags interval; ")
+			if len(elem) > 0 {
+				b.WriteString("elements = { ")
+				for i, m := range elem {
+					if i > 0 {
+						b.WriteString(", ")
+					}
+					b.WriteString(m)
+				}
+				b.WriteString(" }")
+			}
+			b.WriteString(" }\n")
+			// Input chain drop rule referencing the set; priority 1 so it runs after main input rules
+			b.WriteString("  chain input {\n")
+			b.WriteString("    type filter hook input priority 1; policy accept;\n")
+			b.WriteString("    ether saddr @blocked_macs drop\n")
+			// Emit schedules as comments (not enforced)
+			for _, r := range cfg.Parental.Rules {
+				if strings.TrimSpace(r.Schedule) != "" {
+					b.WriteString(fmt.Sprintf("    # schedule note: action=%s targetMacs=%v schedule=%q (not enforced)\n",
+						r.Action, r.TargetMACs, r.Schedule))
+				}
+			}
+			b.WriteString("  }\n}\n")
+			_ = os.WriteFile(filepath.Join(dir, "parental.nft.fragment"), []byte(b.String()), 0o644)
+		} else {
+			par := "# Parental generate-only (notes)\n"
+			par += fmt.Sprintf("# rules=%d\n", len(cfg.Parental.Rules))
+			par += "\n# nftables skeleton:\n"
+			par += "# table inet routerd_parental { set blocked_macs { type ether_addr; flags interval; }\n"
+			par += "#   chain input { type filter hook input priority 1; policy accept; }\n"
+			par += "# }\n"
+			_ = os.WriteFile(filepath.Join(dir, "parental.conf.fragment"), []byte(par), 0o644)
+		}
+	}
 	// Plugins notes (enabled/disabled)
 	for _, pid := range []string{"adblock", "traffic", "mihomo", "vlan", "tailscale", "zerotier"} {
 		fn := filepath.Join(dir, "plugin."+pid+".notes")

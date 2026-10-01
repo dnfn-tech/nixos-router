@@ -1786,6 +1786,22 @@ async function renderSSH() {
         ];
         if (it?.role === "wan" && it?.mode) lines.push(["模式", it.mode]);
         if (it?.role === "lan" && it?.cidr) lines.push(["CIDR", it.cidr]);
+        if (typeof it?.speedMbps === "number") {
+          const dx = (typeof it?.duplex === "string" && it.duplex) ? `（${it.duplex}）` : "";
+          lines.push(["速率", `${it.speedMbps} Mbps${dx}`]);
+        } else if (typeof it?.duplex === "string" && it.duplex) {
+          lines.push(["双工", String(it.duplex)]);
+        }
+        if (typeof it?.rxBytes === "number" || typeof it?.txBytes === "number") {
+          const rx = (it?.rxBytes != null) ? String(it.rxBytes) : "-";
+          const tx = (it?.txBytes != null) ? String(it.txBytes) : "-";
+          lines.push(["累计 RX/TX（B）", `${rx} / ${tx}`]);
+        }
+        if (typeof it?.rxBps === "number" || typeof it?.txBps === "number") {
+          const rx = (it?.rxBps != null) ? String(it.rxBps) : "-";
+          const tx = (it?.txBps != null) ? String(it.txBps) : "-";
+          lines.push(["速率 RX/TX（B/s，估算）", `${rx} / ${tx}`]);
+        }
         const rows = lines.map(([k, v]) => html`<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`).join("");
         return html`<div class="kv iface">${rows}</div>`;
       }).join("<hr class=\"sep\" />");
