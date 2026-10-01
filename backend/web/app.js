@@ -1076,11 +1076,11 @@ async function renderSSH() {
   }
 
   async function renderClients() {
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-    try {
+  const content = clearMain();
+  const grid = document.createElement("div");
+  grid.className = "grid";
+  content.appendChild(grid);
+  try {
     const data = await fetchJson("/api/v1/clients");
     const list = Array.isArray(data) ? data : (data?.clients || data?.items || []);
     const src = data?.source || "-";
@@ -1106,31 +1106,90 @@ async function renderSSH() {
     } else {
       const card = document.createElement("div");
       card.className = "card";
-      const items = list.map((c) => {
-        const rows = [
-          ["IP", c?.ip || "-"],
-          ["MAC", c?.mac || "-"],
-          ["主机名", c?.hostname || "-"],
-          ["来源", c?.source || src || "-"],
-        ].map(([k,v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`).join("");
-        return `<div class="kv">${rows}</div>`;
+      const items = list.map((c, idx) => {
+        const mac = c?.mac || "";
+        const blocked = !!c?.blocked;
+        const hostname = c?.hostname || "";
+        const canEdit = state.clientsPatchAvailable !== false;
+        const rowId = `client-row-${idx}`;
+        const hnId = `client-hn-${idx}`;
+        const msgId = `client-msg-${idx}`;
+        const blkId = `client-blk-${idx}`;
+        const left = `
+          <div class="k">IP</div><div class="v">${escapeHtml(c?.ip || "-")}</div>
+          <div class="k">MAC</div><div class="v">${escapeHtml(mac || "-")}</div>
+          <div class="k">来源</div><div class="v">${escapeHtml(c?.source || src || "-")}</div>
+        `;
+        const rightReadonly = `
+          <div class="k">主机名</div><div class="v">${escapeHtml(hostname || "-")}</div>
+          <div class="k">阻止</div><div class="v">${blocked ? "是" : "否"}</div>
+        `;
+        const rightEdit = `
+          <div class="k">主机名</div>
+          <div class="v">
+            <input id="${hnId}" type="text" value="${escapeHtml(hostname)}" style="width: 220px;" />
+            <button data-mac="${escapeHtml(mac)}" data-hn-id="${hnId}" data-msg-id="${msgId}" class="btn" style="margin-left:8px;">保存</button>
+          </div>
+          <div class="k">阻止</div>
+          <div class="v">
+            <label><input id="${blkId}" type="checkbox" ${blocked ? "checked" : ""} /> 阻止此客户端</label>
+          </div>
+          <div class="k">状态</div><div class="v"><span id="${msgId}" class="small muted"></span></div>
+        `;
+        return `<div class="kv" id="${rowId}">${left}${canEdit ? rightEdit : rightReadonly}</div>`;
       }).join("<hr class=\"sep\" />");
       card.innerHTML = `<h3>客户端列表</h3>${items}`;
       grid.appendChild(card);
+
+      // 绑定交互事件
+      list.forEach((c, idx) => {
+        if (state.clientsPatchAvailable === false) return;
+        const mac = c?.mac || "";
+        const hnBtn = card.querySelector(`button[data-hn-id="client-hn-${idx}"]`);
+        const hnInput = card.querySelector(`#client-hn-${idx}`);
+        const msgEl = card.querySelector(`#client-msg-${idx}`);
+        const blkInput = card.querySelector(`#client-blk-${idx}`);
+        const setMsg = (t, ok=false) => { if (msgEl) { msgEl.textContent = t; msgEl.style.color = ok ? "var(--accent)" : "var(--muted)"; } };
+        hnBtn?.addEventListener("click", async () => {
+          try {
+            const val = (hnInput?.value || "").trim();
+            await patchClient(mac, { hostname: val });
+            setMsg("已保存", true);
+            await renderClients();
+          } catch (e) {
+            if (e?.status === 404 || e?.status === 501) {
+              setMsg("接口尚未提供"); state.clientsPatchAvailable = false; await renderClients(); return;
+            }
+            setMsg(`失败：${e?.message || "未知错误"}`);
+          }
+        });
+        blkInput?.addEventListener("change", async () => {
+          try {
+            await patchClient(mac, { blocked: !!blkInput.checked });
+            setMsg("已保存", true);
+            await renderClients();
+          } catch (e) {
+            if (e?.status === 404 || e?.status === 501) {
+              setMsg("接口尚未提供"); state.clientsPatchAvailable = false; await renderClients(); return;
+            }
+            setMsg(`失败：${e?.message || "未知错误"}`);
+          }
+        });
+      });
     }
     grid.appendChild(renderJSONCard("客户端 JSON", data));
-    } catch (e) {
-      if (e?.status === 404) {
-        const card = document.createElement("div");
-        card.className = "card";
-        card.innerHTML = `<h3>客户端（只读）</h3><p class="muted">接口尚未提供</p>`;
-        grid.appendChild(card);
-      } else if (e?.status === 401) {
-        // 已由全局 401 处理
-      } else {
-        grid.appendChild(renderJSONCard("错误", { error: e?.message || "请求失败" }));
-      }
+  } catch (e) {
+    if (e?.status === 404) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `<h3>客户端（只读）</h3><p class="muted">接口尚未提供</p>`;
+      grid.appendChild(card);
+    } else if (e?.status === 401) {
+      // 已由全局 401 处理
+    } else {
+      grid.appendChild(renderJSONCard("错误", { error: e?.message || "请求失败" }));
     }
+  }
   }
 
   function getApiBase() {
@@ -1151,6 +1210,7 @@ async function renderSSH() {
     pageDirty: false,
     prevHash: null,
     suppressHashRevert: false,
+    clientsPatchAvailable: null,
     navItems: [],
     coreNav: [
       { id: "overview", label: "总览", path: "#/overview" },
