@@ -43,6 +43,7 @@
   - 备份：`GET /api/v1/backup/config`（仅 JSON）、`GET /api/v1/backup/full`（含 DB）
   - 恢复：`POST /api/v1/backup/restore`（上传包 → 校验 → 作业化）
   - 健康/指标：`GET /api/v1/healthz`、`GET /metrics`（Prometheus）
+  - 能力探测：`GET /api/v1/capabilities/wifi`（返回 `nl80211` 接口组合、是否支持多 AP/DBDC、BSS 上限等；用于 UI/验证裁剪）
 
 说明：推荐以“完整 JSON 提交 + 服务器端校验 + 原子写 + 作业编排”为主路径；细分资源用于表单分块与增量校验。
 
@@ -68,7 +69,8 @@
       { "band": "2g", "enable": true, "ssid": "nixos-router", "hidden": false, "channel": "auto", "width": "20", "encryption": "wpa2+wpa3", "password": "" },
       { "band": "5g", "enable": true, "ssid": "nixos-router-5G", "hidden": false, "channel": "auto", "width": "80", "encryption": "wpa2+wpa3", "password": "", "samePasswordAs2g": true }
     ],
-    "guest": { "enable": false, "ssid2g": "", "ssid5g": "", "password": "", "isolation": true, "bandwidth": { "downMbps": 30, "upMbps": 10 }, "schedule": { "mode": "always|range", "from": "08:00", "to": "22:00" } }
+    "guest": { "enable": false, "ssid2g": "", "ssid5g": "", "password": "", "isolation": true, "bandwidth": { "downMbps": 30, "upMbps": 10 }, "schedule": { "mode": "always|range", "from": "08:00", "to": "22:00" } },
+    "bridgeToLan": true  // AP 接口桥接至 br-lan；访客通过 BSS 隔离 + 防火墙阻断访问 br-lan
   },
   "dns": { "upstreams": ["223.5.5.5", "119.29.29.29"], "domain": "lan" },
   "firewall": { "enable": true, "wanInput": "drop", "lanAllowTcp": [22, 53, 8080], "lanAllowUdp": [53, 67] },
@@ -88,11 +90,13 @@
 ## Apply 管道（关键路径）
 1) Validate
    - JSON Schema 校验 + 语义校验（IP 段/端口/冲突检测/范围检查）
+   - WiFi 能力校验：根据 `nl80211` 能力限制并发 AP / 频道组合；若 `AP≤1` 则只允许单 AP，并将访客作为 BSS（若硬件支持），否则禁用
 2) Atomic write
    - 写入 `config.json.tmp` → `fsync` → `rename()` 覆盖 `config.json`；同时记录作业条目
    - 维护 `last-good.json`（或版本指针）以便快速回退
 3) Generate runtime configs
-   - nftables（含 IPv6）/ dnsmasq / hostapd / ppp / sysctl / miniupnpd / cake 等
+   - nftables（含 IPv6）/ dnsmasq（DHCP+DNS 主后端）/ hostapd / ppp / sysctl / miniupnpd / cake 等
+   - WiFi AP 接口桥接入 `br-lan`；访客 SSID 通过 `bss`/`vap` 生成并启用客户端隔离与防火墙规则阻断访问 `br-lan`
    - 写入到 `/run/nixos-router/*.conf` 或 `/etc/...`（按 NixOS 约定），必要时生成 unit drop-in
 4) Reload/Restart
    - 优先 `reload`；不支持热加载时 `restart`；保持串行顺序与依赖（例如：先网络后服务）
@@ -252,4 +256,10 @@ type CoreRegistry interface {
 - 好处
   - 职责清晰、边界明确；后续替换/增强任一模块不影响核心与其他模块
   - 第三方仅需遵守合同与能力声明，即可新增业务能力（例如广告过滤、VPN、报表等）
+
+### WiFi 设计要点（能力驱动并发 + 单一 LAN）
+- 单一 LAN：主 WiFi SSID 的 AP 接口桥接进 `br-lan`，与有线同网段/同 DHCP（dnsmasq）/同 DNS
+- 能力探测：后端基于 `nl80211`/`iw` 获取接口组合与 AP/BSS 能力，作为 UI 与校验的依据
+- 单 AP 设备（如 MT7927 `AP≤1`）：仅暴露单 AP；访客网络以附加 BSS 形式呈现（若硬件允许 BSS），否则禁用
+- 多 AP/DBDC 设备：可同时启用 2.4G + 5G，或同频多 SSID；频道/带宽组合受硬件与监管域约束
 

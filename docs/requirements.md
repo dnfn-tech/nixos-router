@@ -43,7 +43,7 @@
   - 静态绑定（MAC → 固定 IP），支持池外优先
 - DNS：上游服务器列表、内网域名（search/domain）
 - 防火墙：WAN 入站默认拒绝；LAN 服务端口放行；端口转发（DNAT）；UPnP（开关与映射查看）
-- WiFi：2.4/5 GHz AP；访客 WiFi（隔离，带宽/时段可选）；无无线硬件时整页禁用
+- WiFi：与有线同一逻辑 LAN（无线 AP 接口桥接入 `br-lan`，同网段/同 DHCP/DNS）；能力驱动的并发模型：根据硬件 `nl80211` 能力自动裁剪（如仅支持 `AP≤1` 则单 AP；若支持 DBDC/多 AP 则可并发 2.4G+5G）；访客 WiFi 默认通过 BSS（多 SSID）与客户端隔离/防火墙阻断访问 `br-lan`；无无线硬件时整页禁用
 - 设备：在线列表、改名、拉黑、跳转至限速/静态绑定
 - 家长控制：按设备/组的周历时段规则；“立即断网/放行”动作
 - QoS：全局上下行带宽；按设备优先级/限速（示例：cake/fq_codel）
@@ -51,6 +51,7 @@
 - IPv6：WAN DHCPv6/SLAAC/PPPoE+IPv6；LAN PD/RA；必要 ICMPv6 放行
 - SSH：启用、密码/root 登录开关、wheel 免密 sudo
 - 系统：修改密码、备份/恢复（`config.json` 或完整包 `config.json+state.db`）、审计、重启
+- DHCP/DNS 后端：以 dnsmasq 为主（提供 DHCP 池、静态绑定、内网域名与上游转发）；不引入 Kea 作为 v1 路径
 
 ## 保存/应用 UX 状态机
 - 状态
@@ -73,6 +74,7 @@
 
 ## 非功能性要求
 - 可扩展性：后端采用“稳定核心 + 模块/插件”架构。核心提供配置注册、作业队列、审计、会话与机密存取等通用能力；功能以模块化实现（WAN/LAN/WiFi/Firewall/QoS/Parental/DDNS/IPv6 等作为内置模块），并预留第三方插件扩展（`config.json` 中 `plugins.<id>` 命名空间、统一 apply 钩子）。首版可通过重启服务完成启用/禁用（冷加载），后续再演进热加载。
+- 能力驱动：WiFi 页面/后端根据无线芯片 `nl80211` 接口组合能力裁剪选项（是否单 AP、是否并发 2.4+5G、是否支持 BSS 访客），禁止生成硬件不支持的配置。
 
 ## 里程碑（建议分期）
 1) 基础 schema 与只读 UI
@@ -99,4 +101,5 @@
 - 设计摘要：《DESIGN-BRIEF》
 - 交互原型：`docs/prototypes/index.html`（可选随仓库提供）
 - 存储选型：`docs/storage-choice.md`（开放 PR 已提供）
+- 目标主机说明：`docs/target-host-notes.md`（首批对象机型迁移方向）
 
