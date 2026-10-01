@@ -9,6 +9,139 @@
     return url.searchParams.get(name);
   }
 
+  async function renderPlugins() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+
+    // Load from API and config
+    const [base, listResp] = await Promise.all([
+      loadConfigCached(false),
+      fetchJson("/api/v1/plugins").catch(() => ({})),
+    ]);
+    const draftPlugins = deepClone(base.plugins || {});
+    const list = Array.isArray(listResp) ? listResp : (listResp?.plugins || []);
+    const card = document.createElement("div");
+    card.className = "card";
+    const body = document.createElement("div");
+    card.innerHTML = `<h3>插件管理</h3>`;
+
+    if (!Array.isArray(list) || list.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "muted";
+      empty.textContent = "未提供插件列表";
+      card.appendChild(empty);
+    } else {
+      list.forEach((p) => {
+        const name = p?.name || p?.id || p?.key;
+        if (!name) return;
+        const enabled = !!(p?.enabled ?? draftPlugins?.[name]?.enable);
+        if (!draftPlugins[name]) draftPlugins[name] = { enable: enabled, config: {} };
+        const row = document.createElement("div");
+        row.className = "form-row";
+        const lab = document.createElement("label");
+        lab.textContent = name;
+        const chk = createInput("checkbox", { checked: enabled });
+        chk.addEventListener("change", () => {
+          draftPlugins[name].enable = chk.checked;
+          markDirty();
+        });
+        row.appendChild(lab);
+        row.appendChild(chk);
+        body.appendChild(row);
+      });
+      card.appendChild(body);
+    }
+    const hint = document.createElement("div");
+    hint.className = "muted small mt8";
+    hint.textContent = "切换启用状态后保存。保存成功将刷新导航。核心内置页面只读列出，不在此处开关。";
+    card.appendChild(hint);
+    grid.appendChild(card);
+
+    mountUxBar(content, {
+      onSave: async () => {
+        const res = await saveSection("plugins", draftPlugins, { andGenerate: false });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        else { await loadNav(); setActiveLink(); }
+      },
+      onSaveAndGenerate: async () => {
+        const res = await saveSection("plugins", draftPlugins, { andGenerate: true });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        else { await loadNav(); setActiveLink(); alert("已保存并提交生成任务（不应用运行态）"); }
+      },
+    });
+  }
+
+  async function renderPluginGeneric(name) {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    const cfg = await loadConfigCached(false);
+    const plug = deepClone((cfg.plugins || {})[name] || null);
+    if (!plug) {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `<h3>插件 ${escapeHtml(name)}</h3><p class="muted">插件未启用或未提供配置</p>`;
+      grid.appendChild(card);
+      return;
+    }
+    if (!plug.config) plug.config = {};
+    const card = document.createElement("div");
+    card.className = "card";
+    const form = document.createElement("div");
+    form.className = "form";
+    const chk = createInput("checkbox", { checked: !!plug.enable });
+    chk.addEventListener("change", () => { plug.enable = chk.checked; markDirty(); });
+    form.appendChild(createRow("启用插件", chk));
+    // Render known simple KV editor for generic maps
+    Object.entries(plug.config).forEach(([k, v]) => {
+      const isSecret = /password|psk|secret|token/i.test(k);
+      const input = createInput(isSecret ? "password" : "text", { value: isSecret ? "****" : (v ?? "") });
+      input.addEventListener("input", () => { plug.config[k] = input.value; markDirty(); });
+      form.appendChild(createRow(k, input));
+    });
+    const addK = createInput("text", { placeholder: "键名" });
+    const addV = createInput("text", { placeholder: "键值" });
+    const addBtn = document.createElement("button");
+    addBtn.className = "btn";
+    addBtn.textContent = "新增键";
+    addBtn.addEventListener("click", () => {
+      const k = addK.value.trim();
+      if (!k) return;
+      plug.config[k] = addV.value;
+      addK.value = ""; addV.value = "";
+      markDirty();
+      // simple rerender append
+      const isSecret = /password|psk|secret|token/i.test(k);
+      const input = createInput(isSecret ? "password" : "text", { value: isSecret ? "****" : (plug.config[k] ?? "") });
+      input.addEventListener("input", () => { plug.config[k] = input.value; markDirty(); });
+      form.appendChild(createRow(k, input));
+    });
+    const addRow = document.createElement("div");
+    addRow.className = "form-row";
+    addRow.appendChild(addK);
+    addRow.appendChild(addV);
+    addRow.appendChild(addBtn);
+    form.appendChild(addRow);
+    card.appendChild(form);
+    grid.appendChild(card);
+
+    mountUxBar(content, {
+      onSave: async () => {
+        const res = await saveSection(`plugins.${name}`, plug, { andGenerate: false });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        else alert("已保存");
+      },
+      onSaveAndGenerate: async () => {
+        const res = await saveSection(`plugins.${name}`, plug, { andGenerate: true });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        else alert("已保存并提交生成任务（不应用运行态）");
+      },
+    });
+  }
+
 async function renderWiFi() {
   const content = clearMain();
   const grid = document.createElement("div");
@@ -275,6 +408,216 @@ async function renderSSH() {
       else alert("已保存并提交生成任务（不应用运行态）");
     },
   });
+  }
+
+  async function renderDDNS() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    const base = await loadConfigCached(false);
+    const draft = deepClone(base.ddns || { provider: "", account: "", password: "****", apiToken: "****", domain: "", hostname: "" });
+    const card = document.createElement("div");
+    card.className = "card";
+    const form = document.createElement("div");
+    form.className = "form";
+    const inProv = createInput("text", { value: draft.provider || "" });
+    inProv.addEventListener("input", () => { draft.provider = inProv.value.trim(); markDirty(); });
+    form.appendChild(createRow("服务提供商", inProv));
+    const inAcc = createInput("text", { value: draft.account || "" });
+    inAcc.addEventListener("input", () => { draft.account = inAcc.value.trim(); markDirty(); });
+    form.appendChild(createRow("账号", inAcc));
+    const inPwd = createInput("password", { value: "****" });
+    inPwd.addEventListener("input", () => { draft.password = inPwd.value; markDirty(); });
+    form.appendChild(createRow("密码（未更改留空或 ****）", inPwd));
+    const inTok = createInput("password", { value: "****" });
+    inTok.addEventListener("input", () => { draft.apiToken = inTok.value; markDirty(); });
+    form.appendChild(createRow("API Token（未更改留空或 ****）", inTok));
+    const inDom = createInput("text", { value: draft.domain || "" });
+    inDom.addEventListener("input", () => { draft.domain = inDom.value.trim(); markDirty(); });
+    form.appendChild(createRow("域名", inDom));
+    const inHost = createInput("text", { value: draft.hostname || "" });
+    inHost.addEventListener("input", () => { draft.hostname = inHost.value.trim(); markDirty(); });
+    form.appendChild(createRow("主机名", inHost));
+    card.appendChild(form);
+    grid.appendChild(card);
+
+    mountUxBar(content, {
+      onSave: async () => {
+        const res = await saveSection("ddns", draft, { andGenerate: false });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+      },
+      onSaveAndGenerate: async () => {
+        const res = await saveSection("ddns", draft, { andGenerate: true });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        else alert("已保存并提交生成任务（不应用运行态）");
+      },
+    });
+  }
+
+  async function renderQoS() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    const base = await loadConfigCached(false);
+    const draft = deepClone(base.qos || { enable: false, uploadKbps: 0, downloadKbps: 0, rules: [] });
+    if (!Array.isArray(draft.rules)) draft.rules = [];
+
+    const card = document.createElement("div");
+    card.className = "card";
+    const form = document.createElement("div");
+    form.className = "form";
+    const chk = createInput("checkbox", { checked: !!draft.enable });
+    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
+    form.appendChild(createRow("启用 QoS", chk));
+    const inUp = createInput("number", { value: draft.uploadKbps || 0, min: 0 });
+    inUp.addEventListener("input", () => { draft.uploadKbps = Number(inUp.value || 0); markDirty(); });
+    form.appendChild(createRow("上行带宽（kbps）", inUp));
+    const inDown = createInput("number", { value: draft.downloadKbps || 0, min: 0 });
+    inDown.addEventListener("input", () => { draft.downloadKbps = Number(inDown.value || 0); markDirty(); });
+    form.appendChild(createRow("下行带宽（kbps）", inDown));
+    card.appendChild(form);
+    grid.appendChild(card);
+
+    const rulesEditor = createArrayEditor({
+      title: "设备规则（rules）",
+      items: () => draft.rules,
+      renderItem: (r, idx) => {
+        const w = document.createElement("div");
+        const inDev = createInput("text", { value: r?.device || r?.mac || r?.ip || "" });
+        inDev.addEventListener("input", () => { draft.rules[idx].device = inDev.value.trim(); markDirty(); });
+        const inUpK = createInput("number", { value: r?.upKbps || 0, min: 0 });
+        inUpK.addEventListener("input", () => { draft.rules[idx].upKbps = Number(inUpK.value || 0); markDirty(); });
+        const inDownK = createInput("number", { value: r?.downKbps || 0, min: 0 });
+        inDownK.addEventListener("input", () => { draft.rules[idx].downKbps = Number(inDownK.value || 0); markDirty(); });
+        const inPri = createSelect([["low","低"],["normal","普通"],["high","高"]], r?.priority || "normal");
+        inPri.addEventListener("change", () => { draft.rules[idx].priority = inPri.value; markDirty(); });
+        w.appendChild(createRow("设备（MAC/IP）", inDev));
+        w.appendChild(createRow("上行（kbps）", inUpK));
+        w.appendChild(createRow("下行（kbps）", inDownK));
+        w.appendChild(createRow("优先级", inPri));
+        return w;
+      },
+      onAdd: () => { draft.rules.push({ device: "", upKbps: 0, downKbps: 0, priority: "normal" }); },
+    });
+    grid.appendChild(rulesEditor);
+
+    mountUxBar(content, {
+      onSave: async () => {
+        const res = await saveSection("qos", draft, { andGenerate: false });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+      },
+      onSaveAndGenerate: async () => {
+        const res = await saveSection("qos", draft, { andGenerate: true });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        else alert("已保存并提交生成任务（不应用运行态）");
+      },
+    });
+  }
+
+  async function renderParental() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    const base = await loadConfigCached(false);
+    const draft = deepClone(base.parental || { enable: false, rules: [] });
+    if (!Array.isArray(draft.rules)) draft.rules = [];
+    const card = document.createElement("div");
+    card.className = "card";
+    const form = document.createElement("div");
+    form.className = "form";
+    const chk = createInput("checkbox", { checked: !!draft.enable });
+    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
+    form.appendChild(createRow("启用家长控制", chk));
+    card.appendChild(form);
+    grid.appendChild(card);
+
+    const rulesEditor = createArrayEditor({
+      title: "规则（仅占位）",
+      items: () => draft.rules,
+      renderItem: (r, idx) => {
+        const w = document.createElement("div");
+        const inName = createInput("text", { value: r?.name || "" });
+        inName.addEventListener("input", () => { draft.rules[idx].name = inName.value.trim(); markDirty(); });
+        const inDev = createInput("text", { value: r?.device || "" });
+        inDev.addEventListener("input", () => { draft.rules[idx].device = inDev.value.trim(); markDirty(); });
+        const inDays = createInput("text", { value: r?.days || "Mon-Fri" });
+        inDays.addEventListener("input", () => { draft.rules[idx].days = inDays.value.trim(); markDirty(); });
+        const inStart = createInput("text", { value: r?.start || "21:00" });
+        inStart.addEventListener("input", () => { draft.rules[idx].start = inStart.value.trim(); markDirty(); });
+        const inEnd = createInput("text", { value: r?.end || "07:00" });
+        inEnd.addEventListener("input", () => { draft.rules[idx].end = inEnd.value.trim(); markDirty(); });
+        w.appendChild(createRow("名称", inName));
+        w.appendChild(createRow("设备", inDev));
+        w.appendChild(createRow("天（示例 Mon-Fri）", inDays));
+        w.appendChild(createRow("开始时间", inStart));
+        w.appendChild(createRow("结束时间", inEnd));
+        return w;
+      },
+      onAdd: () => { draft.rules.push({ name: "", device: "", days: "Mon-Fri", start: "21:00", end: "07:00" }); },
+    });
+    grid.appendChild(rulesEditor);
+
+    mountUxBar(content, {
+      onSave: async () => {
+        const res = await saveSection("parental", draft, { andGenerate: false });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+      },
+      onSaveAndGenerate: async () => {
+        const res = await saveSection("parental", draft, { andGenerate: true });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        else alert("已保存并提交生成任务（不应用运行态）");
+      },
+    });
+  }
+
+  async function renderIPv6() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    const base = await loadConfigCached(false);
+    const draft = deepClone(base.ipv6 || { enable: false, wan: { mode: "auto", addressCidr: "" }, lan: { enable: true, prefix: "" } });
+    if (!draft.wan) draft.wan = { mode: "auto", addressCidr: "" };
+    if (!draft.lan) draft.lan = { enable: true, prefix: "" };
+    const card = document.createElement("div");
+    card.className = "card";
+    const form = document.createElement("div");
+    form.className = "form";
+    const chk = createInput("checkbox", { checked: !!draft.enable });
+    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
+    form.appendChild(createRow("启用 IPv6", chk));
+    const selWan = createSelect([["auto","自动"],["static","静态"]], draft.wan.mode || "auto");
+    selWan.addEventListener("change", () => { draft.wan.mode = selWan.value; markDirty(); refresh(); });
+    form.appendChild(createRow("WAN 模式", selWan));
+    const inWanCIDR = createInput("text", { value: draft.wan.addressCidr || "" });
+    inWanCIDR.addEventListener("input", () => { draft.wan.addressCidr = inWanCIDR.value.trim(); markDirty(); });
+    const rowWanCIDR = createRow("WAN 静态地址/CIDR", inWanCIDR);
+    form.appendChild(rowWanCIDR);
+    const chkLan = createInput("checkbox", { checked: !!draft.lan.enable });
+    chkLan.addEventListener("change", () => { draft.lan.enable = chkLan.checked; markDirty(); });
+    form.appendChild(createRow("LAN 启用 IPv6", chkLan));
+    const inPrefix = createInput("text", { value: draft.lan.prefix || "" , placeholder: "fd00::/64"});
+    inPrefix.addEventListener("input", () => { draft.lan.prefix = inPrefix.value.trim(); markDirty(); });
+    form.appendChild(createRow("LAN 前缀/RA", inPrefix));
+    card.appendChild(form);
+    grid.appendChild(card);
+    function refresh() { rowWanCIDR.style.display = (selWan.value === "static") ? "" : "none"; }
+    refresh();
+
+    mountUxBar(content, {
+      onSave: async () => {
+        const res = await saveSection("ipv6", draft, { andGenerate: false });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+      },
+      onSaveAndGenerate: async () => {
+        const res = await saveSection("ipv6", draft, { andGenerate: true });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        else alert("已保存并提交生成任务（不应用运行态）");
+      },
+    });
   }
 
   async function renderSystem() {
@@ -550,6 +893,10 @@ async function renderSSH() {
       { id: "firewall", label: "防火墙", path: "#/firewall" },
       { id: "ssh", label: "SSH", path: "#/ssh" },
       { id: "system", label: "系统", path: "#/system" },
+      { id: "ddns", label: "DDNS", path: "#/ddns" },
+      { id: "qos", label: "QoS", path: "#/qos" },
+      { id: "parental", label: "家长控制", path: "#/parental" },
+      { id: "ipv6", label: "IPv6", path: "#/ipv6" },
       { id: "plugins", label: "插件", path: "#/plugins" },
     ],
   };
@@ -906,7 +1253,17 @@ async function renderSSH() {
       "firewall": "防火墙",
       "ssh": "SSH",
       "system": "系统",
+      "ddns": "DDNS",
+      "qos": "QoS",
+      "parental": "家长控制",
+      "ipv6": "IPv6",
       "plugins": "插件",
+      "adblock": "广告拦截",
+      "traffic": "流量监控",
+      "mihomo": "Mihomo",
+      "vlan": "VLAN",
+      "tailscale": "Tailscale",
+      "zerotier": "ZeroTier",
     };
     return map[id] || id;
   }
@@ -1317,7 +1674,18 @@ async function renderLAN() {
     "firewall": () => renderFirewall(),
     "ssh": () => renderSSH(),
     "system": () => renderSystem(),
-    "plugins": () => renderPlaceholder("plugins"),
+    "plugins": () => renderPlugins(),
+    "ddns": () => renderDDNS(),
+    "qos": () => renderQoS(),
+    "parental": () => renderParental(),
+    "ipv6": () => renderIPv6(),
+    // Plugin-specific top-level routes
+    "adblock": () => renderPluginAdblock(),
+    "traffic": () => renderPluginTraffic(),
+    "mihomo": () => renderPluginMihomo(),
+    "vlan": () => renderPluginVlan(),
+    "tailscale": () => renderPluginTailscale(),
+    "zerotier": () => renderPluginZerotier(),
   };
 
   function currentRoute() {
@@ -1331,6 +1699,12 @@ async function renderLAN() {
     }
     setActiveLink();
     const id = currentRoute();
+    // Support generic plugin route: #/plugins/<name>
+    if (id.startsWith("plugins/")) {
+      const name = id.split("/")[1] || "";
+      await renderPluginGeneric(name);
+      return;
+    }
     const fn = routes[id] || (() => renderPlaceholder(id));
     await fn();
   }
@@ -1455,6 +1829,179 @@ async function renderLAN() {
     } else {
       showLoginView();
     }
+  }
+
+  // Plugin specific pages (typed where reasonable; otherwise fallback to generic)
+  async function renderPluginAdblock() {
+    return renderPluginGeneric("adblock");
+  }
+  async function renderPluginTraffic() {
+    return renderPluginGeneric("traffic");
+  }
+  async function renderPluginMihomo() {
+    return renderPluginGeneric("mihomo");
+  }
+  async function renderPluginVlan() {
+    const cfg = await loadConfigCached(false);
+    const plug = deepClone((cfg.plugins || {})["vlan"] || null);
+    if (!plug || !plug.config) return renderPluginGeneric("vlan");
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    const draft = plug;
+    if (!Array.isArray(draft.config.vlans)) draft.config.vlans = [];
+    const card = document.createElement("div");
+    card.className = "card";
+    const form = document.createElement("div");
+    form.className = "form";
+    const chk = createInput("checkbox", { checked: !!draft.enable });
+    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
+    form.appendChild(createRow("启用插件", chk));
+    card.appendChild(form);
+    grid.appendChild(card);
+    const vlEditor = createArrayEditor({
+      title: "VLAN 列表",
+      items: () => draft.config.vlans,
+      renderItem: (v, idx) => {
+        const w = document.createElement("div");
+        const inId = createInput("number", { value: v?.id || 0, min: 1, max: 4094 });
+        inId.addEventListener("input", () => { draft.config.vlans[idx].id = Number(inId.value || 0); markDirty(); });
+        const inIface = createInput("text", { value: v?.iface || "" });
+        inIface.addEventListener("input", () => { draft.config.vlans[idx].iface = inIface.value.trim(); markDirty(); });
+        const inCIDR = createInput("text", { value: v?.cidr || "" });
+        inCIDR.addEventListener("input", () => { draft.config.vlans[idx].cidr = inCIDR.value.trim(); markDirty(); });
+        w.appendChild(createRow("VLAN ID", inId));
+        w.appendChild(createRow("接口", inIface));
+        w.appendChild(createRow("子网 CIDR", inCIDR));
+        return w;
+      },
+      onAdd: () => { draft.config.vlans.push({ id: 10, iface: "", cidr: "" }); },
+    });
+    grid.appendChild(vlEditor);
+    mountUxBar(content, {
+      onSave: async () => {
+        const res = await saveSection("plugins.vlan", draft, { andGenerate: false });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+      },
+      onSaveAndGenerate: async () => {
+        const res = await saveSection("plugins.vlan", draft, { andGenerate: true });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        else alert("已保存并提交生成任务（不应用运行态）");
+      },
+    });
+  }
+  async function renderPluginTailscale() {
+    const cfg = await loadConfigCached(false);
+    const plug = deepClone((cfg.plugins || {})["tailscale"] || null);
+    if (!plug || !plug.config) return renderPluginGeneric("tailscale");
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    const draft = plug;
+    const card = document.createElement("div");
+    card.className = "card";
+    const form = document.createElement("div");
+    form.className = "form";
+    const chk = createInput("checkbox", { checked: !!draft.enable });
+    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
+    form.appendChild(createRow("启用插件", chk));
+    const selMode = createSelect([["official","官方"],["selfhost","自建"],["headscale","Headscale"]], draft.config.mode || "official");
+    selMode.addEventListener("change", () => { draft.config.mode = selMode.value; markDirty(); refreshT(); });
+    form.appendChild(createRow("模式", selMode));
+    const inLogin = createInput("text", { value: draft.config.loginServer || "" , placeholder: "https://login.tailscale.com"});
+    inLogin.addEventListener("input", () => { draft.config.loginServer = inLogin.value.trim(); markDirty(); });
+    const rowLogin = createRow("登录服务器", inLogin);
+    const inHS = createInput("text", { value: draft.config.headscaleUrl || "" , placeholder: "https://headscale.example.com"});
+    inHS.addEventListener("input", () => { draft.config.headscaleUrl = inHS.value.trim(); markDirty(); });
+    const rowHS = createRow("Headscale URL", inHS);
+    const inKey = createInput("password", { value: "****" });
+    inKey.addEventListener("input", () => { draft.config.authKey = inKey.value; markDirty(); });
+    const rowKey = createRow("AuthKey（未更改留空或 ****）", inKey);
+    form.appendChild(rowLogin);
+    form.appendChild(rowHS);
+    form.appendChild(rowKey);
+    card.appendChild(form);
+    grid.appendChild(card);
+    function refreshT() {
+      const m = selMode.value;
+      rowLogin.style.display = (m === "official" || m === "selfhost") ? "" : "none";
+      rowHS.style.display = (m === "headscale") ? "" : "none";
+    }
+    refreshT();
+    mountUxBar(content, {
+      onSave: async () => {
+        const res = await saveSection("plugins.tailscale", draft, { andGenerate: false });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+      },
+      onSaveAndGenerate: async () => {
+        const res = await saveSection("plugins.tailscale", draft, { andGenerate: true });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        else alert("已保存并提交生成任务（不应用运行态）");
+      },
+    });
+  }
+  async function renderPluginZerotier() {
+    const cfg = await loadConfigCached(false);
+    const plug = deepClone((cfg.plugins || {})["zerotier"] || null);
+    if (!plug || !plug.config) return renderPluginGeneric("zerotier");
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    const draft = plug;
+    if (!Array.isArray(draft.config.networks)) draft.config.networks = [];
+    const card = document.createElement("div");
+    card.className = "card";
+    const form = document.createElement("div");
+    form.className = "form";
+    const chk = createInput("checkbox", { checked: !!draft.enable });
+    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
+    form.appendChild(createRow("启用插件", chk));
+    const selCP = createSelect([["public","公共"],["private","私有"]], draft.config.controlPlane || "public");
+    selCP.addEventListener("change", () => { draft.config.controlPlane = selCP.value; markDirty(); refreshZ(); });
+    form.appendChild(createRow("控制平面", selCP));
+    const inCtrl = createInput("text", { value: draft.config.controllerUrl || "" });
+    inCtrl.addEventListener("input", () => { draft.config.controllerUrl = inCtrl.value.trim(); markDirty(); });
+    const rowCtrl = createRow("控制器 URL", inCtrl);
+    const inTok = createInput("password", { value: "****" });
+    inTok.addEventListener("input", () => { draft.config.apiToken = inTok.value; markDirty(); });
+    const rowTok = createRow("API Token（未更改留空或 ****）", inTok);
+    form.appendChild(rowCtrl);
+    form.appendChild(rowTok);
+    card.appendChild(form);
+    grid.appendChild(card);
+    const nets = createArrayEditor({
+      title: "加入网络（networks）",
+      items: () => draft.config.networks,
+      renderItem: (n, idx) => {
+        const w = document.createElement("div");
+        const inId = createInput("text", { value: n?.id || "" , placeholder: "16位网络ID"});
+        inId.addEventListener("input", () => { draft.config.networks[idx].id = inId.value.trim(); markDirty(); });
+        w.appendChild(createRow("网络 ID", inId));
+        return w;
+      },
+      onAdd: () => { draft.config.networks.push({ id: "" }); },
+    });
+    grid.appendChild(nets);
+    function refreshZ() {
+      const isPriv = selCP.value === "private";
+      rowCtrl.style.display = isPriv ? "" : "none";
+      rowTok.style.display = isPriv ? "" : "none";
+    }
+    refreshZ();
+    mountUxBar(content, {
+      onSave: async () => {
+        const res = await saveSection("plugins.zerotier", draft, { andGenerate: false });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+      },
+      onSaveAndGenerate: async () => {
+        const res = await saveSection("plugins.zerotier", draft, { andGenerate: true });
+        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        else alert("已保存并提交生成任务（不应用运行态）");
+      },
+    });
   }
 
   // Start

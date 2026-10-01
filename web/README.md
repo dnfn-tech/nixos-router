@@ -52,6 +52,7 @@ WebUI 会从以下位置确定后端 API 基址（优先级从高到低）：
 - 系统（#/system）：编辑 `config.system`（hostname、timezone），展示 `health/status` 摘要
 - 系统页附带“生成配置（不应用运行态）”：点击调用 `POST /api/v1/apply`，展示返回的 `jobId/mode/appliedRuntime`，并查询 `GET /api/v1/jobs/{id}` 显示状态/错误。说明：当前仅生成到服务端 stateDir，不会重载网络服务
 - 客户端（#/clients）：若后端提供 `GET /api/v1/clients` 则展示；否则明确标注“接口尚未提供”
+- 插件管理（#/plugins）：从 `GET /api/v1/plugins` 列表加载，切换启用状态并保存到 `config.plugins.*.enable`；保存后刷新导航。插件详情页（如 `#/tailscale`/`#/zerotier` 等）在插件启用且后端导航提供时可直接进入；若未提供配置则以“未提供”提示并禁用保存
 - 登录页：用户名/密码，错误提示，提交调用 `POST /api/v1/session`
 - 401 统一处理：自动返回登录页
 - 侧栏“退出”：调用 `DELETE /api/v1/session`
