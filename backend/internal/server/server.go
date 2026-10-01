@@ -72,12 +72,19 @@ type Options struct {
 type CommandRunner interface {
 	LookPath(name string) error
 	Run(name string, args ...string) error
+	// Output executes a command and returns its stdout as string.
+	Output(name string, args ...string) (string, error)
 }
 
 type defaultRunner struct{}
 
 func (defaultRunner) LookPath(name string) error { _, err := exec.LookPath(name); return err }
 func (defaultRunner) Run(name string, args ...string) error { return execRun(name, args...) }
+func (defaultRunner) Output(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
 
 type ifacePrev struct {
 	rxBytes uint64
@@ -528,6 +535,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	srcs["clients"] = clientsSource
 	// WiFi source (stub for now)
 	srcs["wifi"] = "stub"
+	// Units (core + plugins): best-effort via systemctl
+	units, unitsSource := s.collectUnitStatuses()
+	if unitsSource != "" {
+		srcs["units"] = unitsSource
+	}
 	// Last apply job summary if db present
 	var lastApply map[string]interface{}
 	if s.db != nil && s.db.SQL != nil {
@@ -613,12 +625,88 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"enabled":  s.cfg.DDNS.Enable,
 			"provider": s.cfg.DDNS.Provider,
 		},
+		"units": units,
 		"sources": srcs,
 	}
 	if lastApply != nil {
 		resp["lastApply"] = lastApply
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// collectUnitStatuses queries known core/plugin units through systemctl (when present).
+// Returns list and a source marker: "systemctl" or "stub".
+func (s *Server) collectUnitStatuses() ([]map[string]string, string) {
+	known := []struct {
+		id   string
+		unit string
+	}{
+		// Core
+		{"dnsmasq", "dnsmasq.service"},
+		{"nftables", "nftables.service"},
+		{"hostapd", "hostapd.service"},
+	}
+	// Plugins
+	// mihomo (clash/Clash.Meta family commonly packaged as mihomo.service)
+	known = append(known,
+		struct{ id, unit string }{"mihomo", "mihomo.service"},
+		struct{ id, unit string }{"tailscaled", "tailscaled.service"},
+		struct{ id, unit string }{"zerotier-one", "zerotier-one.service"},
+	)
+	// headscale only when relevant (tailscale controlPlane=headscale)
+	if pc, ok := s.cfg.Plugins["tailscale"]; ok {
+		if cp, _ := pc.Config["controlPlane"].(string); strings.EqualFold(cp, "headscale") {
+			known = append(known, struct{ id, unit string }{"headscale", "headscale.service"})
+		}
+	}
+	// If systemctl is absent, return stub states
+	if err := s.runner.LookPath("systemctl"); err != nil {
+		out := make([]map[string]string, 0, len(known))
+		for _, k := range known {
+			out = append(out, map[string]string{
+				"id":    k.id,
+				"unit":  k.unit,
+				"state": "unknown",
+			})
+		}
+		return out, "stub"
+	}
+	// Query is-active for each unit
+	mapState := func(stdout string, err error) string {
+		if err != nil {
+			// When unit missing, many systemd return codes set stderr; treat as missing
+			// Prefer to classify as "missing" instead of "inactive" for clarity
+			low := strings.ToLower(stdout)
+			if strings.Contains(low, "not-found") || strings.Contains(low, "not found") {
+				return "missing"
+			}
+			return "missing"
+		}
+		s := strings.ToLower(strings.TrimSpace(stdout))
+		switch s {
+		case "active":
+			return "active"
+		case "inactive":
+			return "inactive"
+		case "failed":
+			return "failed"
+		default:
+			// activating/deactivating/unknown etc.
+			return "unknown"
+		}
+	}
+	out := make([]map[string]string, 0, len(known))
+	for _, k := range known {
+		stdout, err := s.runner.Output("systemctl", "is-active", k.unit)
+		state := mapState(stdout, err)
+		// Special-case: when systemctl is present but unit truly not found, err likely non-nil and stdout empty.
+		out = append(out, map[string]string{
+			"id":    k.id,
+			"unit":  k.unit,
+			"state": state,
+		})
+	}
+	return out, "systemctl"
 }
 
 func (s *Server) handleUINav(w http.ResponseWriter, r *http.Request) {

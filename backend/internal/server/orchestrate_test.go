@@ -34,6 +34,10 @@ func (f *fakeRunner) Run(name string, args ...string) error {
 	}
 	return nil
 }
+func (f *fakeRunner) Output(name string, args ...string) (string, error) {
+	// Not used in these tests
+	return "", nil
+}
 
 func TestNoSystemctlWhenApplyReloadDisabled(t *testing.T) {
 	srv, _, cookies, cleanup := setupApplyEnv(t, true)
