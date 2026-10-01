@@ -84,20 +84,25 @@
 - 目标：通过 Tailscale 提供远程接入/overlay 网络能力（可选），谨慎发布局域网路由
 - 配置：`plugins.tailscale`（例如）
   - `enabled`：是否启用
+  - `controlPlane`：`official | selfhost`（自建控制面使用 Headscale）
+  - `loginServer`：当 `controlPlane=selfhost` 时必填（Headscale URL，如 `https://headscale.example.com`）
   - `authKey`：可选一次性授权秘钥（建议通过机密存储而非明文）
   - `advertiseRoutes[]`：对外通告的 CIDR（如 `192.168.88.0/24`），需配合防火墙策略
   - `acceptRoutes`：是否接受来自管理面的路由下发
   - `userspaceNetworking`：可选（视设备能力）
 - UI：侧栏“网络服务”分组新增“Tailscale”，管理启用/登录状态/路由通告
-- Apply：管理 `tailscaled`/`tailscale up`，根据配置通告/接受路由；nftables 放行必要流量；禁用时停止服务并撤销路由
+- Apply：管理 `tailscaled`/`tailscale up`（当 `selfhost` 时追加 `--login-server=$loginServer`），根据配置通告/接受路由；nftables 放行必要流量；禁用时停止服务并撤销路由
 
 ### Zerotier（可选远程接入）
 - 目标：通过 Zerotier 提供 overlay 网络能力（可选），谨慎加入网络与路由通告
 - 配置：`plugins.zerotier`（例如）
   - `enabled`：是否启用
+  - `controlPlane`：`official | selfhost`
+  - `controllerUrl`：当 `controlPlane=selfhost` 时用于指向自建控制器的 API/控制端点
+  - `apiToken`：访问自建控制器所需凭据（建议机密存储）
   - `networks[]`：加入的网络 ID 列表
   - `managedRoutes[]`：需要通告/安装的路由（按网络）
   - `authToken`：可选，用于本机控制器交互（建议机密存储）
 - UI：侧栏“网络服务”分组新增“Zerotier”，管理启用/加入网络/路由
-- Apply：管理 `zerotier-one` 服务，加入/离开网络，按配置设置路由；nftables 放行必要流量；禁用时停止服务并撤销路由
+- Apply：管理 `zerotier-one` 服务，针对 `selfhost` 将客户端指向自建控制器并使用 `apiToken` 完成所需操作；加入/离开网络，按配置设置路由；nftables 放行必要流量；禁用时停止服务并撤销路由
 
