@@ -162,3 +162,42 @@ func (d *DB) DeleteSession(id string) error {
 	return err
 }
 
+type Job struct {
+	ID        string
+	Kind      string
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Payload   string
+	Error     string
+}
+
+func (d *DB) CreateJob(id, kind, payload string) error {
+	now := time.Now().Unix()
+	_, err := d.SQL.Exec(`INSERT INTO jobs (id, kind, status, created_at, updated_at, payload) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, kind, "running", now, now, payload)
+	return err
+}
+
+func (d *DB) UpdateJobStatus(id, status, errText string) error {
+	_, err := d.SQL.Exec(`UPDATE jobs SET status=?, updated_at=?, error=? WHERE id=?`,
+		status, time.Now().Unix(), errText, id)
+	return err
+}
+
+func (d *DB) GetJob(id string) (Job, bool, error) {
+	var j Job
+	var created, updated int64
+	err := d.SQL.QueryRow(`SELECT id, kind, status, created_at, updated_at, payload, error FROM jobs WHERE id=?`, id).
+		Scan(&j.ID, &j.Kind, &j.Status, &created, &updated, &j.Payload, &j.Error)
+	if err == sql.ErrNoRows {
+		return Job{}, false, nil
+	}
+	if err != nil {
+		return Job{}, false, err
+	}
+	j.CreatedAt = time.Unix(created, 0)
+	j.UpdatedAt = time.Unix(updated, 0)
+	return j, true, nil
+}
+

@@ -9,10 +9,12 @@ import (
 	"io/fs"
 	"net/http"
 	"net/netip"
+	"path/filepath"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+	"sync"
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/db"
@@ -39,6 +41,8 @@ type Server struct {
 	webDir      string  // when set, serve from local dir (dev override)
 	requireAuth bool
 	loginFails map[string][]time.Time
+	applyReload bool
+	applyMu     sync.Mutex
 }
 
 type Options struct {
@@ -50,6 +54,7 @@ type Options struct {
 	Version    string
 	WebFS      fs.FS
 	WebDir     string
+	ApplyReload bool
 }
 
 func New(opts Options) *Server {
@@ -65,6 +70,7 @@ func New(opts Options) *Server {
 		webDir:     strings.TrimSpace(opts.WebDir),
 		requireAuth: !opts.DevMode,
 		loginFails:  make(map[string][]time.Time),
+		applyReload: opts.ApplyReload,
 	}
 	if s.devMode {
 		// allow all for local-dev unless overridden
@@ -85,6 +91,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/capabilities/wifi", s.handleWifiCaps)
 	mux.HandleFunc("/api/v1/session", s.handleSession)
 	mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
+	mux.HandleFunc("/api/v1/apply", s.handleApply)
+	mux.HandleFunc("/api/v1/jobs/", s.handleJobByID)
+	mux.HandleFunc("/api/v1/jobs", s.handleJobs)
 	// Static UI for non-/api paths
 	mux.Handle("/", http.HandlerFunc(s.handleSPA))
 }
@@ -415,6 +424,163 @@ func keysOf(m map[string]interface{}) []string {
 type creds struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+// --- Jobs & Apply (generate-only) ---
+
+func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "listing not implemented yet"})
+}
+
+func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	j, ok, err := s.db.GetJob(id)
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id":        j.ID,
+		"kind":      j.Kind,
+		"status":    j.Status,
+		"createdAt": j.CreatedAt.UTC().Format(time.RFC3339),
+		"updatedAt": j.UpdatedAt.UTC().Format(time.RFC3339),
+		"payload":   j.Payload,
+		"error":     j.Error,
+	})
+}
+
+func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// ensure serial apply
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	user, _, ok := s.getSession(r)
+	if !ok && s.requireAuth {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	// Load current saved config.json for apply
+	cfg, err := config.LoadFromFile(s.cfgPath)
+	if err != nil {
+		// create failed job
+		jid := newSessionID()
+		_ = s.db.CreateJob(jid, "apply", `{"mode":"generate-only"}`)
+		_ = s.db.UpdateJobStatus(jid, "failed", "failed to load config: "+err.Error())
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "invalid_config", "jobId": jid})
+		return
+	}
+	// create running job
+	jid := newSessionID()
+	if err := s.db.CreateJob(jid, "apply", `{"mode":"generate-only"}`); err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	genDir := filepath.Join(s.stateDir, "generated")
+	if err := os.MkdirAll(genDir, 0o755); err != nil {
+		_ = s.db.UpdateJobStatus(jid, "failed", "mkdir generated: "+err.Error())
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"jobId": jid})
+		return
+	}
+	// generate fragments
+	if err := s.generateFragments(cfg, genDir); err != nil {
+		_ = s.db.UpdateJobStatus(jid, "failed", "generate: "+err.Error())
+		s.db.AddAudit(user, "apply", "generate-only failed: "+err.Error())
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "generate_failed", "jobId": jid})
+		return
+	}
+	// (Optional) reload stubs
+	if s.applyReload {
+		// Future: systemctl reload units
+	}
+	_ = s.db.UpdateJobStatus(jid, "success", "")
+	s.db.AddAudit(user, "apply", "generate-only success")
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"jobId":          jid,
+		"appliedRuntime": false,
+		"mode":           "generate-only",
+	})
+}
+
+func (s *Server) generateFragments(cfg config.Config, dir string) error {
+	// dnsmasq
+	var dhcpRange string
+	if cfg.LAN.DHCP.Enable {
+		if cfg.LAN.DHCP.LeaseMins <= 0 {
+			cfg.LAN.DHCP.LeaseMins = 1440
+		}
+		dhcpRange = fmt.Sprintf("dhcp-range=%s,%s,%dm", cfg.LAN.DHCP.RangeStart, cfg.LAN.DHCP.RangeEnd, cfg.LAN.DHCP.LeaseMins)
+	}
+	dns := "# Generated by routerd (generate-only)\n"
+	dns += "domain-needed\nbogus-priv\n"
+	dns += fmt.Sprintf("interface=%s\n", cfg.LAN.BridgeName)
+	if dhcpRange != "" {
+		dns += dhcpRange + "\n"
+	}
+	for _, up := range cfg.DNS.Upstreams {
+		dns += fmt.Sprintf("server=%s\n", up)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dnsmasq.conf.fragment"), []byte(dns), 0o644); err != nil {
+		return err
+	}
+	// nftables
+	nft := "# Generated by routerd (generate-only)\n"
+	nft += "table ip nat {\n  chain postrouting {\n    type nat hook postrouting priority 100; policy accept;\n"
+	if cfg.Firewall.NATEnabled {
+		ifName := cfg.WAN.Interface
+		if ifName == "" {
+			ifName = "wan0"
+		}
+		nft += fmt.Sprintf("    oifname \"%s\" masquerade\n", ifName)
+	} else {
+		nft += "    # NAT disabled\n"
+	}
+	nft += "  }\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "nftables.nft.fragment"), []byte(nft), 0o644); err != nil {
+		return err
+	}
+	// hostapd
+	host := "# Generated by routerd (generate-only)\n"
+	if cfg.WiFi.Enable && len(cfg.WiFi.APs) > 0 {
+		for i, ap := range cfg.WiFi.APs {
+			if !ap.Enable {
+				continue
+			}
+			iface := fmt.Sprintf("wlan%d", i)
+			host += fmt.Sprintf("interface=%s\nssid=%s\n", iface, ap.SSID)
+			if ap.PSK != "" {
+				host += "wpa=2\nwpa_key_mgmt=WPA-PSK\nwpa_passphrase=<redacted>\n"
+			} else {
+				host += "# open network (not recommended)\n"
+			}
+			host += "\n"
+		}
+	} else {
+		host += "# wifi disabled\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hostapd.conf.fragment"), []byte(host), 0o644); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {

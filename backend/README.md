@@ -35,6 +35,8 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - `DELETE /api/v1/session`：登出（清除会话 cookie）
 - 兼容路径 `POST /api/v1/auth/login` 已转发到 `/api/v1/session`
 - `PUT /api/v1/config`：保存完整配置（Schema/语义校验通过后原子写入）；仅保存，不 apply
+- `POST /api/v1/apply`：生成运行时片段到 `stateDir/generated/`（dnsmasq/nftables/hostapd 占位），记录作业；默认不 reload 系统单元
+- `GET /api/v1/jobs/{id}`：查询作业状态（`mode: generate-only`，`appliedRuntime: false`）
 
 ## WebUI（静态资源）
 
@@ -76,7 +78,14 @@ curl -s -b cookie.txt -H 'Content-Type: application/json' \
   -d '{"system":{"hostname":"new-name"}, "wan":{"mode":"dhcp"}, "lan":{...}, "dns":{...}, "wifi":{...}, "firewall":{...}, "ssh":{...}, "plugins":{}}' \
   -X PUT http://localhost:8080/api/v1/config | jq .
 
-# 5) 登出
+# 6) 生成（仅生成，不 reload）
+curl -s -b cookie.txt -X POST http://localhost:8080/api/v1/apply | jq .
+# 查询作业
+JOB=$(curl -s -b cookie.txt -X POST http://localhost:8080/api/v1/apply | jq -r .jobId)
+curl -s -b cookie.txt http://localhost:8080/api/v1/jobs/$JOB | jq .
+ls -la ./_state/generated/
+
+# 7) 登出
 curl -i -X DELETE -b cookie.txt http://localhost:8080/api/v1/session
 ```
 
@@ -97,6 +106,7 @@ go test ./...
 
 - flake `packages.<system>.routerd`：包含嵌入的 WebUI
 - NixOS 模块：`services.nixos-router.backend.enable = true;` 启用后访问 `http://<lan-ip>:8080/` 即可同源打开 UI 与 API
+  - 可选：`services.nixos-router.backend.applyReload = true;` 启用占位 reload 钩子（默认关闭）
 
 ## 账户与会话
 
@@ -109,4 +119,9 @@ go test ./...
 ## 配置保存（M3）
 
 - `PUT /api/v1/config` 仅将合法配置保存到 `config.json`（原子写），并写入审计；不会触发 real apply（nftables/dnsmasq/hostapd 等）。GET 默认仍对敏感信息脱敏。
+
+## Apply 骨架（M4 前半）
+
+- `POST /api/v1/apply` 创建作业并串行执行：validate → 生成到 `stateDir/generated/`（dnsmasq.conf.fragment、nftables.nft.fragment、hostapd.conf.fragment）→ success/failed；仅生成、不 reload。
+- `GET /api/v1/jobs/{id}` 可查询状态；`GET /api/v1/jobs` 列表暂未实现。
 

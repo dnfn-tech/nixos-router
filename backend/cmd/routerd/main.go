@@ -29,6 +29,7 @@ func main() {
 	dev := flag.Bool("dev", envBool(config.EnvDev, false), "Developer mode: no auth, permissive CORS")
 	seed := flag.Bool("seed-default-config", false, "If set and config file missing, write default config.json (dev convenience)")
 	webDir := flag.String("web-dir", "", "Serve WebUI from local directory instead of embedded assets (dev only)")
+	applyReload := flag.Bool("apply-reload", envBool("NIXOS_ROUTER_APPLY_RELOAD", false), "Allow runtime reload during apply (currently stub)")
 	flag.Parse()
 
 	opts := config.LoadOptions{
@@ -65,6 +66,7 @@ func main() {
 		Version:    version,
 		WebFS:      webfs.Embedded,
 		WebDir:     *webDir,
+		ApplyReload: *applyReload,
 	})
 
 	srv := &http.Server{

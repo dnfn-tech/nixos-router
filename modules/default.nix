@@ -21,6 +21,12 @@ in
       description = "routerd 包；默认从本仓库构建";
     };
 
+    applyReload = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "允许在 apply 时尝试 reload（当前为占位，默认关闭）";
+    };
+
     stateDir = lib.mkOption {
       type = lib.types.path;
       default = "/var/lib/nixos-router";
@@ -55,7 +61,7 @@ in
         ExecStart = ''
           ${routerdPkg}/bin/routerd \
             --state-dir ${cfg.stateDir} \
-            --addr ${cfg.address} ${lib.optionalString cfg.dev " --dev"}
+            --addr ${cfg.address} ${lib.optionalString cfg.dev " --dev"}${lib.optionalString cfg.applyReload " --apply-reload"}
         '';
         DynamicUser = true;
         StateDirectory = "nixos-router";

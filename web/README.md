@@ -45,6 +45,12 @@ WebUI 会从以下位置确定后端 API 基址（优先级从高到低）：
 - 概览：读取 `/api/v1/status`、`/api/v1/config`、`/api/v1/health`，展示主机名、运行时长、WAN/LAN 摘要、接口列表（按 role）、WiFi 能力（`/api/v1/capabilities/wifi`）；缺字段时优雅降级并清晰提示
 - 外网（#/wan）：展示 `config.wan` 与状态中 WAN 接口（模式 dhcp/static/pppoe、接口名、静态地址/GW/DNS 等）；PPPoE 密码以 `••••` 显示
 - 内网（#/lan）：展示 `config.lan`（桥、IPv4 CIDR、DHCP 范围、租约时长，端口/静态租约未提供则标注“未提供”）
+- 无线（#/wifi）：展示 `config.wifi`（启用/桥接、AP 列表）+ `status.wifi` + `capabilities/wifi`
+- DNS（#/dns）：展示 `config.dns`（enableDnsmasq、upstreams、domain）
+- 防火墙（#/firewall）：展示 `config.firewall`（enable、natEnabled、description），端口转发等后续扩展
+- SSH（#/ssh）：展示 `config.ssh`（enable、port、passwordAuth、authorizedKeys）与 `status.ssh`
+- 系统（#/system）：展示 `config.system` 与 `health/status` 摘要（hostname、timezone、uptime、version 等）
+- 客户端（#/clients）：若后端提供 `GET /api/v1/clients` 则展示；否则明确标注“接口尚未提供”
 - 登录页：用户名/密码，错误提示，提交调用 `POST /api/v1/session`
 - 401 统一处理：自动返回登录页
 - 侧栏“退出”：调用 `DELETE /api/v1/session`

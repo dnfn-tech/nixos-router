@@ -9,6 +9,215 @@
     return url.searchParams.get(name);
   }
 
+  async function renderWiFi() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    let statusData = null;
+    let configData = null;
+    let wifiCaps = null;
+    try {
+      const [s, c, caps] = await Promise.allSettled([
+        fetchJson("/api/v1/status"),
+        fetchJson("/api/v1/config"),
+        fetchJson("/api/v1/capabilities/wifi"),
+      ]);
+      if (s.status === "fulfilled") statusData = s.value;
+      if (c.status === "fulfilled") configData = c.value;
+      if (caps.status === "fulfilled") wifiCaps = caps.value;
+    } catch (_) {}
+    const cfg = (configData && (configData.config || configData)) || null;
+    const wifiCfg = cfg?.wifi || {};
+    const wifiSt = statusData?.wifi || {};
+    const rows = [];
+    if (wifiCfg.enable != null) rows.push(["启用", wifiCfg.enable ? "是" : "否"]);
+    if (wifiCfg.bridgeToLan != null) rows.push(["桥接到 LAN", wifiCfg.bridgeToLan ? "是" : "否"]);
+    if (wifiSt.enabled != null) rows.push(["状态", wifiSt.enabled ? "已启用" : "未启用"]);
+    if (wifiSt.aps != null) rows.push(["AP 数量（状态）", String(wifiSt.aps)]);
+    grid.appendChild(renderKeyValueCard("WiFi 概览（只读）", rows.length ? rows : [["信息", "未提供"]]));
+
+    // AP 列表（来自 config）
+    if (Array.isArray(wifiCfg.aps) && wifiCfg.aps.length) {
+      const apCard = document.createElement("div");
+      apCard.className = "card";
+      const apItems = wifiCfg.aps.map((ap, idx) => {
+        const lines = [
+          ["SSID", ap?.ssid ?? "-"],
+          ["频段", ap?.band ?? "-"],
+          ["信道", ap?.channel != null ? String(ap.channel) : "-"],
+          ["启用", ap?.enable ? "是" : "否"],
+          // PSK 为脱敏字段，不展示明文
+        ];
+        const rows = lines.map(([k, v]) => html`<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`).join("");
+        return html`<div class="kv">${rows}</div>`;
+      }).join("<hr class=\"sep\" />");
+      apCard.innerHTML = html`<h3>接入点（AP）</h3><div>${apItems}</div>`;
+      grid.appendChild(apCard);
+    }
+
+    // 能力
+    if (wifiCaps) {
+      const capsEntries = [];
+      if (wifiCaps.maxAP != null) capsEntries.push(["最大 AP 数", String(wifiCaps.maxAP)]);
+      if (Array.isArray(wifiCaps.bands)) capsEntries.push(["支持频段", wifiCaps.bands.join(", ") || "-"]);
+      if (wifiCaps.driver) capsEntries.push(["驱动", String(wifiCaps.driver)]);
+      grid.appendChild(renderKeyValueCard("WiFi 能力", capsEntries.length ? capsEntries : [["信息", "未提供"]]));
+    }
+
+    if (configData) grid.appendChild(renderJSONCard("配置 JSON", configData));
+    if (statusData) grid.appendChild(renderJSONCard("状态 JSON", statusData));
+  }
+
+  async function renderDNS() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    let configData = null;
+    try {
+      configData = await fetchJson("/api/v1/config");
+    } catch (_) {}
+    const cfg = (configData && (configData.config || configData)) || null;
+    const dns = cfg?.dns || {};
+    const rows = [];
+    if (dns.enableDnsmasq != null) rows.push(["启用 dnsmasq", dns.enableDnsmasq ? "是" : "否"]);
+    if (dns.domain) rows.push(["域名", String(dns.domain)]);
+    if (Array.isArray(dns.upstreams)) rows.push(["上游 DNS", dns.upstreams.join(", ") || "-"]);
+    grid.appendChild(renderKeyValueCard("DNS（只读）", rows.length ? rows : [["信息", "未提供"]]));
+    if (configData) grid.appendChild(renderJSONCard("配置 JSON", configData));
+  }
+
+  async function renderFirewall() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    let configData = null;
+    try {
+      configData = await fetchJson("/api/v1/config");
+    } catch (_) {}
+    const cfg = (configData && (configData.config || configData)) || null;
+    const fw = cfg?.firewall || {};
+    const rows = [];
+    if (fw.enable != null) rows.push(["启用", fw.enable ? "是" : "否"]);
+    if (fw.natEnabled != null) rows.push(["NAT", fw.natEnabled ? "启用" : "关闭"]);
+    if (fw.description) rows.push(["说明", String(fw.description)]);
+    rows.push(["端口转发", "未提供"]);
+    grid.appendChild(renderKeyValueCard("防火墙（只读）", rows.length ? rows : [["信息", "未提供"]]));
+    if (configData) grid.appendChild(renderJSONCard("配置 JSON", configData));
+  }
+
+  async function renderSSH() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    let configData = null;
+    let statusData = null;
+    try {
+      const [c, s] = await Promise.allSettled([
+        fetchJson("/api/v1/config"),
+        fetchJson("/api/v1/status"),
+      ]);
+      if (c.status === "fulfilled") configData = c.value;
+      if (s.status === "fulfilled") statusData = s.value;
+    } catch (_) {}
+    const cfg = (configData && (configData.config || configData)) || null;
+    const ssh = cfg?.ssh || {};
+    const sshStat = statusData?.ssh || {};
+    const rows = [];
+    if (ssh.enable != null) rows.push(["启用", ssh.enable ? "是" : "否"]);
+    if (ssh.port != null) rows.push(["端口", String(ssh.port)]);
+    if (ssh.passwordAuth != null) rows.push(["密码登录", ssh.passwordAuth ? "允许" : "禁止"]);
+    if (Array.isArray(ssh.authorizedKeys)) rows.push(["AuthorizedKeys", ssh.authorizedKeys.length ? String(ssh.authorizedKeys.length) : "0"]);
+    if (sshStat.enabled != null) rows.push(["运行状态", sshStat.enabled ? "已启用" : "未启用"]);
+    if (sshStat.port != null) rows.push(["运行端口", String(sshStat.port)]);
+    grid.appendChild(renderKeyValueCard("SSH（只读）", rows.length ? rows : [["信息", "未提供"]]));
+    if (Array.isArray(ssh.authorizedKeys) && ssh.authorizedKeys.length) {
+      const keysCard = document.createElement("div");
+      keysCard.className = "card";
+      keysCard.innerHTML = `<h3>AuthorizedKeys</h3><pre class="json-view">${escapeHtml(ssh.authorizedKeys.join("\n"))}</pre>`;
+      grid.appendChild(keysCard);
+    }
+    if (configData) grid.appendChild(renderJSONCard("配置 JSON", configData));
+    if (statusData) grid.appendChild(renderJSONCard("状态 JSON", statusData));
+  }
+
+  async function renderSystem() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    let configData = null;
+    let statusData = null;
+    let healthData = null;
+    try {
+      const [c, s, h] = await Promise.allSettled([
+        fetchJson("/api/v1/config"),
+        fetchJson("/api/v1/status"),
+        fetchJson("/api/v1/health"),
+      ]);
+      if (c.status === "fulfilled") configData = c.value;
+      if (s.status === "fulfilled") statusData = s.value;
+      if (h.status === "fulfilled") healthData = h.value;
+    } catch (_) {}
+    const cfg = (configData && (configData.config || configData)) || null;
+    const sys = cfg?.system || {};
+    const sysSt = statusData?.system || {};
+    const rows = [];
+    const hostname = sysSt.hostname || sys.hostname;
+    if (hostname) rows.push(["主机名", String(hostname)]);
+    if (sys.timezone) rows.push(["时区", String(sys.timezone)]);
+    if (healthData?.uptimeSecs != null) rows.push(["运行时间", `${healthData.uptimeSecs}s`]);
+    if (healthData?.version) rows.push(["版本", String(healthData.version)]);
+    if (healthData?.startedAt) rows.push(["启动时间", String(healthData.startedAt)]);
+    grid.appendChild(renderKeyValueCard("系统（只读）", rows.length ? rows : [["信息", "未提供"]]));
+    if (configData) grid.appendChild(renderJSONCard("配置 JSON", configData));
+    if (statusData) grid.appendChild(renderJSONCard("状态 JSON", statusData));
+    if (healthData) grid.appendChild(renderJSONCard("健康 JSON", healthData));
+  }
+
+  async function renderClients() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    try {
+      const data = await fetchJson("/api/v1/clients");
+      // 兼容形状：若返回数组则直接渲染，若对象含 clients/items 则取其数组
+      const list = Array.isArray(data) ? data : (data?.clients || data?.items || []);
+      if (!Array.isArray(list) || list.length === 0) {
+        grid.appendChild(renderKeyValueCard("客户端（只读）", [["状态", "无数据"]]));
+      } else {
+        const card = document.createElement("div");
+        card.className = "card";
+        const items = list.map((c, i) => {
+          if (c && typeof c === "object") {
+            const pairs = Object.entries(c).slice(0, 8).map(([k, v]) => [String(k), String(v)]);
+            const rows = pairs.map(([k, v]) => html`<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>`).join("");
+            return html`<div class="kv">${rows}</div>`;
+          }
+          return html`<div class="kv"><div class="k">项</div><div class="v">${escapeHtml(String(c))}</div></div>`;
+        }).join("<hr class=\"sep\" />");
+        card.innerHTML = `<h3>客户端列表</h3>${items}`;
+        grid.appendChild(card);
+      }
+      grid.appendChild(renderJSONCard("客户端 JSON", data));
+    } catch (e) {
+      if (e?.status === 404) {
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `<h3>客户端（只读）</h3><p class="muted">接口尚未提供</p>`;
+        grid.appendChild(card);
+      } else if (e?.status === 401) {
+        // 已由全局 401 处理
+      } else {
+        grid.appendChild(renderJSONCard("错误", { error: e?.message || "请求失败" }));
+      }
+    }
+  }
+
   function getApiBase() {
     const fromWin = typeof window.NIXOS_ROUTER_API === "string" && window.NIXOS_ROUTER_API.trim();
     const fromQuery = getQueryParam("api");
@@ -506,12 +715,12 @@
     "overview": renderOverview,
     "wan": () => renderWAN(),
     "lan": () => renderLAN(),
-    "wifi": () => renderPlaceholder("wifi"),
-    "clients": () => renderPlaceholder("clients"),
-    "dns": () => renderPlaceholder("dns"),
-    "firewall": () => renderPlaceholder("firewall"),
-    "ssh": () => renderPlaceholder("ssh"),
-    "system": () => renderPlaceholder("system"),
+    "wifi": () => renderWiFi(),
+    "clients": () => renderClients(),
+    "dns": () => renderDNS(),
+    "firewall": () => renderFirewall(),
+    "ssh": () => renderSSH(),
+    "system": () => renderSystem(),
     "plugins": () => renderPlaceholder("plugins"),
   };
 
