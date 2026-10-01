@@ -1,6 +1,6 @@
 # 实现现状（v1 概览）
 
-状态：进行中（M12），默认“仅生成、不热更/不重启”。工作基于 `main`。
+状态：进行中（M14），默认“仅生成、不热更/不重启”。工作基于 `main`。
 
 ## 已实现（M1–M11 进展）
 - 配置 schema + 校验：WAN/LAN/DHCP/静态租约、DNS、WiFi（guest/isolate）、防火墙（NAT、端口转发、blockedMacs）、SSH、DDNS（cloudflare/duckdns/aliyun/custom）、QoS、Parental、IPv6
@@ -44,6 +44,13 @@
 - 测试：新增针对 systemctl 缺失与状态映射的单测，覆盖核心与插件单元
 - flake 细化：为 `buildGoModule` 指定 `modRoot = \"./backend\"`（仅路径修正，便于后续 vendor 计算）
 
+## 新增（M14）
+- nixpkgs 升级：将 flake 的 `inputs.nixpkgs` 从 `nixos-24.05` 升至可提供 Go ≥ 1.26 的通道（当前采用 `nixos-unstable` 以满足 `backend/go.mod` 的 `go 1.26` 要求）。
+- 构建与 vendorHash：本环境无 nix-daemon，未直接计算 `vendorHash`；请在有 Nix 的主机执行下述一步命令以落盘真实哈希：
+  - `./scripts/compute-vendor-hash.sh --apply`
+  - 若你也希望同时固定锁文件：`nix flake update && nix build .#routerd`
+- 安全与模块默认行为未改变：仍为“仅生成”，`applyReload=false`、`applyTrafficControl=false`、`privilegedApply=false`、`openFirewall=false`。
+
 ## 默认安全策略
 - 默认不执行 reload/restart（`applyReload=false`），保守生成
 - 默认不执行 `tc`（`applyTrafficControl=false`），即使生成了 `qos.sh`
@@ -64,4 +71,11 @@
 - 建议在具备 Go ≥1.26 的 Nix 环境（或较新的 nixpkgs）中执行：
   - `./scripts/compute-vendor-hash.sh --apply`
 - 之后提交独立 PR 锁定 vendor 缓存
+
+## Nix vendorHash（M14 指南）
+- flake 已切到具备 Go ≥1.26 的 nixpkgs 通道（`nixos-unstable`）；建议在 Nix 主机上直接执行：
+  1) `nix flake update`（可选但推荐，固定到具体提交）
+  2) `./scripts/compute-vendor-hash.sh --apply`（写入真实 vendorHash）
+  3) `nix build .#routerd`（验证成功）
+- 注意：请勿手写/猜测 vendorHash；以 Nix 输出中的 `got: sha256-...` 为准。
 

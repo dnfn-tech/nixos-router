@@ -6,10 +6,15 @@
 
 ## 0) 先固定 vendorHash（构建前置）
 
-推荐在有 nix 的环境执行：
+推荐在有 nix 的环境执行（本 flake 已指向具备 Go ≥1.26 的 nixpkgs 通道；可选地先固定锁文件）：
 
 ```bash
+# 可选但推荐：固定到具体提交
+nix flake update
+# 写入真实 vendorHash
 ./scripts/compute-vendor-hash.sh --apply
+# 验证构建
+nix build .#routerd
 ```
 
 脚本会自动更新 `flake.nix` 的 `vendorHash`。CI 环境暂无 nix-daemon，不能替你计算该值。
