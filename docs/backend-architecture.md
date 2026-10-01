@@ -276,7 +276,7 @@ type CoreRegistry interface {
 ### 模块化映射（内置一方）
 - 将当前功能以模块形态实现，即使在 v1 作为“内置”：
   - 基础：`wan`、`lan`、`wifi`、`firewall`、`nat`/`upnp`、`ddns`、`ipv6`、`ssh`、`system`
-  - 可选：`qos`、`parental`、`adblock`（广告过滤，基于 dnsmasq 列表）、`traffic`（流量统计，vnstat 或 nft/conntrack 聚合）
+  - 可选：`qos`、`parental`、`adblock`（广告过滤，基于 dnsmasq 列表）、`traffic`（流量统计，vnstat 或 nft/conntrack 聚合）、`mihomo`（Clash Meta 代理）、`vlan`（多 VLAN/LAN）
 - 好处
   - 职责清晰、边界明确；后续替换/增强任一模块不影响核心与其他模块
   - 第三方仅需遵守合同与能力声明，即可新增业务能力（例如广告过滤、VPN、报表等）
@@ -300,4 +300,11 @@ type CoreRegistry interface {
 - traffic
   - 选择 `vnstat` 作为首选采集器（或在 `collectors` 中选择 `nft/conntrack` 聚合），由模块管理其 unit/定时器；读取统计供 UI 展示
   - 禁用时停止采集器服务，保留历史数据由保留策略决定
+- mihomo
+  - 生成 mihomo YAML 配置到状态目录；管理 `mihomo.service`；可选启用 TUN 并配置路由策略
+  - DNS 交互：在 `redir-host`/`fake-ip` 模式下可将 dnsmasq 上游指向 mihomo 的 DNS，同时保留本地域名在本机解析；`fake-ip` 模式需对本地域名/特殊域名做绕过
+  - 禁用时停止服务并撤销相关路由/规则
+- vlan
+  - 基于 802.1Q 创建 VLAN 子接口并加入各自桥（如 `br-vlan10`），为每个 VLAN 配置 IPv4/子网；生成对应 dnsmasq 池与域名设置；按 `isolate` 生成/撤销 nftables 隔离规则
+  - 插件关闭时回到默认单一 `br-lan` 拓扑
 

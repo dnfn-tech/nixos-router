@@ -59,3 +59,24 @@
 - UI：侧栏“网络服务”分组新增“流量统计”，页面展示开关、保留期与图表（后端提供只读数据）
 - Apply：启停采集器相关服务/定时任务；读路径为只读 API（查询统计），写路径主要用于 `enabled` 切换
 
+### Mihomo（Clash Meta 代理）
+- 目标：提供基于 mihomo（Clash Meta）的代理能力，可选启用；默认不属于核心路径
+- 配置：`plugins.mihomo`（例如）
+  - `enabled`：是否启用
+  - `profile`：配置来源（文件路径或订阅 URL）
+  - `mode`：`redir-host` / `fake-ip`
+  - `tun.enable`：是否启用 TUN（可选）
+  - `dns.port`：mihomo 内部 DNS 端口（与 dnsmasq 的交互需谨慎）
+  - `updateInterval`：订阅/规则更新周期（可选）
+- UI：侧栏“网络服务”分组新增“代理（Mihomo）”，页面包含启用/配置/状态；（later）连接统计
+- Apply：生成 mihomo 配置文件至状态目录并管理 `mihomo.service`；如 `tun.enable=true` 则创建/管理 TUN；与 dnsmasq 的交互：\n  - 在 `redir-host`/`fake-ip` 场景下，可将 dnsmasq 上游指向 mihomo 的 DNS（保留内网域名在本机解析）\n  - `fake-ip` 模式需在文档中标注注意事项（本地域名绕过、可能的冲突处理）\n- 禁用：隐藏页面并在下一次 apply 停止服务
+
+### VLAN（虚拟局域网，多 LAN 可选）
+- 目标：在保持默认“单一 br-lan”的前提下，通过可选插件提供多 VLAN/LAN 的能力
+- 配置：`plugins.vlan`（例如）
+  - `enabled`：是否启用
+  - `vlans[]`：`{ vid, name, bridge, ipv4.address, dhcp.{enable,rangeStart,rangeEnd,leaseTime,domain}, isolate }`
+  - `lan.ports`：可选的端口-VID 映射/打标（具体结构依实现细化）
+- UI：侧栏“网络服务”分组新增“VLAN”，页面用于新增/编辑/删除 VLAN，设置子网/DHCP/隔离；（later）将 WiFi BSS 映射到某 VLAN
+- Apply：为每个 VLAN 创建/更新 802.1Q 子接口与桥，生成 dnsmasq 的每 VLAN 段配置，按 `isolate` 生成 nftables 隔离规则；默认插件关闭时维持单一 `br-lan`
+
