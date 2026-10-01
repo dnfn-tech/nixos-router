@@ -112,9 +112,13 @@ func TestApplyValidGeneratesFiles(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d %s", w.Code, w.Body.String())
 	}
-	// get job id and fetch it
+	// ensure appliedRuntime is false when applyReload is disabled
 	var resp map[string]interface{}
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if v, _ := resp["appliedRuntime"].(bool); v {
+		t.Fatalf("appliedRuntime should be false when applyReload is disabled")
+	}
+	// get job id and fetch it
 	jid, _ := resp["jobId"].(string)
 	if jid == "" {
 		t.Fatalf("missing jobId")

@@ -365,6 +365,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Stubbed status derived from config
 	lanCIDR := s.cfg.LAN.IPv4CIDR
+	clientCount := 0
+	if ls := s.readDnsmasqLeases(); len(ls) > 0 {
+		clientCount = len(ls)
+	}
 	resp := map[string]interface{}{
 		"system": map[string]interface{}{
 			"hostname": s.cfg.System.Hostname,
@@ -390,6 +394,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"wifi": map[string]interface{}{
 			"enabled": s.cfg.WiFi.Enable,
 			"aps":     len(s.cfg.WiFi.APs),
+			"clientCount": clientCount,
 			"guestCount": func() int {
 				c := 0
 				for _, ap := range s.cfg.WiFi.APs {
@@ -555,17 +560,51 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		MAC      string `json:"mac,omitempty"`
 		Hostname string `json:"hostname,omitempty"`
 		Source   string `json:"source"`
+		Expires  string `json:"expires,omitempty"`
 	}
 	var clients []Client
-	// From static leases
-	for _, sl := range s.cfg.LAN.StaticLeases {
-		clients = append(clients, Client{IP: sl.IP, MAC: sl.MAC, Hostname: sl.Hostname, Source: "static"})
+	source := "stub"
+	leases := s.readDnsmasqLeases()
+	if len(leases) > 0 {
+		source = "leases"
+		// index static leases for hostnames
+		mac2host := map[string]string{}
+		ip2host := map[string]string{}
+		for _, sl := range s.cfg.LAN.StaticLeases {
+			if sl.MAC != "" && sl.Hostname != "" {
+				mac2host[strings.ToLower(sl.MAC)] = sl.Hostname
+			}
+			if sl.IP != "" && sl.Hostname != "" {
+				ip2host[sl.IP] = sl.Hostname
+			}
+		}
+		for _, L := range leases {
+			h := L.Hostname
+			if h == "" && L.MAC != "" {
+				if v, ok := mac2host[strings.ToLower(L.MAC)]; ok {
+					h = v
+					source = "mixed"
+				}
+			}
+			if h == "" {
+				if v, ok := ip2host[L.IP]; ok {
+					h = v
+					source = "mixed"
+				}
+			}
+			expires := ""
+			if !L.Expires.IsZero() {
+				expires = L.Expires.UTC().Format(time.RFC3339)
+			}
+			clients = append(clients, Client{IP: L.IP, MAC: L.MAC, Hostname: h, Source: source, Expires: expires})
+		}
+	} else {
+		// From static leases fallback
+		for _, sl := range s.cfg.LAN.StaticLeases {
+			clients = append(clients, Client{IP: sl.IP, MAC: sl.MAC, Hostname: sl.Hostname, Source: "static"})
+		}
 	}
-	// TODO: parse dnsmasq leases when available; mark as stub otherwise
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"clients": clients,
-		"source":  "stub",
-	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"clients": clients, "source": source})
 }
 
 func (s *Server) handleWifiCaps(w http.ResponseWriter, r *http.Request) {
@@ -1011,7 +1050,26 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	}
 	// (Optional) reload stubs
 	if s.applyReload {
-		// Future: systemctl reload units
+		okReload, msg := s.attemptReload()
+		if !okReload {
+			_ = s.db.UpdateJobStatus(jid, "failed", msg)
+			s.db.AddAudit(user, "apply", "reload failed: "+msg)
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"jobId":          jid,
+				"appliedRuntime": false,
+				"mode":           "generate+reload",
+				"error":          msg,
+			})
+			return
+		}
+		_ = s.db.UpdateJobStatus(jid, "success", "")
+		s.db.AddAudit(user, "apply", "reload success")
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"jobId":          jid,
+			"appliedRuntime": true,
+			"mode":           "generate+reload",
+		})
+		return
 	}
 	_ = s.db.UpdateJobStatus(jid, "success", "")
 	s.db.AddAudit(user, "apply", "generate-only success")
@@ -1133,7 +1191,225 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 			_ = os.WriteFile(fn, []byte("# "+pid+" disabled\n"), 0o644)
 		}
 	}
+	// Plugins config generation
+	pdir := filepath.Join(dir, "plugins")
+	_ = os.MkdirAll(pdir, 0o755)
+	// adblock
+	genAdblock := func() {
+		id := "adblock"
+		pc, ok := cfg.Plugins[id]
+		if !ok || !pc.Enable {
+			_ = os.WriteFile(filepath.Join(pdir, id+".DISABLED"), []byte("# disabled\n"), 0o644)
+			return
+		}
+		var lines []string
+		lines = append(lines, "# adblock fragment (generate-only)")
+		if lists, ok := pc.Config["lists"].([]interface{}); ok {
+			for _, v := range lists {
+				if s, ok := v.(string); ok {
+					lines = append(lines, "# list: "+s)
+				}
+			}
+		}
+		if entries, ok := pc.Config["entries"].([]interface{}); ok {
+			for _, v := range entries {
+				if d, ok := v.(string); ok && d != "" {
+					lines = append(lines, "address=/"+d+"/0.0.0.0")
+				}
+			}
+		}
+		_ = os.WriteFile(filepath.Join(pdir, "adblock.conf.fragment"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	}
+	genAdblock()
+	// traffic
+	genTraffic := func() {
+		id := "traffic"
+		pc, ok := cfg.Plugins[id]
+		if !ok || !pc.Enable {
+			_ = os.WriteFile(filepath.Join(pdir, id+".DISABLED"), []byte("# disabled\n"), 0o644)
+			return
+		}
+		var lines []string
+		lines = append(lines, "# traffic retention config (generate-only)")
+		if v, ok := pc.Config["retentionDays"]; ok {
+			lines = append(lines, fmt.Sprintf("retentionDays=%v", v))
+		}
+		_ = os.WriteFile(filepath.Join(pdir, "traffic.conf.fragment"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	}
+	genTraffic()
+	// mihomo
+	genMihomo := func() {
+		id := "mihomo"
+		pc, ok := cfg.Plugins[id]
+		if !ok || !pc.Enable {
+			_ = os.WriteFile(filepath.Join(pdir, id+".DISABLED"), []byte("# disabled\n"), 0o644)
+			return
+		}
+		// Minimal YAML skeleton from config
+		var b strings.Builder
+		b.WriteString("# mihomo.yaml (generate-only)\n")
+		if profile, ok := pc.Config["profile"].(string); ok && profile != "" {
+			fmt.Fprintf(&b, "profile: %q\n", profile)
+		}
+		if mode, ok := pc.Config["mode"].(string); ok && mode != "" {
+			fmt.Fprintf(&b, "mode: %q\n", mode)
+		}
+		if dns, ok := pc.Config["dns"].(map[string]interface{}); ok {
+			if port, ok := dns["port"]; ok {
+				fmt.Fprintf(&b, "dns:\n  port: %v\n", port)
+			}
+		}
+		if tun, ok := pc.Config["tun"].(map[string]interface{}); ok {
+			if en, ok := tun["enable"]; ok {
+				fmt.Fprintf(&b, "tun:\n  enable: %v\n", en)
+			}
+		}
+		_ = os.WriteFile(filepath.Join(pdir, "mihomo.yaml"), []byte(b.String()), 0o644)
+	}
+	genMihomo()
+	// vlan
+	genVLAN := func() {
+		id := "vlan"
+		pc, ok := cfg.Plugins[id]
+		if !ok || !pc.Enable {
+			_ = os.WriteFile(filepath.Join(pdir, id+".DISABLED"), []byte("# disabled\n"), 0o644)
+			return
+		}
+		var lines []string
+		lines = append(lines, "# vlan netdev/network fragment (generate-only)")
+		if vlans, ok := pc.Config["vlans"].([]interface{}); ok {
+			for _, v := range vlans {
+				if m, ok := v.(map[string]interface{}); ok {
+					vid := m["vid"]
+					name := m["name"]
+					bridge := m["bridge"]
+					lines = append(lines, fmt.Sprintf("# vid=%v name=%v bridge=%v", vid, name, bridge))
+				}
+			}
+		}
+		_ = os.WriteFile(filepath.Join(pdir, "vlan.network.fragment"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	}
+	genVLAN()
+	// tailscale
+	genTailscale := func() {
+		id := "tailscale"
+		pc, ok := cfg.Plugins[id]
+		if !ok || !pc.Enable {
+			_ = os.WriteFile(filepath.Join(pdir, id+".DISABLED"), []byte("# disabled\n"), 0o644)
+			return
+		}
+		var lines []string
+		lines = append(lines, "# tailscale flags/env (generate-only)")
+		cp, _ := pc.Config["controlPlane"].(string)
+		loginServer, _ := pc.Config["loginServer"].(string)
+		authKey, _ := pc.Config["authKey"].(string)
+		lines = append(lines, "controlPlane="+cp)
+		if loginServer != "" {
+			lines = append(lines, "loginServer="+loginServer)
+		}
+		if authKey != "" {
+			lines = append(lines, "authKey=****") // redacted
+		}
+		_ = os.WriteFile(filepath.Join(pdir, "tailscale.env.fragment"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	}
+	genTailscale()
+	// zerotier
+	genZerotier := func() {
+		id := "zerotier"
+		pc, ok := cfg.Plugins[id]
+		if !ok || !pc.Enable {
+			_ = os.WriteFile(filepath.Join(pdir, id+".DISABLED"), []byte("# disabled\n"), 0o644)
+			return
+		}
+		var lines []string
+		lines = append(lines, "# zerotier config (generate-only)")
+		cp, _ := pc.Config["controlPlane"].(string)
+		ctrl, _ := pc.Config["controllerUrl"].(string)
+		api, _ := pc.Config["apiToken"].(string)
+		lines = append(lines, "controlPlane="+cp)
+		if ctrl != "" {
+			lines = append(lines, "controllerUrl="+ctrl)
+		}
+		if api != "" {
+			lines = append(lines, "apiToken=****")
+		}
+		if nets, ok := pc.Config["networks"].([]interface{}); ok {
+			for _, v := range nets {
+				if s, ok := v.(string); ok && s != "" {
+					lines = append(lines, "join="+s)
+				}
+			}
+		}
+		_ = os.WriteFile(filepath.Join(pdir, "zerotier.conf.fragment"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	}
+	genZerotier()
 	return nil
+}
+
+type dnsmasqLease struct {
+	Expires time.Time
+	MAC     string
+	IP      string
+	Hostname string
+	ClientID string
+}
+
+func (s *Server) readDnsmasqLeases() []dnsmasqLease {
+	paths := []string{}
+	if p := os.Getenv("NIXOS_ROUTER_DNSMASQ_LEASES"); p != "" {
+		paths = append(paths, p)
+	}
+	paths = append(paths,
+		"/var/lib/misc/dnsmasq.leases",
+		filepath.Join(s.stateDir, "dnsmasq.leases"),
+		filepath.Join(s.stateDir, "generated", "dnsmasq.leases"),
+	)
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil && fi.Size() > 0 {
+			if ls := parseDnsmasqLeasesFile(p); len(ls) > 0 {
+				return ls
+			}
+		}
+	}
+	return nil
+}
+
+func parseDnsmasqLeasesFile(path string) []dnsmasqLease {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	var out []dnsmasqLease
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		// Format: <expiry> <mac|duid> <ip> <hostname> <client-id or *>
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		var exp time.Time
+		if secs, err := strconv.ParseInt(fields[0], 10, 64); err == nil && secs > 0 {
+			exp = time.Unix(secs, 0)
+		}
+		mac := fields[1]
+		ip := fields[2]
+		hostname := fields[3]
+		clientID := ""
+		if len(fields) >= 5 {
+			clientID = fields[4]
+		}
+		out = append(out, dnsmasqLease{
+			Expires:  exp,
+			MAC:      mac,
+			IP:       ip,
+			Hostname: hostname,
+			ClientID: clientID,
+		})
+	}
+	return out
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -1256,6 +1532,34 @@ func execCommand(name string, args ...string) error {
 	return cmd.Start()
 }
 
+func execRun(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	return cmd.Run()
+}
+
+func (s *Server) attemptReload() (bool, string) {
+	// Best-effort reload using systemctl when available
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return false, "systemctl not found"
+	}
+	units := []string{"dnsmasq.service", "nftables.service", "hostapd.service"}
+	var errs []string
+	for _, u := range units {
+		// try-reload-or-restart is safe; -q for quiet
+		if err := execRun("systemctl", "-q", "try-reload-or-restart", u); err != nil {
+			// accumulate but continue; some units may be absent
+			errs = append(errs, fmt.Sprintf("%s: %v", u, err))
+		}
+	}
+	if len(errs) > 0 && len(errs) == len(units) {
+		return false, "no units reloaded: " + strings.Join(errs, "; ")
+	}
+	if len(errs) > 0 {
+		// partial success considered failure for appliedRuntime
+		return false, "partial reload: " + strings.Join(errs, "; ")
+	}
+	return true, ""
+}
 func (s *Server) clientKey(r *http.Request) string {
 	host, _, _ := strings.Cut(r.RemoteAddr, ":")
 	if addr, err := netip.ParseAddr(host); err == nil {
