@@ -140,9 +140,22 @@ go test ./...
   - 可选：`services.nixos-router.backend.applyReload = true;` 启用占位 reload 钩子（默认关闭）
   - 可选：`services.nixos-router.backend.allowReboot = true;` 显式允许后端执行重启（默认关闭）
 
+### 计算 vendorHash（M10）
+
+- 本仓 flake 的 `buildGoModule` 需要固定 `vendorHash` 才能稳定缓存
+- 在可用 nix 的主机执行：
+
+```bash
+./scripts/compute-vendor-hash.sh           # 打印建议哈希
+./scripts/compute-vendor-hash.sh --apply   # 直接更新 flake.nix
+nix build .#routerd                        # 成功后表示 vendorHash 正确
+```
+
+若在容器/CI 中缺失 nix-daemon，脚本会失败。请在本地开发机上执行并提交更新的 `flake.nix`。
+
 ## 实现现状
 
-简述见 `docs/implementation-status.md`（当前默认 generate-only；Mihomo/Tailscale/Zerotier/VLAN 等守护进程编排留待后续迭代）。
+简述见 `docs/implementation-status.md`（当前默认 generate-only；当 `applyReload=true` 时提供保守的插件编排骨架：mihomo/tailscale/zerotier 按启用状态做 `systemctl try-reload-or-restart/try-stop`，缺失单元仅记录 notes；VLAN 仅注记）。
 
 ## 账户与会话
 

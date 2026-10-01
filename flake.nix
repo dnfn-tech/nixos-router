@@ -14,7 +14,9 @@
           version = "0.1.0";
           src = ./.;
           subPackages = [ "backend/cmd/routerd" ];
-          # TODO: 首次 nix build 后将 vendorHash 替换为实际值以稳定缓存
+          # TODO(M10): 首次可在有 nix 的环境执行：
+          #   ./scripts/compute-vendor-hash.sh --apply
+          # 将下行替换为真实哈希以稳定缓存
           vendorHash = lib.fakeSha256;
         };
       in
