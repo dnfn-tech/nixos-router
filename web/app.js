@@ -61,14 +61,69 @@
 
     mountUxBar(content, {
       onSave: async () => {
-        const res = await saveSection("plugins", draftPlugins, { andGenerate: false });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-        else { await loadNav(); setActiveLink(); }
+        // 尝试逐个 PUT /plugins/{id}；若全部 404 则回退到 PUT /config
+        const names = new Set([
+          ...Object.keys(draftPlugins || {}),
+          ...list.map(p => (typeof p === "string" ? p : (p?.name || p?.id || p?.key))).filter(Boolean),
+        ]);
+        let anySuccess = false;
+        let all404 = true;
+        let lastErr = null;
+        for (const name of names) {
+          try {
+            await putPlugin(name, draftPlugins[name]);
+            anySuccess = true;
+            all404 = false;
+          } catch (e) {
+            lastErr = e;
+            if (e?.status === 404) {
+              // keep all404 only if all fail as 404
+            } else {
+              all404 = false;
+            }
+          }
+        }
+        if (all404) {
+          const res = await saveSection("plugins", draftPlugins, { andGenerate: false });
+          if (!res.saved) { alert(`保存失败：${res.error?.message || "未知错误"}`); return; }
+        } else if (!anySuccess && lastErr) {
+          alert(`保存失败：${lastErr?.message || "未知错误"}`);
+          return;
+        }
+        await loadNav(); setActiveLink();
       },
       onSaveAndGenerate: async () => {
-        const res = await saveSection("plugins", draftPlugins, { andGenerate: true });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-        else { await loadNav(); setActiveLink(); alert("已保存并提交生成任务（不应用运行态）"); }
+        const names = new Set([
+          ...Object.keys(draftPlugins || {}),
+          ...list.map(p => (typeof p === "string" ? p : (p?.name || p?.id || p?.key))).filter(Boolean),
+        ]);
+        let anySuccess = false;
+        let all404 = true;
+        let lastErr = null;
+        for (const name of names) {
+          try {
+            await putPlugin(name, draftPlugins[name]);
+            anySuccess = true;
+            all404 = false;
+          } catch (e) {
+            lastErr = e;
+            if (e?.status === 404) {
+              // will consider fallback
+            } else {
+              all404 = false;
+            }
+          }
+        }
+        if (all404) {
+          const res = await saveSection("plugins", draftPlugins, { andGenerate: true });
+          if (!res.saved) { alert(`保存失败：${res.error?.message || "未知错误"}`); return; }
+        } else if (!anySuccess && lastErr) {
+          alert(`保存失败：${lastErr?.message || "未知错误"}`);
+          return;
+        } else {
+          await fetchJson("/api/v1/apply", { method: "POST" }).catch(() => {});
+        }
+        await loadNav(); setActiveLink(); alert("已保存并提交生成任务（不应用运行态）");
       },
     });
   }
@@ -130,14 +185,32 @@
 
     mountUxBar(content, {
       onSave: async () => {
-        const res = await saveSection(`plugins.${name}`, plug, { andGenerate: false });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-        else alert("已保存");
+        try {
+          await putPlugin(name, plug);
+          alert("已保存");
+        } catch (e) {
+          if (e?.status === 404) {
+            const res = await saveSection(`plugins.${name}`, plug, { andGenerate: false });
+            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存");
+          } else {
+            alert(`保存失败：${e?.message || "未知错误"}`);
+          }
+        }
       },
       onSaveAndGenerate: async () => {
-        const res = await saveSection(`plugins.${name}`, plug, { andGenerate: true });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-        else alert("已保存并提交生成任务（不应用运行态）");
+        try {
+          await putPlugin(name, plug);
+          await fetchJson("/api/v1/apply", { method: "POST" });
+          alert("已保存并提交生成任务（不应用运行态）");
+        } catch (e) {
+          if (e?.status === 404) {
+            const res = await saveSection(`plugins.${name}`, plug, { andGenerate: true });
+            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+            else alert("已保存并提交生成任务（不应用运行态）");
+          } else {
+            alert(`保存失败：${e?.message || "未知错误"}`);
+          }
+        }
       },
     });
   }
@@ -913,10 +986,13 @@ async function renderSSH() {
       acard.className = "card";
       const rowsA = arr.map((e) => {
         const kv = [
-          ["时间", e?.time || e?.ts || e?.timestamp || "-"],
-          ["用户", e?.user || e?.actor || "-"],
+          ["ID", e?.id || e?.uuid || "-"],
+          ["时间", e?.at || e?.time || e?.ts || e?.timestamp || "-"],
+          ["用户", e?.actor || e?.user || "-"],
           ["动作", e?.action || e?.event || "-"],
+          ["结果", e?.result || e?.status || "-"],
           ["对象", e?.resource || e?.path || "-"],
+          ["详情", e?.detail || e?.message || "-"],
           ["IP", e?.ip || e?.addr || "-"],
         ];
         return `<div class="kv">${kv.map(([k,v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`).join("")}</div>`;
@@ -1148,6 +1224,19 @@ async function renderSSH() {
   async function putConfig(fullConfig) {
     // 返回后端响应；错误由调用方显示
     return await fetchJson("/api/v1/config", { method: "PUT", body: fullConfig });
+  }
+
+  async function putPlugin(id, pluginDraft) {
+    // 优先使用每插件端点；404 时由调用方决定回退
+    const payload = {
+      enabled: !!(pluginDraft?.enable ?? pluginDraft?.enabled),
+      config: pluginDraft?.config ?? {},
+    };
+    preserveSecrets(payload);
+    return await fetchJson(`/api/v1/plugins/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: payload,
+    });
   }
 
   function preserveSecrets(obj) {
@@ -2098,13 +2187,31 @@ async function renderLAN() {
     grid.appendChild(vlEditor);
     mountUxBar(content, {
       onSave: async () => {
-        const res = await saveSection("plugins.vlan", draft, { andGenerate: false });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        try {
+          await putPlugin("vlan", draft);
+          alert("已保存");
+        } catch (e) {
+          if (e?.status === 404) {
+            const res = await saveSection("plugins.vlan", draft, { andGenerate: false });
+            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存");
+          } else {
+            alert(`保存失败：${e?.message || "未知错误"}`);
+          }
+        }
       },
       onSaveAndGenerate: async () => {
-        const res = await saveSection("plugins.vlan", draft, { andGenerate: true });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-        else alert("已保存并提交生成任务（不应用运行态）");
+        try {
+          await putPlugin("vlan", draft);
+          await fetchJson("/api/v1/apply", { method: "POST" });
+          alert("已保存并提交生成任务（不应用运行态）");
+        } catch (e) {
+          if (e?.status === 404) {
+            const res = await saveSection("plugins.vlan", draft, { andGenerate: true });
+            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存并提交生成任务（不应用运行态）");
+          } else {
+            alert(`保存失败：${e?.message || "未知错误"}`);
+          }
+        }
       },
     });
   }
@@ -2149,13 +2256,31 @@ async function renderLAN() {
     refreshT();
     mountUxBar(content, {
       onSave: async () => {
-        const res = await saveSection("plugins.tailscale", draft, { andGenerate: false });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        try {
+          await putPlugin("tailscale", draft);
+          alert("已保存");
+        } catch (e) {
+          if (e?.status === 404) {
+            const res = await saveSection("plugins.tailscale", draft, { andGenerate: false });
+            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存");
+          } else {
+            alert(`保存失败：${e?.message || "未知错误"}`);
+          }
+        }
       },
       onSaveAndGenerate: async () => {
-        const res = await saveSection("plugins.tailscale", draft, { andGenerate: true });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-        else alert("已保存并提交生成任务（不应用运行态）");
+        try {
+          await putPlugin("tailscale", draft);
+          await fetchJson("/api/v1/apply", { method: "POST" });
+          alert("已保存并提交生成任务（不应用运行态）");
+        } catch (e) {
+          if (e?.status === 404) {
+            const res = await saveSection("plugins.tailscale", draft, { andGenerate: true });
+            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存并提交生成任务（不应用运行态）");
+          } else {
+            alert(`保存失败：${e?.message || "未知错误"}`);
+          }
+        }
       },
     });
   }
@@ -2210,13 +2335,31 @@ async function renderLAN() {
     refreshZ();
     mountUxBar(content, {
       onSave: async () => {
-        const res = await saveSection("plugins.zerotier", draft, { andGenerate: false });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
+        try {
+          await putPlugin("zerotier", draft);
+          alert("已保存");
+        } catch (e) {
+          if (e?.status === 404) {
+            const res = await saveSection("plugins.zerotier", draft, { andGenerate: false });
+            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存");
+          } else {
+            alert(`保存失败：${e?.message || "未知错误"}`);
+          }
+        }
       },
       onSaveAndGenerate: async () => {
-        const res = await saveSection("plugins.zerotier", draft, { andGenerate: true });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-        else alert("已保存并提交生成任务（不应用运行态）");
+        try {
+          await putPlugin("zerotier", draft);
+          await fetchJson("/api/v1/apply", { method: "POST" });
+          alert("已保存并提交生成任务（不应用运行态）");
+        } catch (e) {
+          if (e?.status === 404) {
+            const res = await saveSection("plugins.zerotier", draft, { andGenerate: true });
+            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存并提交生成任务（不应用运行态）");
+          } else {
+            alert(`保存失败：${e?.message || "未知错误"}`);
+          }
+        }
       },
     });
   }
