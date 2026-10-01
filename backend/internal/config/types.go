@@ -106,6 +106,7 @@ type FirewallConfig struct {
 	UPnPEnable  bool   `json:"upnpEnable,omitempty"`
 	Description string `json:"description,omitempty"`
 	PortForwards []PortForward `json:"portForwards,omitempty"`
+	BlockedMACs []string `json:"blockedMacs,omitempty"`
 	// Future: lanServices...
 }
 
@@ -391,6 +392,12 @@ func (c *Config) Validate() error {
 		}
 		if pf.DestPort < 1 || pf.DestPort > 65535 {
 			return errors.New("firewall.portForwards[].destPort 1-65535")
+		}
+	}
+	// Firewall blocked MACs
+	for _, m := range c.Firewall.BlockedMACs {
+		if _, err := net.ParseMAC(m); err != nil {
+			return fmt.Errorf("firewall.blockedMacs invalid: %s", m)
 		}
 	}
 	// DDNS sanity

@@ -31,6 +31,7 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - `GET /api/v1/plugins`：插件列表（来自配置）
 - `PUT /api/v1/plugins/{id}`：启用/禁用（以及配置项变更，`"****"`/空值会被视为“保持原有机密值不变”）
 - `GET /api/v1/clients`：客户端列表（优先租约来源，否则基于静态租约，`source: "stub"`）
+  - 解析 dnsmasq 租约（默认 `/var/lib/misc/dnsmasq.leases`，可用 `NIXOS_ROUTER_DNSMASQ_LEASES` 指定；或 `stateDir/generated/dnsmasq.leases` 等），与静态租约合并（hostname 补全），`source: "leases"|"mixed"|"stub"`
 - `GET /api/v1/capabilities/wifi`：WiFi 能力（桩值/来自 env）
 - `POST /api/v1/session`：登录，设置 HttpOnly Cookie（SameSite=Lax）
 - `GET /api/v1/session`：查看会话（需已登录）
@@ -160,4 +161,15 @@ go test ./...
 - 内置可选插件：adblock、traffic、mihomo、vlan、tailscale、zerotier（以及 qos/parental/ddns/ipv6 若以插件化建模）
 - `GET /api/v1/plugins` 返回插件清单（含启用状态与导航元数据）
 - `PUT /api/v1/plugins/{id}` 可启用/禁用与更新配置；生效语义为“冷加载”，下一次生成/服务重启后生效；前端导航会依据启用状态显示/隐藏
+
+## 生成器扩展（M8）
+- `stateDir/generated/plugins/`：根据插件配置写入片段（仅生成，不下载/不执行）：
+  - `adblock.conf.fragment`：`address=/domain/0.0.0.0` + 订阅 URL 注释（不下载）
+  - `traffic.conf.fragment`：保留期等注记
+  - `mihomo.yaml`：最小 YAML 骨架（profile/mode/tun/dns.port）
+  - `vlan.network.fragment`：VLAN 备注（vid/name/bridge）
+  - `tailscale.env.fragment`：controlPlane/loginServer 等，密钥以 `****` 占位
+  - `zerotier.conf.fragment`：networks 加入列表与 controllerUrl 注记（token 以 `****` 占位）
+  - 禁用插件会写入 `plugins/<id>.DISABLED` 或仅 notes
+- QoS/Parental/IPv6：补充示例/注记片段（`qos.conf.fragment`、`parental.conf.fragment`、`ipv6.nft.fragment` 中含 ICMPv6 放通注释）
 
