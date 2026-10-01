@@ -15,7 +15,7 @@ inputs.nixos-router.url = "github:dnfn-tech/nixos-router";
 - NixOS 模块会安装 Web UI + API + apply agent（仅 LAN 监听），并在激活时从 `config.json` 幂等再应用
 - 远程/git 更新模块与程序时，不清空 `/var/lib/nixos-router`
 - 页面由功能模块/插件贡献（导航与页面注册），核心页面固定存在；可选模块可在运行期启用/禁用
-  - 可选内置模块示例：QoS、家长控制、DDNS、IPv6、广告过滤（AdBlock）、流量统计（Traffic）、代理（Mihomo）、VLAN
+  - 可选内置模块示例：QoS、家长控制、DDNS、IPv6、广告过滤（AdBlock）、流量统计（Traffic）、代理（Mihomo）、VLAN、Tailscale、Zerotier
 
 ## Docs
 

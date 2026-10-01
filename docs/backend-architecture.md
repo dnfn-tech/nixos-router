@@ -277,6 +277,7 @@ type CoreRegistry interface {
 - 将当前功能以模块形态实现，即使在 v1 作为“内置”：
   - 基础：`wan`、`lan`、`wifi`、`firewall`、`nat`/`upnp`、`ddns`、`ipv6`、`ssh`、`system`
   - 可选：`qos`、`parental`、`adblock`（广告过滤，基于 dnsmasq 列表）、`traffic`（流量统计，vnstat 或 nft/conntrack 聚合）、`mihomo`（Clash Meta 代理）、`vlan`（多 VLAN/LAN）
+  - 可选：`tailscale`（远程接入/overlay）、`zerotier`（远程接入/overlay）
 - 好处
   - 职责清晰、边界明确；后续替换/增强任一模块不影响核心与其他模块
   - 第三方仅需遵守合同与能力声明，即可新增业务能力（例如广告过滤、VPN、报表等）
@@ -307,4 +308,8 @@ type CoreRegistry interface {
 - vlan
   - 基于 802.1Q 创建 VLAN 子接口并加入各自桥（如 `br-vlan10`），为每个 VLAN 配置 IPv4/子网；生成对应 dnsmasq 池与域名设置；按 `isolate` 生成/撤销 nftables 隔离规则
   - 插件关闭时回到默认单一 `br-lan` 拓扑
+- tailscale
+  - 管理 `tailscaled` 服务与 `tailscale up` 参数；按 `advertiseRoutes` 通告局域网段；配合 nftables 放行必要端口/协议；禁用停止服务并撤销路由
+- zerotier
+  - 管理 `zerotier-one` 服务，加入/离开 `networks[]`；按 `managedRoutes` 配置路由；配合 nftables 放行必要端口/协议；禁用停止服务并撤销路由
 

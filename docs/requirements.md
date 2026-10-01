@@ -29,7 +29,7 @@
 
 ## 信息架构（侧栏）
 - 基础：概览、上网（WAN）、局域网（LAN）、WiFi、设备
-- 网络服务：DNS、防火墙、QoS、家长控制、动态 DNS、IPv6、广告过滤（AdBlock，可选）、流量统计（Traffic，可选）、代理（Mihomo，可选）、VLAN（可选）
+- 网络服务：DNS、防火墙、QoS、家长控制、动态 DNS、IPv6、广告过滤（AdBlock，可选）、流量统计（Traffic，可选）、代理（Mihomo，可选）、VLAN（可选）、Tailscale（可选）、Zerotier（可选）
 - 系统：远程管理（SSH）、系统、插件（模块管理）
 
 说明：概览为状态卡片与“扁平网口视图”（WAN/LAN1… 并列，无拓扑；不展示无线拓扑）。
@@ -56,6 +56,8 @@
 - 流量统计（可选 `plugins.traffic`）：接口/客户端流量展示；首选 vnstat（或 nft/conntrack 聚合）；只读统计 API 与启用/保留期配置
 - 代理（可选 `plugins.mihomo`）：基于 Clash Meta（mihomo），生成配置与管理服务；可选 TUN；与 dnsmasq 的 DNS 交互在 `redir-host`/`fake-ip` 模式下需谨慎；禁用隐藏页面并在 apply 停止服务
 - VLAN（可选 `plugins.vlan`）：提供多 VLAN/LAN 能力（802.1Q VID、每 VLAN 桥/子网/DHCP、隔离），默认插件关闭时保持单一 `br-lan`；启用后可管理 VLAN；（later）WiFi BSS → VLAN 映射
+- Tailscale（可选 `plugins.tailscale`）：远程接入/overlay；支持 `advertiseRoutes` 与 `acceptRoutes`；谨慎配置防火墙；禁用隐藏页面并在 apply 停止服务与撤销路由
+- Zerotier（可选 `plugins.zerotier`）：远程接入/overlay；加入 `networks[]` 并按需配置路由；谨慎配置防火墙；禁用隐藏页面并在 apply 停止服务与撤销路由
 
 ## 保存/应用 UX 状态机
 - 状态
@@ -103,7 +105,7 @@
 - 广告过滤与家长内容分级
  
 ## 验收（插件页面控制）
-- 关闭可选插件（如 QoS/DDNS/IPv6/AdBlock/Traffic/Mihomo/VLAN）后，其侧栏入口与页面不可见；相关 API 返回 404/disabled
+- 关闭可选插件（如 QoS/DDNS/IPv6/AdBlock/Traffic/Mihomo/VLAN/Tailscale/Zerotier）后，其侧栏入口与页面不可见；相关 API 返回 404/disabled
 - 重新启用后，入口与页面恢复；核心页面（overview/wan/lan/wifi/clients/dns/firewall/ssh/system/plugins-mgmt）始终存在且不可通过 WebUI 禁用
 
 ## 参考
