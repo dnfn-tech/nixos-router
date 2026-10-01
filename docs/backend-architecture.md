@@ -147,3 +147,109 @@
 - 本架构与 `docs/requirements.md` 的 IA/功能与 UX 状态机一致
 - 存储方案与 PR 中的 `docs/storage-choice.md`（混合：JSON + SQLite）一致；本文不再重复 rationale
 
+## 插件 / 功能模块（Plugin / Feature Module）
+
+为保证后续功能可扩展且不重写核心，后端采用“稳定内核 + 功能模块”的架构。核心仅提供通用能力：配置注册、作业队列、审计、会话/鉴权、设备与状态查询、机密存取；具体网络功能（如 WAN、LAN、WiFi、Firewall、QoS、Parental、DDNS、IPv6 等）以“内置一方模块”的方式实现，并为将来第三方模块预留扩展点。
+
+### 合同（Contract）
+- Manifest（模块自描述）
+  - `id`：唯一标识（短横线/小写），如 `wan`、`wifi`、`ddns`、`qos`
+  - `name`：显示名
+  - `version`：语义化版本
+  - `apiRoutes`：该模块向核心路由器注册的 REST 路由（前缀 `/api/plugins/<id>/...`）
+  - `ui`：导航项与页面挂载点声明（前端静态资源路径或路由片段）
+  - `configSchema`：JSON Schema 片段（合并到总 schema 的 `plugins.<id>` 节点）
+  - `applyHooks`：声明实现的钩子（`preValidate` / `postValidate` / `generate` / `preReload` / `postReload`）
+  - `capabilities`：需要的能力/权限（如需访问客户端列表/机密读取等）
+- Go 接口草图（示意）
+
+```go
+// 插件主接口：暴露 Manifest 与注册期回调
+type Plugin interface {
+  Manifest() Manifest
+  Register(core CoreRegistry) error // 注入路由、配置段、钩子、UI、指标等
+}
+
+type Manifest struct {
+  ID           string
+  Name         string
+  Version      string
+  APIRoutes    []APIRoute
+  UI           UIContribution
+  Capabilities []Capability
+}
+
+type UIContribution struct {
+  NavItems []NavItem // 侧栏入口，如分组/排序/图标
+  Pages    []UIPage  // /ui/plugins/<id>/* 静态资源或挂载点
+}
+
+// 配置段：各模块自行声明 schema/默认值与校验
+type ConfigSection interface {
+  Namespace() string      // 如 "plugins.ddns" 或内置 "wan"
+  JSONSchema() []byte     // 单段 schema，核心合并
+  DefaultConfig() any
+  Validate(cfg any) error
+}
+
+// Apply 生命周期钩子：Worker 在统一的作业中按序调用
+type ApplyHook interface {
+  PreValidate(ctx context.Context, cfg *Config) error
+  PostValidate(ctx context.Context, cfg *Config) error
+  Generate(ctx context.Context, cfg *Config, out Dir) error // 生成 nftables/dnsmasq/hostapd/ppp 等片段
+  PreReload(ctx context.Context, cfg *Config) error
+  PostReload(ctx context.Context, cfg *Config) error
+}
+
+// 核心可被注入/调用的稳定服务接口（节选）
+type CoreRegistry interface {
+  Router() Mux                                // 注册路由（统一鉴权/CSRF 中间件链）
+  RegisterConfig(cs ConfigSection) error      // 注册配置段
+  RegisterApply(h ApplyHook) error            // 注册 apply 钩子
+  Secrets() SecretStore                       // 机密读取/写入（受权限）
+  Jobs() JobQueue                             // 提交/查询作业
+  Audit() AuditLogger                         // 记录审计事件
+  Clients() ClientsProvider                   // 在线设备与统计
+}
+```
+
+### 生命周期
+1) Discover：核心扫描已编译内置注册表与（可选）外置目录，找到可用插件
+2) Register：读取 manifest，注册路由/配置段/schema/钩子/UI
+3) Enable/Disable：更新启用状态（v1 推荐“冷加载”：开关后重启 API/Apply 服务）
+4) Configure：在 `config.json` 的 `plugins.<id>` 下写入配置；保存后进入统一 apply 作业
+5) Apply Hooks：按“preValidate → postValidate → generate → preReload → postReload”顺序调用；任何一步失败均中止并返回错误
+
+### 隔离与稳定内核
+- 安全边界
+  - 插件注册的 API 路由通过核心中间件统一处理：LAN-only 监听、会话鉴权、CSRF、防火墙策略不可绕过
+  - 访问机密/作业/审计/设备信息等能力需在 manifest 中声明 `capabilities`，核心按最小权限发放
+- 稳定服务 API
+  - 配置注册/总 schema 合并、作业队列、审计日志、在线设备查询、机密存储
+  - 插件不得自行直接操作系统服务（如直接重启 `dnsmasq`），一律通过 `ApplyHook.Generate` 产出配置 → 核心统一 reload/restart
+
+### 打包与分发
+- 一方（内置）模块：随核心同仓编译进同一 Go 二进制（注册表静态链接），最小化部署复杂度（v1 推荐）
+- 三方（外置）模块：后续版本提供“本地子进程”协议（如 JSON-RPC over stdio）与静态资源目录约定
+- NixOS 选项
+  - `services.nixosRouter.plugins = [ "wan" "lan" "wifi" "firewall" "qos" "parental" "ddns" "ipv6" ];`
+  - 外置模块可通过 Nix 包装放入约定目录（如 `/run/nixos-router/plugins`），由核心 Discover
+- 资源交付
+  - 二进制：内置编译；外置单独 derivation
+  - 前端：每个插件可携带 `/ui/plugins/<id>/` 静态资源，核心统一挂载
+
+### 热/冷加载
+- v1 建议：启用/禁用插件后，重启 `nixos-router-api` 与 `nixos-router-apply`（冷加载），保证一致性与最小实现成本
+- 后续可选：在不变更路由/中间件链的前提下支持热加载 UI 与钩子
+
+### 配置合并（Config Merge）
+- 核心 `config.json` 增加命名空间：`plugins.<id>`；插件暴露的 `configSchema` 合并入总 schema
+- 保存时：核心校验“内核段 + 各插件段”后整体原子写；apply 时统一串行执行所有启用插件的钩子
+
+### 模块化映射（内置一方）
+- 将当前功能以模块形态实现，即使在 v1 作为“内置”：
+  - `wan`、`lan`、`wifi`、`firewall`、`nat`/`upnp`、`qos`、`parental`、`ddns`、`ipv6`
+- 好处
+  - 职责清晰、边界明确；后续替换/增强任一模块不影响核心与其他模块
+  - 第三方仅需遵守合同与能力声明，即可新增业务能力（例如广告过滤、VPN、报表等）
+
