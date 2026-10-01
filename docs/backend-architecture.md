@@ -309,7 +309,7 @@ type CoreRegistry interface {
   - 基于 802.1Q 创建 VLAN 子接口并加入各自桥（如 `br-vlan10`），为每个 VLAN 配置 IPv4/子网；生成对应 dnsmasq 池与域名设置；按 `isolate` 生成/撤销 nftables 隔离规则
   - 插件关闭时回到默认单一 `br-lan` 拓扑
 - tailscale
-  - 管理 `tailscaled` 服务与 `tailscale up` 参数；当 `controlPlane=selfhost` 时追加 `--login-server=$loginServer`（Headscale）；按 `advertiseRoutes` 通告局域网段；配合 nftables 放行必要端口/协议；禁用停止服务并撤销路由
+  - 管理 `tailscaled` 服务与 `tailscale up` 参数；\n    - `official`：直接登录官方控制面\n    - `selfhost`：追加 `--login-server=$loginServer`（外部 Headscale）\n    - `headscale`：生成并管理 `headscale.service`（配置/数据位于 `stateDir/headscale`），生成预授权密钥，`tailscale up --login-server=$localURL` 接入本机 Headscale；nftables 仅对 LAN 放行 Headscale HTTP 管理端口（不对 WAN 暴露）；\n  - 按 `advertiseRoutes` 通告局域网段；配合 nftables 放行必要端口/协议；禁用时停止 `tailscaled`/`headscale` 并撤销路由
 - zerotier
   - 管理 `zerotier-one` 服务；当 `controlPlane=selfhost` 时将客户端指向 `controllerUrl` 并使用 `apiToken`；加入/离开 `networks[]`；按 `managedRoutes` 配置路由；配合 nftables 放行必要端口/协议；禁用停止服务并撤销路由
 

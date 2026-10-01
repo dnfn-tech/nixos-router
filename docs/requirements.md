@@ -56,7 +56,7 @@
 - 流量统计（可选 `plugins.traffic`）：接口/客户端流量展示；首选 vnstat（或 nft/conntrack 聚合）；只读统计 API 与启用/保留期配置
 - 代理（可选 `plugins.mihomo`）：基于 Clash Meta（mihomo），生成配置与管理服务；可选 TUN；与 dnsmasq 的 DNS 交互在 `redir-host`/`fake-ip` 模式下需谨慎；禁用隐藏页面并在 apply 停止服务
 - VLAN（可选 `plugins.vlan`）：提供多 VLAN/LAN 能力（802.1Q VID、每 VLAN 桥/子网/DHCP、隔离），默认插件关闭时保持单一 `br-lan`；启用后可管理 VLAN；（later）WiFi BSS → VLAN 映射
-- Tailscale（可选 `plugins.tailscale`）：远程接入/overlay；支持 `controlPlane: official | selfhost` 与 `loginServer`（Headscale）；`advertiseRoutes`/`acceptRoutes`；谨慎配置防火墙；禁用隐藏页面并在 apply 停止服务与撤销路由
+- Tailscale（可选 `plugins.tailscale`）：远程接入/overlay；支持三种控制面模式：\n  - `official`：tailscale.com 官方控制面\n  - `selfhost`：连接外部 Headscale（`loginServer`）\n  - `headscale`：在本机运行 Headscale（管理 `headscale.service`，数据于状态目录，生成预授权密钥，本机客户端使用本地 `--login-server`）；谨慎配置防火墙，仅对 LAN 放行管理端口；禁用隐藏页面并在 apply 停止 `tailscaled`/`headscale` 并撤销路由
 - Zerotier（可选 `plugins.zerotier`）：远程接入/overlay；支持 `controlPlane: official | selfhost` 与 `controllerUrl`/`apiToken`；加入 `networks[]` 并按需配置路由；谨慎配置防火墙；禁用隐藏页面并在 apply 停止服务与撤销路由
 
 ## 保存/应用 UX 状态机

@@ -81,17 +81,29 @@
 - Apply：为每个 VLAN 创建/更新 802.1Q 子接口与桥，生成 dnsmasq 的每 VLAN 段配置，按 `isolate` 生成 nftables 隔离规则；默认插件关闭时维持单一 `br-lan`
 
 ### Tailscale（可选远程接入）
-- 目标：通过 Tailscale 提供远程接入/overlay 网络能力（可选），谨慎发布局域网路由
+- 目标：通过 Tailscale 提供远程接入/overlay 网络能力（可选），谨慎发布局域网路由；支持三种控制面模式
 - 配置：`plugins.tailscale`（例如）
   - `enabled`：是否启用
-  - `controlPlane`：`official | selfhost`（自建控制面使用 Headscale）
+  - `controlPlane`：`official | selfhost | headscale`
+    - `official`：使用 tailscale.com 官方控制面
+    - `selfhost`：连接外部自建 Headscale，需提供 `loginServer`
+    - `headscale`：在本机运行 Headscale 作为控制面（见下）
   - `loginServer`：当 `controlPlane=selfhost` 时必填（Headscale URL，如 `https://headscale.example.com`）
   - `authKey`：可选一次性授权秘钥（建议通过机密存储而非明文）
   - `advertiseRoutes[]`：对外通告的 CIDR（如 `192.168.88.0/24`），需配合防火墙策略
   - `acceptRoutes`：是否接受来自管理面的路由下发
   - `userspaceNetworking`：可选（视设备能力）
-- UI：侧栏“网络服务”分组新增“Tailscale”，管理启用/登录状态/路由通告
-- Apply：管理 `tailscaled`/`tailscale up`（当 `selfhost` 时追加 `--login-server=$loginServer`），根据配置通告/接受路由；nftables 放行必要流量；禁用时停止服务并撤销路由
+  - `headscale`：（当 `controlPlane=headscale` 时生效）
+    - `listen`：Headscale 监听地址（如 `0.0.0.0:8085`，仅 LAN 放行）
+    - `baseURL`：Headscale 对外可访问的 URL（如 `https://router.lan:8085`）
+    - `dataDir`：数据目录（默认位于状态目录 `stateDir/headscale`）
+    - `preAuthKeyTTL`：预授权密钥有效期（可选）
+    - `tls`：可选 TLS 配置（later）
+- UI：侧栏“网络服务”分组新增“Tailscale”，管理启用/登录状态/路由通告/（本机 Headscale 时）控制面状态与预授权密钥
+- Apply：
+  - `official`：管理 `tailscaled`/`tailscale up`
+  - `selfhost`：与上同，但追加 `--login-server=$loginServer`
+  - `headscale`：生成 Headscale 配置与数据目录，管理 `headscale.service`，通过 headscale CLI 生成预授权密钥；本机 `tailscale up --login-server=$localURL`；nftables 仅对 LAN 放行 Headscale HTTP 管理端口；禁用时停止 `tailscaled` 与 `headscale` 并撤销路由
 
 ### Zerotier（可选远程接入）
 - 目标：通过 Zerotier 提供 overlay 网络能力（可选），谨慎加入网络与路由通告
