@@ -110,6 +110,7 @@ func (d *DB) AddAudit(actor, action, detail string) {
 }
 
 type AuditEntry struct {
+	ID     int64
 	TS     time.Time
 	Actor  string
 	Action string
@@ -120,7 +121,7 @@ func (d *DB) ListAudit(limit int) ([]AuditEntry, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
-	rows, err := d.SQL.Query(`SELECT ts, actor, action, detail FROM audit_log ORDER BY ts DESC LIMIT ?`, limit)
+	rows, err := d.SQL.Query(`SELECT id, ts, actor, action, detail FROM audit_log ORDER BY ts DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +130,7 @@ func (d *DB) ListAudit(limit int) ([]AuditEntry, error) {
 	for rows.Next() {
 		var a AuditEntry
 		var ts int64
-		if err := rows.Scan(&ts, &a.Actor, &a.Action, &a.Detail); err != nil {
+		if err := rows.Scan(&a.ID, &ts, &a.Actor, &a.Action, &a.Detail); err != nil {
 			return nil, err
 		}
 		a.TS = time.Unix(ts, 0)
@@ -188,6 +189,16 @@ func (d *DB) GetSession(id string) (username string, expiresAt time.Time, ok boo
 
 func (d *DB) DeleteSession(id string) error {
 	_, err := d.SQL.Exec(`DELETE FROM sessions WHERE id=?`, id)
+	return err
+}
+
+func (d *DB) UpdateUserPassword(username, newHash string) error {
+	_, err := d.SQL.Exec(`UPDATE users SET password_hash=?, created_at=created_at WHERE username=?`, newHash, username)
+	return err
+}
+
+func (d *DB) DeleteSessionsByUserExcept(username, exceptSessionID string) error {
+	_, err := d.SQL.Exec(`DELETE FROM sessions WHERE user=? AND id<>?`, username, exceptSessionID)
 	return err
 }
 

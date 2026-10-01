@@ -45,6 +45,12 @@ in
       description = "开发模式（免鉴权 + CORS *)";
     };
 
+    allowReboot = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "允许 /api/v1/system/reboot 执行系统重启（默认关闭，极其谨慎）";
+    };
+
     environment = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
@@ -73,6 +79,7 @@ in
         NIXOS_ROUTER_STATE_DIR = cfg.stateDir;
         NIXOS_ROUTER_ADDR = cfg.address;
         NIXOS_ROUTER_DEV = lib.boolToString cfg.dev;
+        NIXOS_ROUTER_ALLOW_REBOOT = lib.boolToString cfg.allowReboot;
       };
     };
   };

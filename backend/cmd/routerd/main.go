@@ -30,6 +30,7 @@ func main() {
 	seed := flag.Bool("seed-default-config", false, "If set and config file missing, write default config.json (dev convenience)")
 	webDir := flag.String("web-dir", "", "Serve WebUI from local directory instead of embedded assets (dev only)")
 	applyReload := flag.Bool("apply-reload", envBool("NIXOS_ROUTER_APPLY_RELOAD", false), "Allow runtime reload during apply (currently stub)")
+	allowReboot := flag.Bool("allow-reboot", envBool("NIXOS_ROUTER_ALLOW_REBOOT", false), "Allow system reboot endpoint to execute reboot")
 	flag.Parse()
 
 	opts := config.LoadOptions{
@@ -75,7 +76,8 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Printf("routerd %s listening on %s (config=%s, stateDir=%s, dev=%v, webDir=%s)", version, *addr, cfgPath, opts.StateDir, *dev, *webDir)
+	_ = allowReboot // flag currently only gates env; printed hint below
+	log.Printf("routerd %s listening on %s (config=%s, stateDir=%s, dev=%v, webDir=%s, allowReboot=%v)", version, *addr, cfgPath, opts.StateDir, *dev, *webDir, *allowReboot)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("listen: %v", err)
 	}

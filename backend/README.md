@@ -41,6 +41,10 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - `GET /api/v1/jobs/{id}`：查询作业状态（`mode: generate-only`，`appliedRuntime: false`）
 - `GET /api/v1/jobs?limit=20`：按创建时间倒序返回最近作业
 - `GET /api/v1/audit?limit=50`：审计日志（时间倒序）
+- `POST /api/v1/session/password`（别名 `PUT /api/v1/account/password`）：修改密码，body: `{"currentPassword","newPassword"}`；成功 200，失败返回 400/401；审计记录
+- `GET /api/v1/backup`（别名 `GET /api/v1/system/backup`）：下载配置备份（application/json，文件名 `nixos-router-backup-YYYYMMDD.json`，含完整 config 含敏感字段）
+- `POST /api/v1/backup/restore`：恢复备份（body 为 `{config:{...}}` 或原始 config 对象，或 multipart 文件上传）；验证通过后原子写入，仅保存不 apply；审计记录
+- `POST /api/v1/system/reboot`：重启（默认禁用；`--dev` 或未设置 `NIXOS_ROUTER_ALLOW_REBOOT=1` 返回 501），仅在显式允许时返回 `{ok:true, scheduled:true}` 并后台执行；审计记录
 
 ## WebUI（静态资源）
 
@@ -97,6 +101,20 @@ curl -s -b cookie.txt 'http://localhost:8080/api/v1/jobs?limit=5' | jq .
 ls -la ./_state/generated/
 curl -s -b cookie.txt 'http://localhost:8080/api/v1/audit?limit=20' | jq .
 
+# 8) 修改密码
+curl -s -b cookie.txt -H 'Content-Type: application/json' \
+  -d '{"currentPassword":"oldpass","newPassword":"newpass123"}' \
+  http://localhost:8080/api/v1/session/password | jq .
+
+# 9) 备份/恢复
+curl -s -b cookie.txt -D headers.txt http://localhost:8080/api/v1/backup -o backup.json
+jq '.config.system.hostname="restored-host"' backup.json > backup2.json
+curl -s -b cookie.txt -H 'Content-Type: application/json' \
+  -d @backup2.json http://localhost:8080/api/v1/backup/restore | jq .
+
+# 10) 重启（默认禁用，返回 501）
+curl -i -b cookie.txt -X POST http://localhost:8080/api/v1/system/reboot
+
 # 7) 登出
 curl -i -X DELETE -b cookie.txt http://localhost:8080/api/v1/session
 ```
@@ -119,6 +137,7 @@ go test ./...
 - flake `packages.<system>.routerd`：包含嵌入的 WebUI
 - NixOS 模块：`services.nixos-router.backend.enable = true;` 启用后访问 `http://<lan-ip>:8080/` 即可同源打开 UI 与 API
   - 可选：`services.nixos-router.backend.applyReload = true;` 启用占位 reload 钩子（默认关闭）
+  - 可选：`services.nixos-router.backend.allowReboot = true;` 显式允许后端执行重启（默认关闭）
 
 ## 账户与会话
 

@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -91,11 +92,17 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/clients", s.handleClients)
 	mux.HandleFunc("/api/v1/capabilities/wifi", s.handleWifiCaps)
 	mux.HandleFunc("/api/v1/session", s.handleSession)
+	mux.HandleFunc("/api/v1/session/password", s.handlePasswordChange)
+	mux.HandleFunc("/api/v1/account/password", s.handlePasswordChange) // alias
 	mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("/api/v1/apply", s.handleApply)
 	mux.HandleFunc("/api/v1/jobs/", s.handleJobByID)
 	mux.HandleFunc("/api/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/api/v1/audit", s.handleAudit)
+	mux.HandleFunc("/api/v1/backup", s.handleBackup)
+	mux.HandleFunc("/api/v1/system/backup", s.handleBackup) // alias
+	mux.HandleFunc("/api/v1/backup/restore", s.handleRestore)
+	mux.HandleFunc("/api/v1/system/reboot", s.handleReboot)
 	// Static UI for non-/api paths
 	mux.Handle("/", http.HandlerFunc(s.handleSPA))
 }
@@ -104,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.routes(mux)
 	h := s.wrapAuth(mux)
+	h = s.wrapCSRF(h)
 	return s.wrapCORS(h)
 }
 
@@ -138,6 +146,34 @@ func (s *Server) wrapAuth(next http.Handler) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	})
+}
+
+// wrapCSRF: for non-GET state-changing requests, when Origin is present, require same-origin;
+// allow absence of Origin (curl/tools) and preflight OPTIONS.
+func (s *Server) wrapCSRF(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		host := r.Host
+		// basic same-origin check
+		if strings.Contains(origin, host) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Also allow when Sec-Fetch-Site indicates same-origin
+		if r.Header.Get("Sec-Fetch-Site") == "same-origin" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "CSRF check failed: Origin not allowed", http.StatusForbidden)
 	})
 }
 
@@ -563,6 +599,56 @@ func keysOf(m map[string]interface{}) []string {
 	return keys
 }
 
+func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user, _, ok := s.getSession(r)
+	if !ok && s.requireAuth {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	var body struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.NewPassword) == "" || len(body.NewPassword) < 8 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "新密码太短（至少 8 位）"})
+		return
+	}
+	// verify current
+	hash, err := s.db.GetUserPasswordHash(user)
+	if err != nil || hash == "" {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.CurrentPassword)) != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "当前密码不正确"})
+		return
+	}
+	// update
+	newHash, err := bcrypt.GenerateFromPassword([]byte(body.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if err := s.db.UpdateUserPassword(user, string(newHash)); err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	// invalidate other sessions
+	if sid, _ := readSessionCookie(r); sid != "" {
+		_ = s.db.DeleteSessionsByUserExcept(user, sid)
+	}
+	s.db.AddAudit(user, "password_change", "success")
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+}
+
 func isRedactedOrEmpty(s string) bool {
 	return s == "" || s == "****"
 }
@@ -736,13 +822,119 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]interface{}, 0, len(items))
 	for _, a := range items {
 		out = append(out, map[string]interface{}{
-			"ts":     a.TS.UTC().Format(time.RFC3339),
+			"id":     a.ID,
+			"at":     a.TS.UTC().Format(time.RFC3339),
 			"actor":  a.Actor,
 			"action": a.Action,
 			"detail": a.Detail,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"audit": out})
+}
+
+func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Always return JSON bundle of config for v1
+	cfg, err := config.LoadFromFile(s.cfgPath)
+	if err != nil {
+		http.Error(w, "failed to load config", http.StatusInternalServerError)
+		return
+	}
+	filename := "nixos-router-backup-" + time.Now().UTC().Format("20060102") + ".json"
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"kind":   "nixos-router-backup",
+		"format": "config+json",
+		"config": cfg, // include secrets
+		"createdAt": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Try multipart first
+	ct := r.Header.Get("Content-Type")
+	var newCfg config.Config
+	var err error
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		if err := r.ParseMultipartForm(10 << 20); err != nil { // 10MB
+			http.Error(w, "bad multipart form", http.StatusBadRequest)
+			return
+		}
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "missing file", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+		data, _ := io.ReadAll(file)
+		var wrapper struct{ Config *config.Config `json:"config"` }
+		if json.Unmarshal(data, &wrapper) == nil && wrapper.Config != nil {
+			newCfg = *wrapper.Config
+		} else if json.Unmarshal(data, &newCfg) != nil {
+			http.Error(w, "invalid JSON in backup", http.StatusBadRequest)
+			return
+		}
+	} else {
+		// JSON body: either {config:{...}} or raw config object
+		body, _ := io.ReadAll(r.Body)
+		var wrapper struct{ Config *config.Config `json:"config"` }
+		if json.Unmarshal(body, &wrapper) == nil && wrapper.Config != nil {
+			newCfg = *wrapper.Config
+		} else if json.Unmarshal(body, &newCfg) != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+	}
+	// Secret-aware merge to preserve placeholders if present
+	newCfg = s.mergeSecrets(s.cfg, newCfg)
+	// Also merge plugin configs preserving redacted
+	if newCfg.Plugins != nil {
+		for pid, pc := range newCfg.Plugins {
+			if old, ok := s.cfg.Plugins[pid]; ok {
+				pc.Config = mergePreserveSecretsMap(old.Config, pc.Config)
+				newCfg.Plugins[pid] = pc
+			}
+		}
+	}
+	if err = newCfg.Validate(); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": []string{err.Error()}})
+		return
+	}
+	if err := config.SaveToFile(s.cfgPath, newCfg); err != nil {
+		http.Error(w, "failed to save config", http.StatusInternalServerError)
+		return
+	}
+	s.cfg = newCfg
+	s.db.AddAudit("system", "restore", "config-only saved")
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "applied": false})
+}
+
+func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	allow := os.Getenv("NIXOS_ROUTER_ALLOW_REBOOT") == "1"
+	if s.devMode || !allow {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "reboot disabled"})
+		return
+	}
+	// schedule reboot asynchronously
+	go func() {
+		// try systemctl reboot, fallback to /sbin/reboot
+		_ = execCommand("systemctl", "reboot")
+		_ = execCommand("/sbin/reboot")
+	}()
+	s.db.AddAudit("system", "reboot", "scheduled")
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "scheduled": true})
 }
 
 func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
@@ -1057,6 +1249,11 @@ func newSessionID() string {
 	var b [32]byte
 	_, _ = rand.Read(b[:])
 	return base64.RawURLEncoding.EncodeToString(b[:])
+}
+
+func execCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	return cmd.Start()
 }
 
 func (s *Server) clientKey(r *http.Request) string {
