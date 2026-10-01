@@ -1,5 +1,5 @@
 {
-  description = "NixOS 路由器通用模块 + Go 后端（只读 API）";
+  description = "NixOS 路由器通用模块 + Go 后端（内嵌 WebUI）";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
   inputs.flake-utils.url = "github:numtide/flake-utils";
@@ -14,7 +14,7 @@
           version = "0.1.0";
           src = ./.;
           subPackages = [ "backend/cmd/routerd" ];
-          # 初次构建时会提示正确的 vendorHash；替换后可复用缓存
+          # TODO: 首次 nix build 后将 vendorHash 替换为实际值以稳定缓存
           vendorHash = lib.fakeSha256;
         };
       in
