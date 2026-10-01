@@ -11,3 +11,7 @@ inputs.nixos-router.url = "github:dnfn-tech/nixos-router";
 ## Docs
 
 存储选型的设计与结论见 [docs/storage-choice.md](docs/storage-choice.md)。
+
+## Development
+
+前端 WebUI 原型见 `web/` 目录（在 `web/` 运行 `python -m http.server`；API 基址可用 `?api=` 或 `window.NIXOS_ROUTER_API` 指定）。
