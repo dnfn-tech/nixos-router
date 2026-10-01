@@ -1,6 +1,6 @@
 # 实现现状（v1 概览）
 
-状态：进行中（M11），默认“仅生成、不热更/不重启”。工作基于 `main`。
+状态：进行中（M12），默认“仅生成、不热更/不重启”。工作基于 `main`。
 
 ## 已实现（M1–M11 进展）
 - 配置 schema + 校验：WAN/LAN/DHCP/静态租约、DNS、WiFi（guest/isolate）、防火墙（NAT、端口转发、blockedMacs）、SSH、DDNS（cloudflare/duckdns/aliyun/custom）、QoS、Parental、IPv6
@@ -18,6 +18,15 @@
   - Parental：当 `parental.enable=true` 时，生成 `generated/parental.nft.fragment`，包含 `set blocked_macs` 与 `chain input` 引用（时间表 schedule 以注释保真，未强制执行）
   - QoS：当 `qos.enable=true` 时，生成可复用脚本 `generated/qos.sh`（HTB 上行整形 + ingress 简化限速），并保留 `qos.conf.fragment` 注记；新增运行态开关 `applyTrafficControl`（默认 false，且需 `applyReload=true` 才可能执行）
 - （M11）前端：总览页展示新实时字段（速率/双工、累计与速率估算），缺省优雅降级；同步 `web/` 与 `backend/web/` 的嵌入资源
+  
+## 新增（M12）
+- NixOS 模块首个落地就绪：
+  - 新增 `applyTrafficControl`（默认 false）接线到后端 CLI/env
+  - 新增 `privilegedApply`（默认 false）：仅在需要运行态动作时显式提权到 root；默认保持 `DynamicUser` 沙盒
+  - 可选 `openFirewall`（默认 false）：为 HTTP 端口打开 TCP（简单全局开启；更细的 LAN 约束请由操作者在防火墙中实现或将 `address` 绑定到 LAN IP）
+  - 可选 `consumeGenerated`（默认 false）：当启用时，为 `dnsmasq` 追加包含 `generated/dnsmasq.conf.fragment` 的 `extraConfig`（保守默认关闭，避免无意更改现网）
+- 后端参数对齐：支持 `--apply-traffic-control` 与 `NIXOS_ROUTER_APPLY_TRAFFIC_CONTROL`
+- 文档：新增 `docs/landing.md`（首次落地指南）
 
 ## 有意延后（后续迭代）
 - 更完整的守护进程联动与状态回传（当前为保守的 best-effort）
