@@ -323,15 +323,18 @@
     let statusData = null;
     let configData = null;
     let healthData = null;
+    let wifiCaps = null;
     try {
-      const [statusRes, configRes, healthRes] = await Promise.allSettled([
+      const [statusRes, configRes, healthRes, wifiCapsRes] = await Promise.allSettled([
         fetchJson("/api/v1/status"),
         fetchJson("/api/v1/config"),
         fetchJson("/api/v1/health"),
+        fetchJson("/api/v1/capabilities/wifi"),
       ]);
       if (statusRes.status === "fulfilled") statusData = statusRes.value;
       if (configRes.status === "fulfilled") configData = configRes.value;
       if (healthRes.status === "fulfilled") healthData = healthRes.value;
+      if (wifiCapsRes.status === "fulfilled") wifiCaps = wifiCapsRes.value;
       if (statusRes.status === "fulfilled" || configRes.status === "fulfilled") {
         state.backendConnected = true;
         setBannerVisible(false);
@@ -359,6 +362,37 @@
 
     grid.appendChild(renderKeyValueCard("系统概览", summaryEntries.length ? summaryEntries : [["状态", state.backendConnected ? "连接正常" : "未知"]]));
 
+    // 接口列表（按 role 简要展示）
+    if (ifs.length > 0) {
+      const ifaceCard = document.createElement("div");
+      ifaceCard.className = "card";
+      const items = ifs.map((it) => {
+        const lines = [
+          ["名称", it?.name ?? "-"],
+          ["角色", it?.role ?? "-"],
+          ["状态", (it?.up === true ? "已连接" : (it?.up === false ? "未连接" : "未知"))],
+        ];
+        if (it?.role === "wan" && it?.mode) lines.push(["模式", it.mode]);
+        if (it?.role === "lan" && it?.cidr) lines.push(["CIDR", it.cidr]);
+        const rows = lines.map(([k, v]) => html`<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`).join("");
+        return html`<div class="kv iface">${rows}</div>`;
+      }).join("<hr class=\"sep\" />");
+      ifaceCard.innerHTML = html`
+        <h3>接口</h3>
+        <div class="iface-list">${items}</div>
+      `;
+      grid.appendChild(ifaceCard);
+    }
+
+    // WiFi 能力摘要
+    if (wifiCaps) {
+      const capsEntries = [];
+      if (wifiCaps.maxAP != null) capsEntries.push(["最大 AP 数", String(wifiCaps.maxAP)]);
+      if (Array.isArray(wifiCaps.bands)) capsEntries.push(["支持频段", wifiCaps.bands.join(", ") || "-"]);
+      if (wifiCaps.driver) capsEntries.push(["驱动", String(wifiCaps.driver)]);
+      grid.appendChild(renderKeyValueCard("WiFi 能力", capsEntries.length ? capsEntries : [["信息", "未提供"]]));
+    }
+
     if (statusData) {
       grid.appendChild(renderJSONCard("状态 JSON", statusData));
     } else {
@@ -371,6 +405,80 @@
     }
   }
 
+  async function renderWAN() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    let statusData = null;
+    let configData = null;
+    try {
+      const [s, c] = await Promise.allSettled([
+        fetchJson("/api/v1/status"),
+        fetchJson("/api/v1/config"),
+      ]);
+      if (s.status === "fulfilled") statusData = s.value;
+      if (c.status === "fulfilled") configData = c.value;
+    } catch (_) {}
+    const cfg = (configData && (configData.config || configData)) || null;
+    const wanIf = (Array.isArray(statusData?.interfaces) ? statusData.interfaces : []).find(i => i?.role === "wan") || {};
+    const wanCfg = cfg?.wan || {};
+    const mode = wanIf.mode || wanCfg.mode;
+    const iface = wanCfg.interface || wanIf.name;
+    const staticCfg = wanCfg.static || {};
+    const pppoe = wanCfg.pppoe || {};
+    const rows = [];
+    if (mode) rows.push(["模式", String(mode)]);
+    if (iface) rows.push(["接口", String(iface)]);
+    if (mode === "static" && (staticCfg.addressCidr || staticCfg.gateway || (Array.isArray(staticCfg.dns) && staticCfg.dns.length))) {
+      if (staticCfg.addressCidr) rows.push(["地址/CIDR", String(staticCfg.addressCidr)]);
+      if (staticCfg.gateway) rows.push(["网关", String(staticCfg.gateway)]);
+      if (Array.isArray(staticCfg.dns)) rows.push(["DNS", staticCfg.dns.join(", ") || "-"]);
+    }
+    if (mode === "pppoe" && (pppoe.username || pppoe.password)) {
+      if (pppoe.username) rows.push(["PPPoE 用户名", String(pppoe.username)]);
+      if (pppoe.password != null) rows.push(["PPPoE 密码", "••••"]);
+    }
+    if (wanIf.up != null) rows.push(["链路", wanIf.up ? "已连接" : "未连接"]);
+    grid.appendChild(renderKeyValueCard("外网（只读）", rows.length ? rows : [["信息", "未提供"]]));
+    // 原始 JSON 便于排错
+    if (configData) grid.appendChild(renderJSONCard("配置 JSON", configData));
+    if (statusData) grid.appendChild(renderJSONCard("状态 JSON", statusData));
+  }
+
+  async function renderLAN() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    let statusData = null;
+    let configData = null;
+    try {
+      const [s, c] = await Promise.allSettled([
+        fetchJson("/api/v1/status"),
+        fetchJson("/api/v1/config"),
+      ]);
+      if (s.status === "fulfilled") statusData = s.value;
+      if (c.status === "fulfilled") configData = c.value;
+    } catch (_) {}
+    const cfg = (configData && (configData.config || configData)) || null;
+    const lanIf = (Array.isArray(statusData?.interfaces) ? statusData.interfaces : []).find(i => i?.role === "lan") || {};
+    const lanCfg = cfg?.lan || {};
+    const dhcp = lanCfg.dhcp || {};
+    const rows = [];
+    if (lanCfg.bridgeName) rows.push(["桥（Bridge）", String(lanCfg.bridgeName)]);
+    if (lanCfg.ipv4Cidr) rows.push(["IPv4 CIDR", String(lanCfg.ipv4Cidr)]);
+    if (lanIf.up != null) rows.push(["链路", lanIf.up ? "已连接" : "未连接"]);
+    // 端口/静态租约未提供时优雅降级
+    rows.push(["端口", "未提供"]);
+    if (dhcp.enable != null) rows.push(["DHCP", dhcp.enable ? "启用" : "关闭"]);
+    if (dhcp.rangeStart || dhcp.rangeEnd) rows.push(["DHCP 范围", `${dhcp.rangeStart || "-"} - ${dhcp.rangeEnd || "-"}`]);
+    if (dhcp.leaseMins != null) rows.push(["租约（分钟）", String(dhcp.leaseMins)]);
+    rows.push(["静态租约", "未提供"]);
+    grid.appendChild(renderKeyValueCard("内网（只读）", rows.length ? rows : [["信息", "未提供"]]));
+    if (configData) grid.appendChild(renderJSONCard("配置 JSON", configData));
+    if (statusData) grid.appendChild(renderJSONCard("状态 JSON", statusData));
+  }
   function renderPlaceholder(id) {
     const content = clearMain();
     const wrap = document.createElement("div");
@@ -396,8 +504,8 @@
 
   const routes = {
     "overview": renderOverview,
-    "wan": () => renderPlaceholder("wan"),
-    "lan": () => renderPlaceholder("lan"),
+    "wan": () => renderWAN(),
+    "lan": () => renderLAN(),
     "wifi": () => renderPlaceholder("wifi"),
     "clients": () => renderPlaceholder("clients"),
     "dns": () => renderPlaceholder("dns"),
