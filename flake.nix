@@ -1,7 +1,9 @@
 {
   description = "NixOS 路由器通用模块 + Go 后端（内嵌 WebUI）";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
+  # M14: 升级到能提供 Go ≥ 1.26 的 nixpkgs（优先稳定，不满足则使用 unstable）
+  # 24.05 的 Go 为 1.22.x，会阻塞本仓库（go.mod 要求 ≥1.26）
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.flake-utils.url = "github:numtide/flake-utils";
 
   outputs = { self, nixpkgs, flake-utils }:
