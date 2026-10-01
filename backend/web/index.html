@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NixOS 路由器 · 管理面板</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div id="app">
+      <div id="status-banner" class="banner hidden" role="status" aria-live="polite">
+        <span>后端未连接</span>
+        <span class="banner-sep">·</span>
+        <span>使用内置导航</span>
+        <span class="banner-sep">·</span>
+        <span>API 基址：<code id="banner-api-base">—</code></span>
+        <button id="retry-btn" class="btn-link" type="button">重试连接</button>
+      </div>
+      <div id="login-view" class="login-view hidden">
+        <div class="login-card">
+          <div class="brand brand-center">
+            <div class="brand-title">NixOS 路由器</div>
+            <div class="brand-subtitle">管理面板</div>
+          </div>
+          <form id="login-form" class="login-form" novalidate>
+            <div class="form-row">
+              <label for="login-username">用户名</label>
+              <input id="login-username" name="username" type="text" autocomplete="username" required />
+            </div>
+            <div class="form-row">
+              <label for="login-password">密码</label>
+              <input id="login-password" name="password" type="password" autocomplete="current-password" required />
+            </div>
+            <div class="form-actions">
+              <button id="login-submit" class="btn-primary" type="submit">登录</button>
+            </div>
+            <div id="login-error" class="error hidden" role="alert" aria-live="assertive"></div>
+            <div class="muted small mt8">API：<code id="login-api-base"></code></div>
+          </form>
+        </div>
+      </div>
+      <div class="layout">
+        <aside id="sidebar" class="sidebar">
+          <div class="brand">
+            <div class="brand-title">NixOS 路由器</div>
+            <div class="brand-subtitle">管理面板</div>
+          </div>
+          <nav aria-label="主导航">
+            <ul id="nav-list" class="nav-list"></ul>
+          </nav>
+          <div class="sidebar-foot">
+            <small id="sidebar-api-hint"></small>
+            <div class="user-row">
+              <span id="user-display" class="muted"></span>
+              <button id="logout-btn" class="btn-link" type="button">退出</button>
+            </div>
+          </div>
+        </aside>
+        <main id="main" class="main">
+          <header id="page-header" class="page-header">
+            <h1 id="page-title">总览</h1>
+          </header>
+          <section id="page-content" class="page-content">
+            <!-- 初始内容由 app.js 渲染 -->
+          </section>
+        </main>
+      </div>
+    </div>
+    <noscript>
+      需要启用 JavaScript 才能使用此页面。
+    </noscript>
+  </body>
+  </html>
+

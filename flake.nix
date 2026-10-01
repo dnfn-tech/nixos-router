@@ -1,7 +1,34 @@
 {
-  description = "NixOS 路由器通用模块";
+  description = "NixOS 路由器通用模块 + Go 后端（内嵌 WebUI）";
 
-  outputs = { self }: {
-    nixosModules.default = ./modules;
-  };
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
+  inputs.flake-utils.url = "github:numtide/flake-utils";
+
+  outputs = { self, nixpkgs, flake-utils }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = import nixpkgs { inherit system; };
+        lib = pkgs.lib;
+        routerdPkg = pkgs.buildGoModule {
+          pname = "routerd";
+          version = "0.1.0";
+          src = ./.;
+          subPackages = [ "backend/cmd/routerd" ];
+          # TODO: 首次 nix build 后将 vendorHash 替换为实际值以稳定缓存
+          vendorHash = lib.fakeSha256;
+        };
+      in
+      {
+        packages = {
+          default = routerdPkg;
+          routerd = routerdPkg;
+        };
+        apps.default = {
+          type = "app";
+          program = "${routerdPkg}/bin/routerd";
+        };
+      }
+    ) // {
+      nixosModules.default = ./modules;
+    };
 }
