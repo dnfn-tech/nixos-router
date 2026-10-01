@@ -662,6 +662,138 @@ async function renderSSH() {
   sysCard.appendChild(form);
   grid.appendChild(sysCard);
 
+  // 修改密码
+  const pwdCard = document.createElement("div");
+  pwdCard.className = "card";
+  pwdCard.innerHTML = `
+    <h3>修改密码</h3>
+    <div class="form">
+      <div class="form-row">
+        <label>当前密码</label>
+        <input id="pwd-cur" type="password" autocomplete="current-password" />
+      </div>
+      <div class="form-row">
+        <label>新密码</label>
+        <input id="pwd-new" type="password" autocomplete="new-password" />
+      </div>
+      <div class="form-row">
+        <label>确认新密码</label>
+        <input id="pwd-new2" type="password" autocomplete="new-password" />
+      </div>
+      <div class="form-actions">
+        <button id="pwd-save" class="btn">修改密码</button>
+      </div>
+      <div id="pwd-msg" class="mt8 small muted"></div>
+    </div>
+  `;
+  grid.appendChild(pwdCard);
+  q("#pwd-save", pwdCard)?.addEventListener("click", async () => {
+    const cur = q("#pwd-cur", pwdCard)?.value || "";
+    const nw = q("#pwd-new", pwdCard)?.value || "";
+    const nw2 = q("#pwd-new2", pwdCard)?.value || "";
+    const msg = q("#pwd-msg", pwdCard);
+    const setMsg = (t, ok=false) => { if (msg) { msg.textContent = t; msg.style.color = ok ? "var(--accent)" : "var(--muted)"; } };
+    if (!nw || nw !== nw2) { setMsg("新密码不一致或为空"); return; }
+    try {
+      // 优先尝试 /session/password
+      const body1 = { current: cur, new: nw, currentPassword: cur, newPassword: nw };
+      let tried = false;
+      try {
+        tried = true;
+        await fetchJson("/api/v1/session/password", { method: "POST", body: body1 });
+        setMsg("密码已更新（可能需要重新登录）", true);
+        return;
+      } catch (e1) {
+        if (!(e1?.status === 404 || e1?.status === 501 || e1?.status === 405)) throw e1;
+      }
+      try {
+        await fetchJson("/api/v1/account/password", { method: "PUT", body: body1 });
+        setMsg("密码已更新（可能需要重新登录）", true);
+      } catch (e2) {
+        if (e2?.status === 404 || e2?.status === 501) {
+          setMsg("接口尚未提供");
+          return;
+        }
+        throw e2;
+      }
+    } catch (e) {
+      setMsg(`修改失败：${e?.status === 401 ? "未登录或会话已过期" : (e?.message || "未知错误")}`);
+    }
+  });
+
+  // 备份 / 恢复
+  const backupCard = document.createElement("div");
+  backupCard.className = "card";
+  backupCard.innerHTML = `
+    <h3>配置备份 / 恢复</h3>
+    <div class="form-actions">
+      <button id="backup-btn" class="btn">下载备份</button>
+    </div>
+    <div class="form mt8">
+      <div class="form-row">
+        <label>恢复备份（可能覆盖配置，谨慎操作）</label>
+        <input id="restore-file" type="file" />
+      </div>
+      <div class="form-actions">
+        <button id="restore-btn" class="btn">上传并恢复</button>
+      </div>
+    </div>
+    <div id="backup-msg" class="mt8 small muted"></div>
+  `;
+  grid.appendChild(backupCard);
+  const setBackupMsg = (t, ok=false) => { const el = q("#backup-msg", backupCard); if (el) { el.textContent = t; el.style.color = ok ? "var(--accent)" : "var(--muted)"; } };
+  q("#backup-btn", backupCard)?.addEventListener("click", async () => {
+    setBackupMsg("正在请求备份...");
+    try {
+      const tryPaths = ["/api/v1/backup", "/api/v1/system/backup"];
+      let resp = null;
+      for (const p of tryPaths) {
+        try {
+          const r = await fetchRaw(p, { method: "GET" });
+          if (r.ok) { resp = r; break; }
+          if (r.status === 404 || r.status === 501) continue;
+          throw new Error(`HTTP ${r.status}`);
+        } catch (_) {}
+      }
+      if (!resp) { setBackupMsg("接口尚未提供"); return; }
+      const blob = await resp.blob();
+      const cd = resp.headers.get("Content-Disposition") || "";
+      const m = /filename=\"?([^\";]+)\"?/i.exec(cd);
+      const name = m?.[1] || `nixos-router-backup-${Date.now()}.tar.gz`;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setBackupMsg(`已下载：${name}`, true);
+    } catch (e) {
+      setBackupMsg(`下载失败：${e?.message || "未知错误"}`);
+    }
+  });
+  q("#restore-btn", backupCard)?.addEventListener("click", async () => {
+    const f = q("#restore-file", backupCard)?.files?.[0];
+    if (!f) { setBackupMsg("请选择备份文件"); return; }
+    const ok = confirm("将上传并恢复备份，可能覆盖当前配置。确定继续吗？");
+    if (!ok) return;
+    setBackupMsg("正在上传并恢复...");
+    try {
+      const fd = new FormData();
+      fd.append("file", f, f.name);
+      let resp = await fetchRaw("/api/v1/backup/restore", { method: "POST", body: fd });
+      if (resp.status === 404 || resp.status === 501) {
+        resp = await fetchRaw("/api/v1/system/restore", { method: "POST", body: fd });
+      }
+      if (resp.status === 404 || resp.status === 501) { setBackupMsg("接口尚未提供"); return; }
+      if (!resp.ok && resp.status !== 202) {
+        const t = await resp.text().catch(() => "");
+        throw new Error(t || `HTTP ${resp.status}`);
+      }
+      setBackupMsg("已提交恢复（可能需要稍候）", true);
+    } catch (e) {
+      setBackupMsg(`恢复失败：${e?.message || "未知错误"}`);
+    }
+  });
     // 生成配置（不应用运行态）
     const applyCard = document.createElement("div");
     applyCard.className = "card";
@@ -771,6 +903,67 @@ async function renderSSH() {
         grid.appendChild(jcard);
       }
     } catch (_) {}
+
+  // 审计日志（若提供）
+  try {
+    const audit = await fetchJson("/api/v1/audit?limit=50");
+    const arr = Array.isArray(audit) ? audit : (audit?.audit || audit?.items || []);
+    if (Array.isArray(arr) && arr.length) {
+      const acard = document.createElement("div");
+      acard.className = "card";
+      const rowsA = arr.map((e) => {
+        const kv = [
+          ["时间", e?.time || e?.ts || e?.timestamp || "-"],
+          ["用户", e?.user || e?.actor || "-"],
+          ["动作", e?.action || e?.event || "-"],
+          ["对象", e?.resource || e?.path || "-"],
+          ["IP", e?.ip || e?.addr || "-"],
+        ];
+        return `<div class="kv">${kv.map(([k,v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`).join("")}</div>`;
+      }).join("<hr class=\"sep\" />");
+      acard.innerHTML = `<h3>审计日志</h3>${rowsA}`;
+      grid.appendChild(acard);
+    }
+  } catch (e) {
+    if (e?.status === 404 || e?.status === 501) {
+      const acard = document.createElement("div");
+      acard.className = "card";
+      acard.innerHTML = `<h3>审计日志</h3><p class="muted">接口尚未提供</p>`;
+      grid.appendChild(acard);
+    }
+  }
+
+  // 重启（若提供）
+  const reboot = document.createElement("div");
+  reboot.className = "card";
+  reboot.innerHTML = `
+    <h3>系统重启</h3>
+    <div class="form-actions">
+      <button id="reboot-btn" class="btn">发送重启命令</button>
+    </div>
+    <div id="reboot-msg" class="mt8 small muted"></div>
+  `;
+  grid.appendChild(reboot);
+  const setRebootMsg = (t, ok=false) => { const el = q("#reboot-msg", reboot); if (el) { el.textContent = t; el.style.color = ok ? "var(--accent)" : "var(--muted)"; } };
+  q("#reboot-btn", reboot)?.addEventListener("click", async () => {
+    const ok = confirm("确定要重启系统吗？这将中断网络连接。");
+    if (!ok) return;
+    setRebootMsg("正在发送重启命令...");
+    try {
+      const resp = await fetchRaw("/api/v1/system/reboot", { method: "POST" });
+      if (resp.status === 404 || resp.status === 501) {
+        setRebootMsg("接口尚未提供");
+        return;
+      }
+      if (!resp.ok && resp.status !== 202) {
+        const t = await resp.text().catch(() => "");
+        throw new Error(t || `HTTP ${resp.status}`);
+      }
+      setRebootMsg("已发送重启命令（设备可能即将重启）", true);
+    } catch (e) {
+      setRebootMsg(`发送失败：${e?.message || "未知错误"}`);
+    }
+  });
 
     grid.appendChild(renderJSONCard("配置 JSON", { config: cfg }));
     if (statusData) grid.appendChild(renderJSONCard("状态 JSON", statusData));
@@ -1159,6 +1352,30 @@ async function renderSSH() {
     // Accept text as JSON fallback (for early stubs)
     const t = await resp.text();
     try { return JSON.parse(t); } catch { return { value: t }; }
+  }
+
+  async function fetchRaw(path, init = {}) {
+    const url = `${apiBase}${path}`;
+    const {
+      method = "GET",
+      body,
+      headers = {},
+      ...rest
+    } = init || {};
+    const resp = await withTimeout(fetch(url, {
+      method,
+      credentials: "include",
+      headers,
+      body,
+      ...rest,
+    }));
+    if (resp.status === 401) {
+      onUnauthorized();
+      const err401 = new Error("unauthorized");
+      err401.status = 401;
+      throw err401;
+    }
+    return resp;
   }
 
   function setBannerVisible(visible) {
