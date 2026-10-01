@@ -34,6 +34,16 @@
 - 更丰富的实时状态：接口速率、信号质量、流量统计等
 - flake `vendorHash` 固定：在可用 nix 构建环境中计算（见下）
 
+## 新增（M13）
+- 后端状态增强：`GET /api/v1/status` 增加守护进程/插件 unit 状态（best-effort）：
+  - 核心：`dnsmasq.service`、`hostapd.service`、`nftables.service`
+  - 插件：`mihomo.service`、`tailscaled.service`、`headscale.service`（当 Tailscale 为 headscale 模式）与 `zerotier-one.service`
+  - 当存在 `systemctl` 时，逐个查询 `is-active` 并映射为 `{active|inactive|failed|unknown|missing}`；当缺失 `systemctl` 时，来源标记为 `stub`，状态优雅降级为 `unknown`
+  - `sources.units` 增补来源标记：`systemctl|stub`
+- 前端总览：新增“守护进程/插件状态”卡片，按常见顺序展示，缺省优雅降级
+- 测试：新增针对 systemctl 缺失与状态映射的单测，覆盖核心与插件单元
+- flake 细化：为 `buildGoModule` 指定 `modRoot = \"./backend\"`（仅路径修正，便于后续 vendor 计算）
+
 ## 默认安全策略
 - 默认不执行 reload/restart（`applyReload=false`），保守生成
 - 默认不执行 `tc`（`applyTrafficControl=false`），即使生成了 `qos.sh`
@@ -46,4 +56,12 @@
   - `./scripts/compute-vendor-hash.sh` 打印建议哈希
   - `./scripts/compute-vendor-hash.sh --apply` 将自动更新 `flake.nix` 的 `vendorHash`
 - 之后 `nix build .#routerd` 应可成功；若依然失败，请将构建输出中的 `got: sha256-...` 替换进 `flake.nix`
+
+## Nix vendorHash（M13 进展）
+- 当前 `nixpkgs-24.05` 的 Go 工具链为 1.22.x，而本仓库需要 Go ≥1.26（`backend/go.mod`）：
+  - 在该环境下 `scripts/compute-vendor-hash.sh` 会于编译前失败，无法输出有效 `vendorHash`
+  - 本迭代不提升 nixpkgs 固定，也不“猜测”哈希：`flake.nix` 仍保持 `vendorHash = lib.fakeSha256`
+- 建议在具备 Go ≥1.26 的 Nix 环境（或较新的 nixpkgs）中执行：
+  - `./scripts/compute-vendor-hash.sh --apply`
+- 之后提交独立 PR 锁定 vendor 缓存
 
