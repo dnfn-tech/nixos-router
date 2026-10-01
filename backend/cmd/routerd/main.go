@@ -12,6 +12,7 @@ import (
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/db"
 	"github.com/dnfn-tech/nixos-router/backend/internal/server"
+	webfs "github.com/dnfn-tech/nixos-router/backend/web"
 )
 
 var version = "dev"
@@ -25,6 +26,7 @@ func main() {
 	configPath := flag.String("config-path", os.Getenv(config.EnvConfigPath), "Path to config.json (overrides --state-dir)")
 	dev := flag.Bool("dev", envBool(config.EnvDev, false), "Developer mode: no auth, permissive CORS")
 	seed := flag.Bool("seed-default-config", false, "If set and config file missing, write default config.json (dev convenience)")
+	webDir := flag.String("web-dir", "", "Serve WebUI from local directory instead of embedded assets (dev only)")
 	flag.Parse()
 
 	opts := config.LoadOptions{
@@ -54,6 +56,8 @@ func main() {
 		DB:         database,
 		DevMode:    *dev,
 		Version:    version,
+		WebFS:      webfs.Embedded,
+		WebDir:     *webDir,
 	})
 
 	srv := &http.Server{
@@ -62,7 +66,7 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Printf("routerd %s listening on %s (config=%s, stateDir=%s, dev=%v)", version, *addr, cfgPath, opts.StateDir, *dev)
+	log.Printf("routerd %s listening on %s (config=%s, stateDir=%s, dev=%v, webDir=%s)", version, *addr, cfgPath, opts.StateDir, *dev, *webDir)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("listen: %v", err)
 	}

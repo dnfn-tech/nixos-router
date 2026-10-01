@@ -1,6 +1,6 @@
 # NixOS Router Backend (Go)
 
-里程碑 1：只读 API（schema + 健康检查 + 配置读取）
+里程碑 1：只读 API + 同源托管 WebUI
 
 ## 构建与运行
 
@@ -19,6 +19,7 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - `NIXOS_ROUTER_CONFIG=/var/lib/nixos-router/config.json`：配置文件路径（覆盖 state-dir）
 - `NIXOS_ROUTER_ADDR=:8080`：监听地址
 - `NIXOS_ROUTER_WIFI_MAX_APS=2`：WiFi 能力上限（示例）
+- `NIXOS_ROUTER_CORS_ORIGIN`：dev 下可覆盖 CORS Origin（默认 `*`）
 
 ## API（前缀 /api/v1）
 
@@ -29,6 +30,13 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - `GET /api/v1/plugins`：插件列表（来自配置）
 - `GET /api/v1/capabilities/wifi`：WiFi 能力（桩值/来自 env）
 - `POST /api/v1/auth/login`：501（未实现）
+
+## WebUI（静态资源）
+
+- routerd 内嵌 `web/` 静态前端（`embed.FS`）；非 `/api/` 请求均由静态服务器处理
+- SPA 路由回退：找不到静态文件时回退到 `index.html`
+- 开发时可用 `--web-dir <path>` 覆盖本地目录（优先于内嵌）
+- Content-Type 正确设置（html/js/css/svg/png…）
 
 ### curl 示例
 
@@ -54,4 +62,9 @@ curl -s http://localhost:8080/api/v1/capabilities/wifi | jq .
 cd backend
 go test ./...
 ```
+
+## Nix 构建/模块
+
+- flake `packages.<system>.routerd`：包含嵌入的 WebUI
+- NixOS 模块：`services.nixos-router.backend.enable = true;` 启用后访问 `http://<lan-ip>:8080/` 即可同源打开 UI 与 API
 

@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"strconv"
@@ -22,6 +24,8 @@ type Server struct {
 	startedAt   time.Time
 	version     string
 	allowedCORS string // when set (dev) send Access-Control-Allow-Origin
+	embeddedFS  fs.FS   // compiled-in assets
+	webDir      string  // when set, serve from local dir (dev override)
 }
 
 type Options struct {
@@ -31,6 +35,8 @@ type Options struct {
 	DB         *db.DB
 	DevMode    bool
 	Version    string
+	WebFS      fs.FS
+	WebDir     string
 }
 
 func New(opts Options) *Server {
@@ -42,6 +48,8 @@ func New(opts Options) *Server {
 		devMode:   opts.DevMode,
 		startedAt: time.Now(),
 		version:   opts.Version,
+		embeddedFS: opts.WebFS,
+		webDir:     strings.TrimSpace(opts.WebDir),
 	}
 	if s.devMode {
 		// allow all for local-dev unless overridden
@@ -61,15 +69,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/plugins", s.handlePlugins)
 	mux.HandleFunc("/api/v1/capabilities/wifi", s.handleWifiCaps)
 	mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
-	// simple CORS preflight handler in dev
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			s.applyCORS(w, r)
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		http.NotFound(w, r)
-	})
+	// Static UI for non-/api paths
+	mux.Handle("/", http.HandlerFunc(s.handleSPA))
 }
 
 func (s *Server) Handler() http.Handler {
@@ -105,6 +106,97 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// handleSPA serves the embedded (or local) UI with SPA fallback to index.html.
+func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
+	// Preflight handled in wrapCORS; if still here and it's OPTIONS, return 204
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// Only static for non-API paths
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		http.NotFound(w, r)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	if path == "" {
+		path = "index.html"
+	}
+	fsys := s.uiFS()
+	// Try to open requested file
+	f, err := fsys.Open(path)
+	if err != nil {
+		// Fallback to index.html (SPA routing)
+		s.serveFileFromFS(w, r, fsys, "index.html")
+		return
+	}
+	defer f.Close()
+	s.serveOpenedFile(w, r, path, f)
+}
+
+func (s *Server) uiFS() fs.FS {
+	if s.webDir != "" {
+		return os.DirFS(s.webDir)
+	}
+	if s.embeddedFS != nil {
+		return s.embeddedFS
+	}
+	// Empty FS: always 404
+	return emptyFS{}
+}
+
+func (s *Server) serveFileFromFS(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) {
+	f, err := fsys.Open(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	s.serveOpenedFile(w, r, name, f)
+}
+
+func (s *Server) serveOpenedFile(w http.ResponseWriter, r *http.Request, name string, f fs.File) {
+	// Set content type based on extension
+	if ct := contentTypeByExt(name); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	// Read and write
+	data, err := io.ReadAll(f)
+	if err != nil {
+		http.Error(w, "failed to read asset", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+type emptyFS struct{}
+
+func (emptyFS) Open(name string) (fs.File, error) { return nil, fs.ErrNotExist }
+
+func contentTypeByExt(name string) string {
+	switch {
+	case strings.HasSuffix(name, ".html"):
+		return "text/html; charset=utf-8"
+	case strings.HasSuffix(name, ".css"):
+		return "text/css; charset=utf-8"
+	case strings.HasSuffix(name, ".js"):
+		return "application/javascript; charset=utf-8"
+	case strings.HasSuffix(name, ".json"):
+		return "application/json; charset=utf-8"
+	case strings.HasSuffix(name, ".svg"):
+		return "image/svg+xml"
+	case strings.HasSuffix(name, ".png"):
+		return "image/png"
+	case strings.HasSuffix(name, ".jpg"), strings.HasSuffix(name, ".jpeg"):
+		return "image/jpeg"
+	case strings.HasSuffix(name, ".gif"):
+		return "image/gif"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
