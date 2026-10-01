@@ -173,6 +173,95 @@
     if (healthData?.version) rows.push(["版本", String(healthData.version)]);
     if (healthData?.startedAt) rows.push(["启动时间", String(healthData.startedAt)]);
     grid.appendChild(renderKeyValueCard("系统（只读）", rows.length ? rows : [["信息", "未提供"]]));
+
+    // 生成配置（不应用运行态）
+    const applyCard = document.createElement("div");
+    applyCard.className = "card";
+    applyCard.innerHTML = `
+      <h3>生成配置（不应用运行态）</h3>
+      <p class="muted small">
+        该操作只会在服务器 <code>stateDir</code> 下生成/更新配置片段，
+        不会重载网络服务或切换当前运行态。后续应用将于下个里程碑实现。
+      </p>
+      <div class="form-actions">
+        <button id="apply-generate-btn" class="btn-primary" type="button">生成配置（不应用运行态）</button>
+      </div>
+      <div id="apply-result" class="mt8"></div>
+    `;
+    grid.appendChild(applyCard);
+
+    const resultEl = applyCard.querySelector("#apply-result");
+    const btn = applyCard.querySelector("#apply-generate-btn");
+    btn?.addEventListener("click", async () => {
+      btn.setAttribute("disabled", "true");
+      resultEl.innerHTML = `<span class="muted">正在请求生成...</span>`;
+      try {
+        // 最小对接：POST /api/v1/apply（不带请求体，后端默认为 generate-only）
+        const res = await fetchJson("/api/v1/apply", { method: "POST" });
+        const jobId = res?.jobId || res?.id;
+        const mode = res?.mode || "generate-only";
+        const appliedRuntime = res?.appliedRuntime;
+
+        const head = document.createElement("div");
+        head.className = "kv";
+        const headRows = [
+          ["jobId", String(jobId ?? "-")],
+          ["mode", String(mode)],
+          ["appliedRuntime", String(appliedRuntime ?? false)],
+        ].map(([k, v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>`).join("");
+        head.innerHTML = headRows;
+
+        // 展示返回 JSON
+        const raw = document.createElement("pre");
+        raw.className = "json-view";
+        raw.textContent = JSON.stringify(res, null, 2);
+
+        resultEl.innerHTML = "";
+        const resCard = document.createElement("div");
+        resCard.className = "card";
+        resCard.innerHTML = `<h3>作业已提交</h3>`;
+        resCard.appendChild(head);
+        resCard.appendChild(raw);
+        resultEl.appendChild(resCard);
+
+        // 单次再拉取作业状态
+        if (jobId) {
+          try {
+            const job = await fetchJson(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+            const jobCard = document.createElement("div");
+            jobCard.className = "card";
+            const status = job?.status || job?.state || "-";
+            const errMsg = job?.error || job?.err || null;
+            const lines = [
+              ["状态", String(status)],
+              ...(job?.startedAt ? [["开始时间", String(job.startedAt)]] : []),
+              ...(job?.finishedAt ? [["完成时间", String(job.finishedAt)]] : []),
+              ...(errMsg ? [["错误", String(errMsg)]] : []),
+            ];
+            jobCard.appendChild(renderKeyValueCard("作业状态", lines));
+            const jobRaw = document.createElement("pre");
+            jobRaw.className = "json-view";
+            jobRaw.textContent = JSON.stringify(job, null, 2);
+            jobCard.appendChild(jobRaw);
+            resultEl.appendChild(jobCard);
+          } catch (e) {
+            const errCard = document.createElement("div");
+            errCard.className = "card";
+            errCard.innerHTML = `<h3>作业状态查询失败</h3><p class="muted">${escapeHtml(e?.message || "未知错误")}</p>`;
+            resultEl.appendChild(errCard);
+          }
+        }
+      } catch (e) {
+        const err = document.createElement("div");
+        err.className = "error";
+        err.textContent = `生成失败：${e?.status === 401 ? "未登录或会话已过期" : (e?.message || "未知错误")}`;
+        resultEl.innerHTML = "";
+        resultEl.appendChild(err);
+      } finally {
+        btn.removeAttribute("disabled");
+      }
+    });
+
     if (configData) grid.appendChild(renderJSONCard("配置 JSON", configData));
     if (statusData) grid.appendChild(renderJSONCard("状态 JSON", statusData));
     if (healthData) grid.appendChild(renderJSONCard("健康 JSON", healthData));
