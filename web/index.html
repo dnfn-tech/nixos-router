@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NixOS 路由器 · 管理面板</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div id="app">
+      <div id="status-banner" class="banner hidden" role="status" aria-live="polite">
+        <span>后端未连接</span>
+        <span class="banner-sep">·</span>
+        <span>使用内置导航</span>
+        <span class="banner-sep">·</span>
+        <span>API 基址：<code id="banner-api-base">http://127.0.0.1:8080</code></span>
+        <button id="retry-btn" class="btn-link" type="button">重试连接</button>
+      </div>
+      <div class="layout">
+        <aside id="sidebar" class="sidebar">
+          <div class="brand">
+            <div class="brand-title">NixOS 路由器</div>
+            <div class="brand-subtitle">管理面板</div>
+          </div>
+          <nav aria-label="主导航">
+            <ul id="nav-list" class="nav-list"></ul>
+          </nav>
+          <div class="sidebar-foot">
+            <small id="sidebar-api-hint"></small>
+          </div>
+        </aside>
+        <main id="main" class="main">
+          <header id="page-header" class="page-header">
+            <h1 id="page-title">总览</h1>
+          </header>
+          <section id="page-content" class="page-content">
+            <!-- 初始内容由 app.js 渲染 -->
+          </section>
+        </main>
+      </div>
+    </div>
+    <noscript>
+      需要启用 JavaScript 才能使用此页面。
+    </noscript>
+  </body>
+  </html>
+
