@@ -50,6 +50,7 @@ WebUI 会从以下位置确定后端 API 基址（优先级从高到低）：
 - 防火墙（#/firewall）：展示 `config.firewall`（enable、natEnabled、description），端口转发等后续扩展
 - SSH（#/ssh）：展示 `config.ssh`（enable、port、passwordAuth、authorizedKeys）与 `status.ssh`
 - 系统（#/system）：展示 `config.system` 与 `health/status` 摘要（hostname、timezone、uptime、version 等）
+- 系统页附带“生成配置（不应用运行态）”：点击调用 `POST /api/v1/apply`，展示返回的 `jobId/mode/appliedRuntime`，并查询 `GET /api/v1/jobs/{id}` 显示状态/错误。说明：当前仅生成到服务端 stateDir，不会重载网络服务
 - 客户端（#/clients）：若后端提供 `GET /api/v1/clients` 则展示；否则明确标注“接口尚未提供”
 - 登录页：用户名/密码，错误提示，提交调用 `POST /api/v1/session`
 - 401 统一处理：自动返回登录页
