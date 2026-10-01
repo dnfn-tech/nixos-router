@@ -185,7 +185,23 @@ type Manifest struct {
 
 type UIContribution struct {
   NavItems []NavItem // 侧栏入口，如分组/排序/图标
-  Pages    []UIPage  // /ui/plugins/<id>/* 静态资源或挂载点
+  Pages    []PageDef // /ui/plugins/<id>/* 静态资源或挂载点
+}
+
+type NavItem struct {
+  ID    string // 如 "wifi"
+  Label string // "WiFi"
+  Group string // "基础" / "网络服务" / "系统"
+  Icon  string // 可选
+  Order int    // 可选
+  Page  string // 关联的页面 ID
+}
+
+type PageDef struct {
+  ID     string // "wifi"
+  Route  string // "/wifi"
+  Title  string // "WiFi"
+  Asset  string // 前端组件/静态资源路径
 }
 
 // 配置段：各模块自行声明 schema/默认值与校验
@@ -210,6 +226,7 @@ type CoreRegistry interface {
   Router() Mux                                // 注册路由（统一鉴权/CSRF 中间件链）
   RegisterConfig(cs ConfigSection) error      // 注册配置段
   RegisterApply(h ApplyHook) error            // 注册 apply 钩子
+  RegisterUI(ui UIContribution) error         // 注册导航与页面定义
   Secrets() SecretStore                       // 机密读取/写入（受权限）
   Jobs() JobQueue                             // 提交/查询作业
   Audit() AuditLogger                         // 记录审计事件
@@ -249,6 +266,12 @@ type CoreRegistry interface {
 ### 配置合并（Config Merge）
 - 核心 `config.json` 增加命名空间：`plugins.<id>`；插件暴露的 `configSchema` 合并入总 schema
 - 保存时：核心校验“内核段 + 各插件段”后整体原子写；apply 时统一串行执行所有启用插件的钩子
+ - UI：仅导出已启用插件的 `ui.nav`/`ui.pages` 到 `GET /api/v1/ui/nav`；禁用插件的路由返回 404/disabled
+
+### UI 相关 REST
+- `GET /api/v1/plugins`：列出插件清单（manifest + enabled）
+- `PATCH /api/v1/plugins/{id}`：设置启用状态（v1 触发冷加载提示）
+- `GET /api/v1/ui/nav`：汇总返回当前“可见”的导航与页面定义（含分组与顺序）
 
 ### 模块化映射（内置一方）
 - 将当前功能以模块形态实现，即使在 v1 作为“内置”：
@@ -262,4 +285,10 @@ type CoreRegistry interface {
 - 能力探测：后端基于 `nl80211`/`iw` 获取接口组合与 AP/BSS 能力，作为 UI 与校验的依据
 - 单 AP 设备（如 MT7927 `AP≤1`）：仅暴露单 AP；访客网络以附加 BSS 形式呈现（若硬件允许 BSS），否则禁用
 - 多 AP/DBDC 设备：可同时启用 2.4G + 5G，或同频多 SSID；频道/带宽组合受硬件与监管域约束
+
+### 禁用插件的 Apply 行为
+- 禁用状态的插件在下一次 apply 中：
+  - 不再执行其 `ApplyHook`，不生成对应运行时配置
+  - 核心在 `preReload`/`postReload` 阶段根据需要撤销/下线相关服务与规则（例如移除对应 nftables chain、停止相关 unit）
+  - 审计记录“禁用插件导致的配置撤销”，便于追溯
 

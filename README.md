@@ -14,6 +14,7 @@ inputs.nixos-router.url = "github:dnfn-tech/nixos-router";
 - 配置单一真源：`/var/lib/nixos-router/config.json`；运行态（会话/审计/作业等）在 `state.db`（SQLite）
 - NixOS 模块会安装 Web UI + API + apply agent（仅 LAN 监听），并在激活时从 `config.json` 幂等再应用
 - 远程/git 更新模块与程序时，不清空 `/var/lib/nixos-router`
+- 页面由功能模块/插件贡献（导航与页面注册），核心页面固定存在；可选模块可在运行期启用/禁用
 
 ## Docs
 
