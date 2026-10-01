@@ -249,21 +249,68 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	// redact by default; redact=0 to return full config (dev convenience)
-	redact := true
-	if v := r.URL.Query().Get("redact"); v != "" {
-		if v == "0" || strings.EqualFold(v, "false") {
-			redact = false
+	switch r.Method {
+	case http.MethodGet:
+		// redact by default; redact=0 to return full config (dev convenience)
+		redact := true
+		if v := r.URL.Query().Get("redact"); v != "" {
+			if v == "0" || strings.EqualFold(v, "false") {
+				redact = false
+			}
 		}
+		cfg := s.cfg
+		if redact {
+			cfg = s.cfg.RedactedCopy()
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"path":   s.cfgPath,
+			"config": cfg,
+		})
+	case http.MethodPut:
+		// accept either full config object or { "config": { ... } }
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		var wrapper struct {
+			Config *config.Config `json:"config"`
+		}
+		var newCfg config.Config
+		if err := json.Unmarshal(body, &wrapper); err == nil && wrapper.Config != nil {
+			newCfg = *wrapper.Config
+		} else {
+			if err := json.Unmarshal(body, &newCfg); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+		}
+		if err := newCfg.Validate(); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"errors": []string{err.Error()},
+			})
+			return
+		}
+		// persist
+		if err := config.SaveToFile(s.cfgPath, newCfg); err != nil {
+			http.Error(w, "failed to save config", http.StatusInternalServerError)
+			return
+		}
+		// set new in-memory copy
+		s.cfg = newCfg
+		user, _, ok := s.getSession(r)
+		if !ok {
+			user = "unknown"
+		}
+		s.db.AddAudit(user, "config_save", "saved-only")
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":      true,
+			"path":    s.cfgPath,
+			"applied": false,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-	cfg := s.cfg
-	if redact {
-		cfg = s.cfg.RedactedCopy()
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"path":   s.cfgPath,
-		"config": cfg,
-	})
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

@@ -34,6 +34,7 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - `GET /api/v1/session`：查看会话（需已登录）
 - `DELETE /api/v1/session`：登出（清除会话 cookie）
 - 兼容路径 `POST /api/v1/auth/login` 已转发到 `/api/v1/session`
+- `PUT /api/v1/config`：保存完整配置（Schema/语义校验通过后原子写入）；仅保存，不 apply
 
 ## WebUI（静态资源）
 
@@ -64,6 +65,17 @@ curl -s -b cookie.txt http://localhost:8080/api/v1/ui/nav | jq .
 curl -s -b cookie.txt http://localhost:8080/api/v1/plugins | jq .
 curl -s -b cookie.txt http://localhost:8080/api/v1/capabilities/wifi | jq .
 
+# 5) 更新配置（仅保存，不 apply）
+# 形状一：与 GET 对称（{ config: {...} }）
+curl -s -b cookie.txt -H 'Content-Type: application/json' \
+  -d '{"config":{"system":{"hostname":"new-name"}}, "wan":{"mode":"dhcp"}, "lan":{...}, "dns":{...}, "wifi":{...}, "firewall":{...}, "ssh":{...}, "plugins":{}}' \
+  -X PUT http://localhost:8080/api/v1/config | jq .
+
+# 形状二：直接传完整配置对象
+curl -s -b cookie.txt -H 'Content-Type: application/json' \
+  -d '{"system":{"hostname":"new-name"}, "wan":{"mode":"dhcp"}, "lan":{...}, "dns":{...}, "wifi":{...}, "firewall":{...}, "ssh":{...}, "plugins":{}}' \
+  -X PUT http://localhost:8080/api/v1/config | jq .
+
 # 5) 登出
 curl -i -X DELETE -b cookie.txt http://localhost:8080/api/v1/session
 ```
@@ -93,4 +105,8 @@ go test ./...
   - 否则在 `--dev` 或 `--seed-default-config` 下，会创建默认弱口令 `adminadmin`（仅供开发测试，生产请务必设置环境变量并更改密码）。
 - 会话使用 HttpOnly Cookie（SameSite=Lax），同源前端可直接携带 Cookie 访问受保护 API。
 - 登录失败有轻量限速（按客户端地址滑动窗口计数）。
+
+## 配置保存（M3）
+
+- `PUT /api/v1/config` 仅将合法配置保存到 `config.json`（原子写），并写入审计；不会触发 real apply（nftables/dnsmasq/hostapd 等）。GET 默认仍对敏感信息脱敏。
 
