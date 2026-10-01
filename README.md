@@ -19,6 +19,7 @@ inputs.nixos-router.url = "github:dnfn-tech/nixos-router";
 
 ## Docs
 
+- 存储选型的设计与结论见 [docs/storage-choice.md](docs/storage-choice.md)。
 - 需求与信息架构：`docs/requirements.md`
 - 后端服务架构：`docs/backend-architecture.md`
 - 存储选型（混合：JSON + SQLite）：`docs/storage-choice.md`（已在开放 PR 提交）
