@@ -140,6 +140,10 @@ go test ./...
   - 可选：`services.nixos-router.backend.applyReload = true;` 启用占位 reload 钩子（默认关闭）
   - 可选：`services.nixos-router.backend.allowReboot = true;` 显式允许后端执行重启（默认关闭）
 
+## 实现现状
+
+简述见 `docs/implementation-status.md`（当前默认 generate-only；Mihomo/Tailscale/Zerotier/VLAN 等守护进程编排留待后续迭代）。
+
 ## 账户与会话
 
 - 首次启动若 DB 中没有任何用户：
