@@ -1821,6 +1821,45 @@ async function renderSSH() {
       grid.appendChild(renderKeyValueCard("WiFi 能力", capsEntries.length ? capsEntries : [["信息", "未提供"]]));
     }
 
+    // 守护进程/插件状态
+    const units = Array.isArray(statusData?.units) ? statusData.units : [];
+    const unitsSrc = (statusData?.sources && statusData.sources.units) || "-";
+    const unitStateBadge = (st) => {
+      const s = String(st || "").toLowerCase();
+      const color = (s === "active") ? "var(--accent)" :
+                    (s === "failed") ? "var(--error)" :
+                    (s === "inactive" ? "var(--muted)" : "var(--warning)");
+      return `<span style="color:${color}; font-weight:500;">${escapeHtml(s || "-")}</span>`;
+    };
+    const knownOrder = ["dnsmasq","hostapd","nftables","mihomo","tailscaled","headscale","zerotier-one"];
+    if (units.length > 0) {
+      const byId = {};
+      units.forEach(u => { if (u?.id) byId[u.id] = u; });
+      const ordered = [];
+      knownOrder.forEach(id => { if (byId[id]) ordered.push(byId[id]); });
+      units.forEach(u => { if (!knownOrder.includes(u?.id)) ordered.push(u); });
+      const items = (ordered.length ? ordered : units).map((u) => {
+        const id = u?.id || "-";
+        const unit = u?.unit || "-";
+        const st = unitStateBadge(u?.state);
+        const rows = [
+          ["ID", id],
+          ["Unit", unit],
+          ["状态", st],
+        ].map(([k,v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${typeof v === "string" ? v : v}</div>`).join("");
+        return `<div class="kv">${rows}</div>`;
+      }).join("<hr class=\"sep\" />");
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `<h3>守护进程/插件状态</h3><div class="small muted">来源：${escapeHtml(unitsSrc)}</div>${items}`;
+      grid.appendChild(card);
+    } else {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `<h3>守护进程/插件状态</h3><p class="muted">无数据</p><div class="small muted">来源：${escapeHtml(unitsSrc)}</div>`;
+      grid.appendChild(card);
+    }
+
     if (statusData) {
       grid.appendChild(renderJSONCard("状态 JSON", statusData));
     } else {
