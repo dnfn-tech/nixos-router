@@ -162,6 +162,29 @@ func (d *DB) DeleteSession(id string) error {
 	return err
 }
 
+func (d *DB) ListJobs(limit int) ([]Job, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	rows, err := d.SQL.Query(`SELECT id, kind, status, created_at, updated_at, payload, error FROM jobs ORDER BY created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		var j Job
+		var created, updated int64
+		if err := rows.Scan(&j.ID, &j.Kind, &j.Status, &created, &updated, &j.Payload, &j.Error); err != nil {
+			return nil, err
+		}
+		j.CreatedAt = time.Unix(created, 0)
+		j.UpdatedAt = time.Unix(updated, 0)
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
 type Job struct {
 	ID        string
 	Kind      string

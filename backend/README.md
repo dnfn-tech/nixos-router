@@ -29,6 +29,7 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - `GET /api/v1/status`：状态概览（桩值）
 - `GET /api/v1/ui/nav`：UI 导航（内置页面 + 已启用插件）
 - `GET /api/v1/plugins`：插件列表（来自配置）
+- `GET /api/v1/clients`：客户端列表（优先租约来源，否则基于静态租约，`source: "stub"`）
 - `GET /api/v1/capabilities/wifi`：WiFi 能力（桩值/来自 env）
 - `POST /api/v1/session`：登录，设置 HttpOnly Cookie（SameSite=Lax）
 - `GET /api/v1/session`：查看会话（需已登录）
@@ -37,6 +38,7 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - `PUT /api/v1/config`：保存完整配置（Schema/语义校验通过后原子写入）；仅保存，不 apply
 - `POST /api/v1/apply`：生成运行时片段到 `stateDir/generated/`（dnsmasq/nftables/hostapd 占位），记录作业；默认不 reload 系统单元
 - `GET /api/v1/jobs/{id}`：查询作业状态（`mode: generate-only`，`appliedRuntime: false`）
+- `GET /api/v1/jobs?limit=20`：按创建时间倒序返回最近作业
 
 ## WebUI（静态资源）
 
@@ -69,6 +71,8 @@ curl -s -b cookie.txt http://localhost:8080/api/v1/capabilities/wifi | jq .
 
 # 5) 更新配置（仅保存，不 apply）
 # 形状一：与 GET 对称（{ config: {...} }）
+# 5) 更新配置（仅保存，不 apply）
+# 形状一：与 GET 对称（{ config: {...} }）
 curl -s -b cookie.txt -H 'Content-Type: application/json' \
   -d '{"config":{"system":{"hostname":"new-name"}}, "wan":{"mode":"dhcp"}, "lan":{...}, "dns":{...}, "wifi":{...}, "firewall":{...}, "ssh":{...}, "plugins":{}}' \
   -X PUT http://localhost:8080/api/v1/config | jq .
@@ -78,11 +82,16 @@ curl -s -b cookie.txt -H 'Content-Type: application/json' \
   -d '{"system":{"hostname":"new-name"}, "wan":{"mode":"dhcp"}, "lan":{...}, "dns":{...}, "wifi":{...}, "firewall":{...}, "ssh":{...}, "plugins":{}}' \
   -X PUT http://localhost:8080/api/v1/config | jq .
 
+# 秘密字段合并规则（避免误清空）
+# - 当 UI 以 \"****\" 或空字符串提交时，后端将保留已存储的密钥/口令（PPPoE、WiFi PSK、DDNS Token 等）
+# - 若要显式清除，请传入明确的空值协议（后续里程碑可提供专门 API）
+
 # 6) 生成（仅生成，不 reload）
 curl -s -b cookie.txt -X POST http://localhost:8080/api/v1/apply | jq .
 # 查询作业
 JOB=$(curl -s -b cookie.txt -X POST http://localhost:8080/api/v1/apply | jq -r .jobId)
 curl -s -b cookie.txt http://localhost:8080/api/v1/jobs/$JOB | jq .
+curl -s -b cookie.txt 'http://localhost:8080/api/v1/jobs?limit=5' | jq .
 ls -la ./_state/generated/
 
 # 7) 登出

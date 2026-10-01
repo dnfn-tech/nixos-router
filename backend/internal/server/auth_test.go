@@ -48,6 +48,29 @@ func TestUnauthorizedWithoutSession(t *testing.T) {
 	}
 }
 
+func TestJobsListEmptyOK(t *testing.T) {
+	srv, closeDB := setupServerForAuthTest(t)
+	defer closeDB()
+	// login
+	body := map[string]string{"username": "admin", "password": "secret"}
+	bs, _ := json.Marshal(body)
+	reqLogin := httptest.NewRequest(http.MethodPost, "/api/v1/session", bytes.NewReader(bs))
+	reqLogin.Header.Set("Content-Type", "application/json")
+	wLogin := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(wLogin, reqLogin)
+	cookies := wLogin.Result().Cookies()
+	// list jobs
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
 func TestLoginSuccessAndLogout(t *testing.T) {
 	srv, closeDB := setupServerForAuthTest(t)
 	defer closeDB()

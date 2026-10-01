@@ -24,6 +24,7 @@ type Config struct {
 	WiFi     WiFiConfig              `json:"wifi"`
 	Firewall FirewallConfig          `json:"firewall"`
 	SSH      SSHConfig               `json:"ssh"`
+	DDNS     DDNSConfig              `json:"ddns"`
 	Plugins  map[string]PluginConfig `json:"plugins,omitempty"`
 }
 
@@ -56,6 +57,8 @@ type LANConfig struct {
 	BridgeName string       `json:"bridgeName"` // e.g. "br-lan"
 	IPv4CIDR   string       `json:"ipv4Cidr"`   // e.g. "192.168.1.1/24"
 	DHCP       DHCPv4Config `json:"dhcp"`
+	Ports      []string     `json:"ports,omitempty"` // physical ports in br-lan (optional)
+	StaticLeases []StaticLease `json:"staticLeases,omitempty"`
 }
 
 type DHCPv4Config struct {
@@ -63,6 +66,13 @@ type DHCPv4Config struct {
 	RangeStart string `json:"rangeStart,omitempty"` // e.g. "192.168.1.100"
 	RangeEnd   string `json:"rangeEnd,omitempty"`   // e.g. "192.168.1.200"
 	LeaseMins  int    `json:"leaseMins,omitempty"`  // e.g. 1440
+}
+
+type StaticLease struct {
+	MAC      string `json:"mac"`
+	IP       string `json:"ip"`
+	Hostname string `json:"hostname,omitempty"`
+	Comment  string `json:"comment,omitempty"`
 }
 
 type DNSConfig struct {
@@ -83,13 +93,26 @@ type WiFiAP struct {
 	Channel int    `json:"channel,omitempty"` // stub
 	PSK     string `json:"psk,omitempty"`     // redacted
 	Enable  bool   `json:"enable"`
+	Guest   bool   `json:"guest,omitempty"`
+	Isolate bool   `json:"isolate,omitempty"`
 }
 
 type FirewallConfig struct {
 	Enable      bool   `json:"enable"`
 	NATEnabled  bool   `json:"natEnabled"`
-	Description string `json:"description,omitempty"` // stub placeholder
-	// Future: rules, zones, forwards...
+	UPnPEnable  bool   `json:"upnpEnable,omitempty"`
+	Description string `json:"description,omitempty"`
+	PortForwards []PortForward `json:"portForwards,omitempty"`
+	// Future: lanServices...
+}
+
+type PortForward struct {
+	Protocol string `json:"protocol"`           // "tcp" | "udp"
+	ExternalPort int `json:"externalPort"`      // 1-65535 (single port)
+	ExternalPortEnd int `json:"externalPortEnd,omitempty"` // optional range end
+	DestIP    string `json:"destIp"`           // internal dest IP
+	DestPort  int    `json:"destPort"`         // 1-65535
+	Description string `json:"description,omitempty"`
 }
 
 type SSHConfig struct {
@@ -97,6 +120,39 @@ type SSHConfig struct {
 	Port           int      `json:"port,omitempty"`
 	PasswordAuth   bool     `json:"passwordAuth,omitempty"`
 	AuthorizedKeys []string `json:"authorizedKeys,omitempty"`
+}
+
+// DDNS providers (stubs)
+type DDNSConfig struct {
+	Enable   bool   `json:"enable"`
+	Provider string `json:"provider,omitempty"` // "cloudflare" | "duckdns" | "aliyun" | "custom"
+	Cloudflare *CloudflareDDNS `json:"cloudflare,omitempty"`
+	DuckDNS    *DuckDNSConfig  `json:"duckdns,omitempty"`
+	Aliyun     *AliyunDDNS     `json:"aliyun,omitempty"`
+	Custom     *CustomDDNS     `json:"custom,omitempty"`
+}
+
+type CloudflareDDNS struct {
+	APIToken string `json:"apiToken"` // secret
+	Zone     string `json:"zone"`
+	Record   string `json:"record"`
+}
+
+type DuckDNSConfig struct {
+	Token string `json:"token"` // secret
+	Domain string `json:"domain"`
+}
+
+type AliyunDDNS struct {
+	AccessKey string `json:"accessKey"` // secret
+	SecretKey string `json:"secretKey"` // secret
+	Domain    string `json:"domain"`
+	Record    string `json:"record"`
+}
+
+type CustomDDNS struct {
+	URL   string `json:"url"`
+	Token string `json:"token,omitempty"` // optional secret
 }
 
 type PluginConfig struct {
@@ -142,6 +198,9 @@ func DefaultConfig() Config {
 			Enable:       true,
 			Port:         22,
 			PasswordAuth: false,
+		},
+		DDNS: DDNSConfig{
+			Enable: false,
 		},
 		Plugins: map[string]PluginConfig{},
 	}
@@ -197,6 +256,22 @@ func (c *Config) Validate() error {
 			return errors.New("lan.dhcp.leaseMins must be >= 1")
 		}
 	}
+	// Static leases
+	if len(c.LAN.StaticLeases) > 0 {
+		_, lanNet, _ := net.ParseCIDR(c.LAN.IPv4CIDR)
+		for _, sl := range c.LAN.StaticLeases {
+			if _, err := net.ParseMAC(sl.MAC); err != nil {
+				return fmt.Errorf("lan.staticLeases mac invalid: %s", sl.MAC)
+			}
+			ip := net.ParseIP(sl.IP)
+			if ip == nil {
+				return fmt.Errorf("lan.staticLeases ip invalid: %s", sl.IP)
+			}
+			if lanNet != nil && !lanNet.Contains(ip) {
+				return fmt.Errorf("lan.staticLeases ip %s not in %s", sl.IP, c.LAN.IPv4CIDR)
+			}
+		}
+	}
 
 	for _, u := range c.DNS.Upstreams {
 		if net.ParseIP(u) == nil {
@@ -209,11 +284,62 @@ func (c *Config) Validate() error {
 		if ap.SSID == "" {
 			return errors.New("wifi.aps[].ssid must not be empty")
 		}
+		if ap.PSK != "" && len(ap.PSK) < 8 {
+			return errors.New("wifi.aps[].psk must be at least 8 characters if set")
+		}
+		switch ap.Band {
+		case "", "2g", "5g", "6g":
+		default:
+			return fmt.Errorf("wifi.aps[].band invalid: %s", ap.Band)
+		}
 	}
 
 	// SSH port sanity
 	if c.SSH.Port < 0 || c.SSH.Port > 65535 {
 		return errors.New("ssh.port must be 0-65535")
+	}
+	// Firewall port forwards
+	for _, pf := range c.Firewall.PortForwards {
+		if pf.Protocol != "tcp" && pf.Protocol != "udp" {
+			return fmt.Errorf("firewall.portForwards[].protocol invalid: %s", pf.Protocol)
+		}
+		if pf.ExternalPort < 1 || pf.ExternalPort > 65535 {
+			return errors.New("firewall.portForwards[].externalPort 1-65535")
+		}
+		if pf.ExternalPortEnd != 0 {
+			if pf.ExternalPortEnd < pf.ExternalPort || pf.ExternalPortEnd > 65535 {
+				return errors.New("firewall.portForwards[].externalPortEnd invalid")
+			}
+		}
+		if net.ParseIP(pf.DestIP) == nil {
+			return fmt.Errorf("firewall.portForwards[].destIp invalid: %s", pf.DestIP)
+		}
+		if pf.DestPort < 1 || pf.DestPort > 65535 {
+			return errors.New("firewall.portForwards[].destPort 1-65535")
+		}
+	}
+	// DDNS sanity
+	if c.DDNS.Enable {
+		switch c.DDNS.Provider {
+		case "cloudflare":
+			if c.DDNS.Cloudflare == nil || c.DDNS.Cloudflare.APIToken == "" || c.DDNS.Cloudflare.Zone == "" || c.DDNS.Cloudflare.Record == "" {
+				return errors.New("ddns.cloudflare requires apiToken, zone, record")
+			}
+		case "duckdns":
+			if c.DDNS.DuckDNS == nil || c.DDNS.DuckDNS.Token == "" || c.DDNS.DuckDNS.Domain == "" {
+				return errors.New("ddns.duckdns requires token, domain")
+			}
+		case "aliyun":
+			if c.DDNS.Aliyun == nil || c.DDNS.Aliyun.AccessKey == "" || c.DDNS.Aliyun.SecretKey == "" || c.DDNS.Aliyun.Domain == "" || c.DDNS.Aliyun.Record == "" {
+				return errors.New("ddns.aliyun requires accessKey, secretKey, domain, record")
+			}
+		case "custom":
+			if c.DDNS.Custom == nil || c.DDNS.Custom.URL == "" {
+				return errors.New("ddns.custom requires url")
+			}
+		default:
+			return errors.New("ddns.provider must be one of: cloudflare, duckdns, aliyun, custom")
+		}
 	}
 	return nil
 }
@@ -235,6 +361,32 @@ func (c *Config) RedactedCopy() Config {
 			}
 		}
 		clone.WiFi.APs = aps
+	}
+	// DDNS redact
+	if clone.DDNS.Cloudflare != nil && clone.DDNS.Cloudflare.APIToken != "" {
+		cc := *clone.DDNS.Cloudflare
+		cc.APIToken = "****"
+		clone.DDNS.Cloudflare = &cc
+	}
+	if clone.DDNS.DuckDNS != nil && clone.DDNS.DuckDNS.Token != "" {
+		dd := *clone.DDNS.DuckDNS
+		dd.Token = "****"
+		clone.DDNS.DuckDNS = &dd
+	}
+	if clone.DDNS.Aliyun != nil {
+		al := *clone.DDNS.Aliyun
+		if al.AccessKey != "" {
+			al.AccessKey = "****"
+		}
+		if al.SecretKey != "" {
+			al.SecretKey = "****"
+		}
+		clone.DDNS.Aliyun = &al
+	}
+	if clone.DDNS.Custom != nil && clone.DDNS.Custom.Token != "" {
+		cu := *clone.DDNS.Custom
+		cu.Token = "****"
+		clone.DDNS.Custom = &cu
 	}
 	return clone
 }

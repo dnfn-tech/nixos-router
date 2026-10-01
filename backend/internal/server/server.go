@@ -88,6 +88,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
 	mux.HandleFunc("/api/v1/ui/nav", s.handleUINav)
 	mux.HandleFunc("/api/v1/plugins", s.handlePlugins)
+	mux.HandleFunc("/api/v1/clients", s.handleClients)
 	mux.HandleFunc("/api/v1/capabilities/wifi", s.handleWifiCaps)
 	mux.HandleFunc("/api/v1/session", s.handleSession)
 	mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
@@ -294,6 +295,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// Preserve secrets if placeholders or empty are provided
+		newCfg = s.mergeSecrets(s.cfg, newCfg)
 		if err := newCfg.Validate(); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"errors": []string{err.Error()},
@@ -330,21 +333,49 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"hostname": s.cfg.System.Hostname,
 			"timezone": s.cfg.System.Timezone,
 		},
-		"interfaces": []map[string]interface{}{
-			{"name": s.cfg.WAN.Interface, "role": "wan", "mode": s.cfg.WAN.Mode, "up": false},
-			{"name": s.cfg.LAN.BridgeName, "role": "lan", "cidr": lanCIDR, "up": true},
+		"wan": map[string]interface{}{
+			"iface": s.cfg.WAN.Interface,
+			"mode":  s.cfg.WAN.Mode,
+			"static": s.cfg.WAN.Static,
+			"pppoeUser": func() string {
+				if s.cfg.WAN.PPPoE != nil {
+					return s.cfg.WAN.PPPoE.Username
+				}
+				return ""
+			}(),
+		},
+		"lan": map[string]interface{}{
+			"bridge": s.cfg.LAN.BridgeName,
+			"cidr":   lanCIDR,
+			"dhcp":   s.cfg.LAN.DHCP,
+			"ports":  s.cfg.LAN.Ports,
 		},
 		"wifi": map[string]interface{}{
 			"enabled": s.cfg.WiFi.Enable,
 			"aps":     len(s.cfg.WiFi.APs),
+			"guestCount": func() int {
+				c := 0
+				for _, ap := range s.cfg.WiFi.APs {
+					if ap.Guest {
+						c++
+					}
+				}
+				return c
+			}(),
 		},
 		"firewall": map[string]interface{}{
 			"enabled": s.cfg.Firewall.Enable,
 			"nat":     s.cfg.Firewall.NATEnabled,
+			"portForwards": s.cfg.Firewall.PortForwards,
 		},
 		"ssh": map[string]interface{}{
 			"enabled": s.cfg.SSH.Enable,
 			"port":    s.cfg.SSH.Port,
+			"passwordAuth": s.cfg.SSH.PasswordAuth,
+		},
+		"ddns": map[string]interface{}{
+			"enabled":  s.cfg.DDNS.Enable,
+			"provider": s.cfg.DDNS.Provider,
 		},
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -390,6 +421,26 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"plugins": list})
 }
 
+func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
+	// Prefer a known leases file; else stub from static leases; else empty
+	type Client struct {
+		IP       string `json:"ip"`
+		MAC      string `json:"mac,omitempty"`
+		Hostname string `json:"hostname,omitempty"`
+		Source   string `json:"source"`
+	}
+	var clients []Client
+	// From static leases
+	for _, sl := range s.cfg.LAN.StaticLeases {
+		clients = append(clients, Client{IP: sl.IP, MAC: sl.MAC, Hostname: sl.Hostname, Source: "static"})
+	}
+	// TODO: parse dnsmasq leases when available; mark as stub otherwise
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"clients": clients,
+		"source":  "stub",
+	})
+}
+
 func (s *Server) handleWifiCaps(w http.ResponseWriter, r *http.Request) {
 	maxAP := 2
 	if v := os.Getenv("NIXOS_ROUTER_WIFI_MAX_APS"); v != "" {
@@ -399,7 +450,7 @@ func (s *Server) handleWifiCaps(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"maxAP":  maxAP,
-		"bands":  []string{"2g", "5g"}, // stub
+		"bands":  []string{"2g", "5g", "6g"},
 		"driver": "stub",
 	})
 }
@@ -421,6 +472,78 @@ func keysOf(m map[string]interface{}) []string {
 	return keys
 }
 
+func isRedactedOrEmpty(s string) bool {
+	return s == "" || s == "****"
+}
+
+func (s *Server) mergeSecrets(oldCfg config.Config, in config.Config) config.Config {
+	out := in
+	// PPPoE password
+	if in.WAN.Mode == "pppoe" && in.WAN.PPPoE != nil {
+		if isRedactedOrEmpty(in.WAN.PPPoE.Password) && oldCfg.WAN.PPPoE != nil {
+			pp := *in.WAN.PPPoE
+			pp.Password = oldCfg.WAN.PPPoE.Password
+			out.WAN.PPPoE = &pp
+		}
+	}
+	// WiFi AP PSKs matched by SSID (fallback: same index)
+	if len(in.WiFi.APs) > 0 && len(oldCfg.WiFi.APs) > 0 {
+		bySSID := map[string]config.WiFiAP{}
+		for _, ap := range oldCfg.WiFi.APs {
+			if ap.SSID != "" {
+				bySSID[ap.SSID] = ap
+			}
+		}
+		aps := make([]config.WiFiAP, len(in.WiFi.APs))
+		copy(aps, in.WiFi.APs)
+		for i := range aps {
+			if isRedactedOrEmpty(aps[i].PSK) {
+				if apOld, ok := bySSID[aps[i].SSID]; ok && apOld.PSK != "" {
+					aps[i].PSK = apOld.PSK
+				} else if i < len(oldCfg.WiFi.APs) && oldCfg.WiFi.APs[i].SSID == aps[i].SSID && oldCfg.WiFi.APs[i].PSK != "" {
+					aps[i].PSK = oldCfg.WiFi.APs[i].PSK
+				}
+			}
+		}
+		out.WiFi.APs = aps
+	}
+	// DDNS tokens/secrets
+	if in.DDNS.Provider == oldCfg.DDNS.Provider {
+		switch in.DDNS.Provider {
+		case "cloudflare":
+			if in.DDNS.Cloudflare != nil && oldCfg.DDNS.Cloudflare != nil && isRedactedOrEmpty(in.DDNS.Cloudflare.APIToken) {
+				cc := *in.DDNS.Cloudflare
+				cc.APIToken = oldCfg.DDNS.Cloudflare.APIToken
+				out.DDNS.Cloudflare = &cc
+			}
+		case "duckdns":
+			if in.DDNS.DuckDNS != nil && oldCfg.DDNS.DuckDNS != nil && isRedactedOrEmpty(in.DDNS.DuckDNS.Token) {
+				dd := *in.DDNS.DuckDNS
+				dd.Token = oldCfg.DDNS.DuckDNS.Token
+				out.DDNS.DuckDNS = &dd
+			}
+		case "aliyun":
+			if in.DDNS.Aliyun != nil && oldCfg.DDNS.Aliyun != nil {
+				al := *in.DDNS.Aliyun
+				if isRedactedOrEmpty(al.AccessKey) {
+					al.AccessKey = oldCfg.DDNS.Aliyun.AccessKey
+				}
+				if isRedactedOrEmpty(al.SecretKey) {
+					al.SecretKey = oldCfg.DDNS.Aliyun.SecretKey
+				}
+				out.DDNS.Aliyun = &al
+			}
+		case "custom":
+			if in.DDNS.Custom != nil && oldCfg.DDNS.Custom != nil && isRedactedOrEmpty(in.DDNS.Custom.Token) {
+				cu := *in.DDNS.Custom
+				cu.Token = oldCfg.DDNS.Custom.Token
+				out.DDNS.Custom = &cu
+			}
+		}
+	}
+	return out
+}
+
 type creds struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
@@ -433,7 +556,30 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "listing not implemented yet"})
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+	jobs, err := s.db.ListJobs(limit)
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	items := make([]map[string]interface{}, 0, len(jobs))
+	for _, j := range jobs {
+		items = append(items, map[string]interface{}{
+			"id":        j.ID,
+			"kind":      j.Kind,
+			"status":    j.Status,
+			"createdAt": j.CreatedAt.UTC().Format(time.RFC3339),
+			"updatedAt": j.UpdatedAt.UTC().Format(time.RFC3339),
+			"payload":   j.Payload,
+			"error":     j.Error,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"jobs": items})
 }
 
 func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
@@ -531,19 +677,32 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 		dhcpRange = fmt.Sprintf("dhcp-range=%s,%s,%dm", cfg.LAN.DHCP.RangeStart, cfg.LAN.DHCP.RangeEnd, cfg.LAN.DHCP.LeaseMins)
 	}
 	dns := "# Generated by routerd (generate-only)\n"
-	dns += "domain-needed\nbogus-priv\n"
+	dns += "domain-needed\nbogus-priv\nno-resolv\n"
 	dns += fmt.Sprintf("interface=%s\n", cfg.LAN.BridgeName)
+	if cfg.DNS.Domain != "" {
+		dns += fmt.Sprintf("domain=%s\n", cfg.DNS.Domain)
+	}
 	if dhcpRange != "" {
 		dns += dhcpRange + "\n"
 	}
 	for _, up := range cfg.DNS.Upstreams {
 		dns += fmt.Sprintf("server=%s\n", up)
 	}
+	for _, sl := range cfg.LAN.StaticLeases {
+		if sl.MAC != "" && sl.IP != "" {
+			if sl.Hostname != "" {
+				dns += fmt.Sprintf("dhcp-host=%s,%s,%s\n", sl.MAC, sl.IP, sl.Hostname)
+			} else {
+				dns += fmt.Sprintf("dhcp-host=%s,%s\n", sl.MAC, sl.IP)
+			}
+		}
+	}
 	if err := os.WriteFile(filepath.Join(dir, "dnsmasq.conf.fragment"), []byte(dns), 0o644); err != nil {
 		return err
 	}
 	// nftables
 	nft := "# Generated by routerd (generate-only)\n"
+	nft += "table inet filter {\n  chain input {\n    type filter hook input priority 0; policy drop;\n    ct state established,related accept\n    iifname \"lo\" accept\n    iifname \"" + cfg.LAN.BridgeName + "\" accept\n  }\n}\n"
 	nft += "table ip nat {\n  chain postrouting {\n    type nat hook postrouting priority 100; policy accept;\n"
 	if cfg.Firewall.NATEnabled {
 		ifName := cfg.WAN.Interface
@@ -553,6 +712,14 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 		nft += fmt.Sprintf("    oifname \"%s\" masquerade\n", ifName)
 	} else {
 		nft += "    # NAT disabled\n"
+	}
+	nft += "  }\n  chain prerouting {\n    type nat hook prerouting priority -100; policy accept;\n"
+	for _, pf := range cfg.Firewall.PortForwards {
+		if pf.ExternalPortEnd != 0 && pf.ExternalPortEnd != pf.ExternalPort {
+			nft += fmt.Sprintf("    %s dport %d-%d dnat to %s:%d\n", pf.Protocol, pf.ExternalPort, pf.ExternalPortEnd, pf.DestIP, pf.DestPort)
+		} else {
+			nft += fmt.Sprintf("    %s dport %d dnat to %s:%d\n", pf.Protocol, pf.ExternalPort, pf.DestIP, pf.DestPort)
+		}
 	}
 	nft += "  }\n}\n"
 	if err := os.WriteFile(filepath.Join(dir, "nftables.nft.fragment"), []byte(nft), 0o644); err != nil {
@@ -571,6 +738,12 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 				host += "wpa=2\nwpa_key_mgmt=WPA-PSK\nwpa_passphrase=<redacted>\n"
 			} else {
 				host += "# open network (not recommended)\n"
+			}
+			if ap.Guest {
+				host += "# guest network\n"
+				if ap.Isolate {
+					host += "# AP isolation enabled (isolate stations)\n"
+				}
 			}
 			host += "\n"
 		}
