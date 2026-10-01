@@ -53,6 +53,11 @@ func (d *DB) Close() error {
 
 func (d *DB) migrate() error {
 	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS users (
+			username TEXT PRIMARY KEY,
+			password_hash TEXT NOT NULL,
+			created_at INTEGER
+		);`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			user TEXT,
@@ -102,5 +107,58 @@ func (d *DB) AddAudit(actor, action, detail string) {
 	}
 	_, _ = d.SQL.Exec(`INSERT INTO audit_log (ts, actor, action, detail) VALUES (?, ?, ?, ?)`,
 		time.Now().Unix(), actor, action, detail)
+}
+
+func (d *DB) GetUserPasswordHash(username string) (string, error) {
+	var hash string
+	err := d.SQL.QueryRow(`SELECT password_hash FROM users WHERE username=?`, username).Scan(&hash)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return hash, err
+}
+
+func (d *DB) CreateUser(username, passwordHash string) error {
+	_, err := d.SQL.Exec(`INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)`,
+		username, passwordHash, time.Now().Unix())
+	return err
+}
+
+func (d *DB) HasAnyUser() (bool, error) {
+	var n int
+	if err := d.SQL.QueryRow(`SELECT COUNT(1) FROM users`).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (d *DB) CreateSession(id, username string, ttl time.Duration) error {
+	now := time.Now()
+	_, err := d.SQL.Exec(`INSERT INTO sessions (id, user, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+		id, username, now.Unix(), now.Add(ttl).Unix())
+	return err
+}
+
+func (d *DB) GetSession(id string) (username string, expiresAt time.Time, ok bool, err error) {
+	var ts int64
+	err = d.SQL.QueryRow(`SELECT user, expires_at FROM sessions WHERE id=?`, id).Scan(&username, &ts)
+	if err == sql.ErrNoRows {
+		return "", time.Time{}, false, nil
+	}
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	expiresAt = time.Unix(ts, 0)
+	if time.Now().After(expiresAt) {
+		// cleanup best-effort
+		_, _ = d.SQL.Exec(`DELETE FROM sessions WHERE id=?`, id)
+		return "", time.Time{}, false, nil
+	}
+	return username, expiresAt, true, nil
+}
+
+func (d *DB) DeleteSession(id string) error {
+	_, err := d.SQL.Exec(`DELETE FROM sessions WHERE id=?`, id)
+	return err
 }
 

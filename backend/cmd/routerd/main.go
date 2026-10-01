@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/dnfn-tech/nixos-router/backend/internal/db"
 	"github.com/dnfn-tech/nixos-router/backend/internal/server"
 	webfs "github.com/dnfn-tech/nixos-router/backend/web"
+	"golang.org/x/crypto/bcrypt"
 )
 
 var version = "dev"
@@ -49,6 +51,11 @@ func main() {
 	}
 	defer database.Close()
 
+	// Seed admin user if empty
+	if err := ensureAdminSeed(database, *dev, *seed); err != nil {
+		log.Fatalf("seed admin: %v", err)
+	}
+
 	s := server.New(server.Options{
 		Config:     cfg,
 		ConfigPath: cfgPath,
@@ -70,6 +77,35 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("listen: %v", err)
 	}
+}
+
+func ensureAdminSeed(database *db.DB, dev bool, seed bool) error {
+	has, err := database.HasAnyUser()
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	pw := os.Getenv("NIXOS_ROUTER_ADMIN_PASSWORD")
+	if pw == "" {
+		if dev || seed {
+			pw = "adminadmin"
+			log.Printf("WARNING: seeding default admin password for dev (--dev or --seed-default-config): username=admin password=%s (DO NOT USE IN PRODUCTION)", pw)
+		} else {
+			log.Printf("WARNING: no admin user present; set NIXOS_ROUTER_ADMIN_PASSWORD to create initial admin account. Until then, login is disabled.")
+			return nil
+		}
+	}
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash admin password: %w", err)
+	}
+	if err := database.CreateUser("admin", string(hashBytes)); err != nil {
+		return fmt.Errorf("create admin user: %w", err)
+	}
+	database.AddAudit("system", "seed_admin", "created initial admin user")
+	return nil
 }
 
 func getEnv(key, def string) string {

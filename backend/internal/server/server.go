@@ -1,11 +1,14 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -13,6 +16,14 @@ import (
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/db"
+	"golang.org/x/crypto/bcrypt"
+)
+
+const (
+	cookieName         = "nrx_session"
+	defaultSessionTTL  = 24 * time.Hour
+	maxFailedPerWindow = 5
+	failedWindow       = 5 * time.Minute
 )
 
 type Server struct {
@@ -26,6 +37,8 @@ type Server struct {
 	allowedCORS string // when set (dev) send Access-Control-Allow-Origin
 	embeddedFS  fs.FS   // compiled-in assets
 	webDir      string  // when set, serve from local dir (dev override)
+	requireAuth bool
+	loginFails map[string][]time.Time
 }
 
 type Options struct {
@@ -47,9 +60,11 @@ func New(opts Options) *Server {
 		db:        opts.DB,
 		devMode:   opts.DevMode,
 		startedAt: time.Now(),
-		version:   opts.Version,
+		version:    opts.Version,
 		embeddedFS: opts.WebFS,
 		webDir:     strings.TrimSpace(opts.WebDir),
+		requireAuth: !opts.DevMode,
+		loginFails:  make(map[string][]time.Time),
 	}
 	if s.devMode {
 		// allow all for local-dev unless overridden
@@ -68,6 +83,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/ui/nav", s.handleUINav)
 	mux.HandleFunc("/api/v1/plugins", s.handlePlugins)
 	mux.HandleFunc("/api/v1/capabilities/wifi", s.handleWifiCaps)
+	mux.HandleFunc("/api/v1/session", s.handleSession)
 	mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
 	// Static UI for non-/api paths
 	mux.Handle("/", http.HandlerFunc(s.handleSPA))
@@ -76,7 +92,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.routes(mux)
-	return s.wrapCORS(mux)
+	h := s.wrapAuth(mux)
+	return s.wrapCORS(h)
 }
 
 func (s *Server) wrapCORS(next http.Handler) http.Handler {
@@ -89,6 +106,27 @@ func (s *Server) wrapCORS(next http.Handler) http.Handler {
 			}
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) wrapAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireAuth {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Allow: health, POST /session, and static UI (non-/api paths)
+		if r.URL.Path == "/api/v1/health" ||
+			(r.URL.Path == "/api/v1/session" && r.Method == http.MethodPost) ||
+			!strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if s.isSessionValid(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	})
 }
 
@@ -311,10 +349,12 @@ func (s *Server) handleWifiCaps(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, map[string]interface{}{
-		"error":  "not_implemented",
-		"detail": "Auth will be added in a later milestone",
-	})
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// forward to /session create
+	s.handleSession(w, r)
 }
 
 func keysOf(m map[string]interface{}) []string {
@@ -323,5 +363,161 @@ func keysOf(m map[string]interface{}) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+type creds struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		// Rate-limit failures per client ip
+		if !s.checkLoginAllowance(r) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too_many_attempts"})
+			return
+		}
+		var c creds
+		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(c.Username) == "" || c.Password == "" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		hash, err := s.db.GetUserPasswordHash(c.Username)
+		if err != nil || hash == "" {
+			s.onLoginFail(r, c.Username)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_credentials"})
+			return
+		}
+		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(c.Password)) != nil {
+			s.onLoginFail(r, c.Username)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_credentials"})
+			return
+		}
+		// Success
+		s.resetLoginFail(r)
+		sid := newSessionID()
+		if err := s.db.CreateSession(sid, c.Username, defaultSessionTTL); err != nil {
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		exp := time.Now().Add(defaultSessionTTL)
+		s.setSessionCookie(w, sid, exp)
+		s.db.AddAudit(c.Username, "login", "success")
+		writeJSON(w, http.StatusCreated, map[string]interface{}{
+			"user":    c.Username,
+			"expires": exp.UTC().Format(time.RFC3339),
+		})
+	case http.MethodGet:
+		user, exp, ok := s.getSession(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"user":    user,
+			"expires": exp.UTC().Format(time.RFC3339),
+		})
+	case http.MethodDelete:
+		sid, _ := readSessionCookie(r)
+		if sid != "" {
+			_ = s.db.DeleteSession(sid)
+		}
+		// Clear cookie
+		http.SetCookie(w, &http.Cookie{
+			Name:     cookieName,
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		s.db.AddAudit("session", "logout", "by cookie")
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) isSessionValid(r *http.Request) bool {
+	_, _, ok := s.getSession(r)
+	return ok
+}
+
+func (s *Server) getSession(r *http.Request) (string, time.Time, bool) {
+	sid, ok := readSessionCookie(r)
+	if !ok || sid == "" {
+		return "", time.Time{}, false
+	}
+	user, exp, ok, err := s.db.GetSession(sid)
+	if err != nil || !ok {
+		return "", time.Time{}, false
+	}
+	return user, exp, true
+}
+
+func readSessionCookie(r *http.Request) (string, bool) {
+	c, err := r.Cookie(cookieName)
+	if err != nil {
+		return "", false
+	}
+	return c.Value, true
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, sid string, expires time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieName,
+		Value:    sid,
+		Path:     "/",
+		Expires:  expires,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func newSessionID() string {
+	var b [32]byte
+	_, _ = rand.Read(b[:])
+	return base64.RawURLEncoding.EncodeToString(b[:])
+}
+
+func (s *Server) clientKey(r *http.Request) string {
+	host, _, _ := strings.Cut(r.RemoteAddr, ":")
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.String()
+	}
+	return host
+}
+
+func (s *Server) checkLoginAllowance(r *http.Request) bool {
+	now := time.Now()
+	key := s.clientKey(r)
+	wins, ok := s.loginFails[key]
+	if !ok {
+		return true
+	}
+	kept := wins[:0]
+	for _, t := range wins {
+		if now.Sub(t) <= failedWindow {
+			kept = append(kept, t)
+		}
+	}
+	s.loginFails[key] = kept
+	return len(kept) < maxFailedPerWindow
+}
+
+func (s *Server) onLoginFail(r *http.Request, user string) {
+	key := s.clientKey(r)
+	s.loginFails[key] = append(s.loginFails[key], time.Now())
+	s.db.AddAudit(user, "login", "failed")
+}
+
+func (s *Server) resetLoginFail(r *http.Request) {
+	key := s.clientKey(r)
+	delete(s.loginFails, key)
 }
 
