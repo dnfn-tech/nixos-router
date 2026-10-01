@@ -46,9 +46,7 @@
 
 ## 新增（M14）
 - nixpkgs 升级：将 flake 的 `inputs.nixpkgs` 从 `nixos-24.05` 升至可提供 Go ≥ 1.26 的通道（当前采用 `nixos-unstable` 以满足 `backend/go.mod` 的 `go 1.26` 要求）。
-- 构建与 vendorHash：本环境无 nix-daemon，未直接计算 `vendorHash`；请在有 Nix 的主机执行下述一步命令以落盘真实哈希：
-  - `./scripts/compute-vendor-hash.sh --apply`
-  - 若你也希望同时固定锁文件：`nix flake update && nix build .#routerd`
+- 构建与 vendorHash：已固定 `vendorHash = "sha256-MM1ODEBButuG1Yalmyxv1mkJmc4Va4tclJpq1q0IAcc="`，并将 flake.lock 锁定到 `nixpkgs-unstable`；已在私有 worker 上验证 `nix build .#routerd` 成功。
 - 安全与模块默认行为未改变：仍为“仅生成”，`applyReload=false`、`applyTrafficControl=false`、`privilegedApply=false`、`openFirewall=false`。
 
 ## 默认安全策略
@@ -65,6 +63,7 @@
 - 之后 `nix build .#routerd` 应可成功；若依然失败，请将构建输出中的 `got: sha256-...` 替换进 `flake.nix`
 
 ## Nix vendorHash（M13 进展）
+- 注：自 M14 起已固定 vendorHash（见下文“已固定”），本节为历史记录。
 - 当前 `nixpkgs-24.05` 的 Go 工具链为 1.22.x，而本仓库需要 Go ≥1.26（`backend/go.mod`）：
   - 在该环境下 `scripts/compute-vendor-hash.sh` 会于编译前失败，无法输出有效 `vendorHash`
   - 本迭代不提升 nixpkgs 固定，也不“猜测”哈希：`flake.nix` 仍保持 `vendorHash = lib.fakeSha256`
@@ -72,10 +71,7 @@
   - `./scripts/compute-vendor-hash.sh --apply`
 - 之后提交独立 PR 锁定 vendor 缓存
 
-## Nix vendorHash（M14 指南）
-- flake 已切到具备 Go ≥1.26 的 nixpkgs 通道（`nixos-unstable`）；建议在 Nix 主机上直接执行：
-  1) `nix flake update`（可选但推荐，固定到具体提交）
-  2) `./scripts/compute-vendor-hash.sh --apply`（写入真实 vendorHash）
-  3) `nix build .#routerd`（验证成功）
-- 注意：请勿手写/猜测 vendorHash；以 Nix 输出中的 `got: sha256-...` 为准。
+## Nix vendorHash（M14 已固定）
+- 已固定：`vendorHash = "sha256-MM1ODEBButuG1Yalmyxv1mkJmc4Va4tclJpq1q0IAcc="`；flake.lock 已锁定 `nixpkgs-unstable`；已在私有 worker 上验证 `nix build .#routerd` 成功。
+- 如后续依赖变更需重算 vendor：请在有 Nix 的主机执行 `./scripts/compute-vendor-hash.sh --apply` 并提交；随后 `nix build .#routerd` 应继续成功。
 

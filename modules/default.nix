@@ -7,8 +7,9 @@ let
       pname = "routerd";
       version = "0.1.0";
       src = ../.;
-      subPackages = [ "backend/cmd/routerd" ];
-      vendorHash = lib.fakeSha256;
+      modRoot = "./backend";
+      subPackages = [ "cmd/routerd" ];
+      vendorHash = "sha256-MM1ODEBButuG1Yalmyxv1mkJmc4Va4tclJpq1q0IAcc=";
     };
 in
 {

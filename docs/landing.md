@@ -4,20 +4,16 @@
 
 本页不包含任何私密信息（WAN 账号、密码、密钥等），仅给出最小接线示例。请根据你的实际网络环境（WAN/LAN 接口名、LAN 网段）替换占位符。
 
-## 0) 先固定 vendorHash（构建前置）
+## 0) 构建前置（已固定 vendorHash）
 
-推荐在有 nix 的环境执行（本 flake 已指向具备 Go ≥1.26 的 nixpkgs 通道；可选地先固定锁文件）：
+- 已固定：`vendorHash = "sha256-MM1ODEBButuG1Yalmyxv1mkJmc4Va4tclJpq1q0IAcc="`，且 flake.lock 已锁定到 `nixpkgs-unstable`。
+- 私有 worker 已验证：`nix build .#routerd` 成功。
 
 ```bash
-# 可选但推荐：固定到具体提交
-nix flake update
-# 写入真实 vendorHash
-./scripts/compute-vendor-hash.sh --apply
-# 验证构建
 nix build .#routerd
 ```
 
-脚本会自动更新 `flake.nix` 的 `vendorHash`。CI 环境暂无 nix-daemon，不能替你计算该值。
+如后续依赖更新需重算 vendor：在 Nix 主机上执行 `./scripts/compute-vendor-hash.sh --apply` 后再运行 `nix build .#routerd`。
 
 ## 1) 启用后端（仅生成，默认不提权）
 

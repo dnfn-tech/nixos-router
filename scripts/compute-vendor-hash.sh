@@ -30,7 +30,7 @@ if [[ $RC -eq 0 ]]; then
   exit 0
 fi
 
-HASH="$(printf '%s\n' "$OUT" | sed -nE 's/.*got: *((sha256|sha-256)[-a-zA-Z0-9+/=]+).*/\\1/p' | tail -n1)"
+HASH="$(printf '%s\n' "$OUT" | sed -nE 's/.*got: *((sha256|sha-256)[-a-zA-Z0-9+/=]+).*/\1/p' | tail -n1)"
 if [[ -z "$HASH" ]]; then
   echo "Could not detect vendorHash from nix output."
   echo "Full error output follows:"
