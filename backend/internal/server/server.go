@@ -45,6 +45,7 @@ type Server struct {
 	loginFails map[string][]time.Time
 	applyReload bool
 	applyMu     sync.Mutex
+	runner      CommandRunner
 }
 
 type Options struct {
@@ -58,6 +59,17 @@ type Options struct {
 	WebDir     string
 	ApplyReload bool
 }
+
+// CommandRunner abstracts command lookups and execution to allow tests to inject a mock
+type CommandRunner interface {
+	LookPath(name string) error
+	Run(name string, args ...string) error
+}
+
+type defaultRunner struct{}
+
+func (defaultRunner) LookPath(name string) error { _, err := exec.LookPath(name); return err }
+func (defaultRunner) Run(name string, args ...string) error { return execRun(name, args...) }
 
 func New(opts Options) *Server {
 	s := &Server{
@@ -73,6 +85,7 @@ func New(opts Options) *Server {
 		requireAuth: !opts.DevMode,
 		loginFails:  make(map[string][]time.Time),
 		applyReload: opts.ApplyReload,
+		runner:      defaultRunner{},
 	}
 	if s.devMode {
 		// allow all for local-dev unless overridden
@@ -1115,7 +1128,11 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	}
 	// create running job
 	jid := newSessionID()
-	if err := s.db.CreateJob(jid, "apply", `{"mode":"generate-only"}`); err != nil {
+	jobMode := "generate-only"
+	if s.applyReload {
+		jobMode = "generate+reload"
+	}
+	if err := s.db.CreateJob(jid, "apply", fmt.Sprintf(`{"mode":"%s"}`, jobMode)); err != nil {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
@@ -1134,7 +1151,10 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	}
 	// (Optional) reload stubs
 	if s.applyReload {
-		okReload, msg := s.attemptReload()
+		// core networking units
+		okReload, msg := s.reloadCoreUnits()
+		// plugin orchestration - non-fatal notes
+		notes := s.orchestratePlugins(cfg)
 		if !okReload {
 			_ = s.db.UpdateJobStatus(jid, "failed", msg)
 			s.db.AddAudit(user, "apply", "reload failed: "+msg)
@@ -1143,6 +1163,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 				"appliedRuntime": false,
 				"mode":           "generate+reload",
 				"error":          msg,
+				"notes":          notes,
 			})
 			return
 		}
@@ -1152,6 +1173,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 			"jobId":          jid,
 			"appliedRuntime": true,
 			"mode":           "generate+reload",
+			"notes":          notes,
 		})
 		return
 	}
@@ -1267,12 +1289,20 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 	ddns += fmt.Sprintf("# provider=%s enabled=%v\n", cfg.DDNS.Provider, cfg.DDNS.Enable)
 	_ = os.WriteFile(filepath.Join(dir, "ddns.env.fragment"), []byte(ddns), 0o644)
 	// QoS notes
-	qos := "# QoS generate-only\n"
+	qos := "# QoS generate-only (notes)\n"
 	qos += fmt.Sprintf("# upMbps=%d downMbps=%d\n", cfg.QoS.UpMbps, cfg.QoS.DownMbps)
+	// Safe, non-executing examples (not applied): fq_codel skeletons
+	qos += "# example (egress): tc qdisc replace dev <wan-if> root fq_codel\n"
+	qos += "# example (ingress): tc qdisc replace dev <lan-bridge> handle ffff: ingress\n"
 	_ = os.WriteFile(filepath.Join(dir, "qos.conf.fragment"), []byte(qos), 0o644)
 	// Parental notes
-	par := "# Parental generate-only\n"
+	par := "# Parental generate-only (notes)\n"
 	par += fmt.Sprintf("# rules=%d\n", len(cfg.Parental.Rules))
+	// Safe nftables skeleton for MAC-based blocking set (not active)
+	par += "\n# nftables skeleton:\n"
+	par += "# table inet routerd_parental { set blocked_macs { type ether_addr; flags interval; }\n"
+	par += "#   chain input { type filter hook input priority 1; policy accept; }\n"
+	par += "# }\n"
 	_ = os.WriteFile(filepath.Join(dir, "parental.conf.fragment"), []byte(par), 0o644)
 	// Plugins notes (enabled/disabled)
 	for _, pid := range []string{"adblock", "traffic", "mihomo", "vlan", "tailscale", "zerotier"} {
@@ -1296,6 +1326,7 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 		}
 		var lines []string
 		lines = append(lines, "# adblock fragment (generate-only)")
+		lines = append(lines, "# units: dnsmasq.service (reload: try-reload-or-restart)")
 		if lists, ok := pc.Config["lists"].([]interface{}); ok {
 			for _, v := range lists {
 				if s, ok := v.(string); ok {
@@ -1323,6 +1354,7 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 		}
 		var lines []string
 		lines = append(lines, "# traffic retention config (generate-only)")
+		lines = append(lines, "# units: (none)  // collector TBD")
 		if v, ok := pc.Config["retentionDays"]; ok {
 			lines = append(lines, fmt.Sprintf("retentionDays=%v", v))
 		}
@@ -1340,6 +1372,7 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 		// Minimal YAML skeleton from config
 		var b strings.Builder
 		b.WriteString("# mihomo.yaml (generate-only)\n")
+		b.WriteString("# units: mihomo.service (reload: try-reload-or-restart)\n")
 		if profile, ok := pc.Config["profile"].(string); ok && profile != "" {
 			fmt.Fprintf(&b, "profile: %q\n", profile)
 		}
@@ -1369,6 +1402,7 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 		}
 		var lines []string
 		lines = append(lines, "# vlan netdev/network fragment (generate-only)")
+		lines = append(lines, "# units: (notes only, apply with systemd-networkd if present)")
 		if vlans, ok := pc.Config["vlans"].([]interface{}); ok {
 			for _, v := range vlans {
 				if m, ok := v.(map[string]interface{}); ok {
@@ -1396,6 +1430,11 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 		loginServer, _ := pc.Config["loginServer"].(string)
 		authKey, _ := pc.Config["authKey"].(string)
 		lines = append(lines, "controlPlane="+cp)
+		// Document units for orchestration
+		lines = append(lines, "# units: tailscaled.service (reload: try-reload-or-restart)")
+		if strings.EqualFold(cp, "headscale") {
+			lines = append(lines, "# extra-units: headscale.service (when self-hosted controller is on this host)")
+		}
 		if loginServer != "" {
 			lines = append(lines, "loginServer="+loginServer)
 		}
@@ -1415,6 +1454,7 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 		}
 		var lines []string
 		lines = append(lines, "# zerotier config (generate-only)")
+		lines = append(lines, "# units: zerotier-one.service (reload: try-reload-or-restart)")
 		cp, _ := pc.Config["controlPlane"].(string)
 		ctrl, _ := pc.Config["controllerUrl"].(string)
 		api, _ := pc.Config["apiToken"].(string)
@@ -1644,14 +1684,14 @@ func execRun(name string, args ...string) error {
 
 func (s *Server) attemptReload() (bool, string) {
 	// Best-effort reload using systemctl when available
-	if _, err := exec.LookPath("systemctl"); err != nil {
+	if err := s.runner.LookPath("systemctl"); err != nil {
 		return false, "systemctl not found"
 	}
 	units := []string{"dnsmasq.service", "nftables.service", "hostapd.service"}
 	var errs []string
 	for _, u := range units {
 		// try-reload-or-restart is safe; -q for quiet
-		if err := execRun("systemctl", "-q", "try-reload-or-restart", u); err != nil {
+		if err := s.runner.Run("systemctl", "-q", "try-reload-or-restart", u); err != nil {
 			// accumulate but continue; some units may be absent
 			errs = append(errs, fmt.Sprintf("%s: %v", u, err))
 		}
@@ -1664,6 +1704,77 @@ func (s *Server) attemptReload() (bool, string) {
 		return false, "partial reload: " + strings.Join(errs, "; ")
 	}
 	return true, ""
+}
+
+// reloadCoreUnits mirrors attemptReload but is explicit for core daemons
+func (s *Server) reloadCoreUnits() (bool, string) {
+	return s.attemptReload()
+}
+
+// orchestratePlugins performs best-effort unit orchestration per plugin.
+// It NEVER fails the apply; instead it returns human-readable notes.
+func (s *Server) orchestratePlugins(cfg config.Config) []string {
+	notes := []string{}
+	// If systemctl is missing, skip silently with a note.
+	if err := s.runner.LookPath("systemctl"); err != nil {
+		return append(notes, "systemctl not found, skipped plugin orchestration")
+	}
+	type plug struct {
+		name  string
+		units []string
+		enabled bool
+		extraHeadscale bool
+	}
+	var planned []plug
+	// mihomo
+	if pc, ok := cfg.Plugins["mihomo"]; ok {
+		planned = append(planned, plug{name: "mihomo", enabled: pc.Enable, units: []string{"mihomo.service"}})
+	}
+	// tailscale
+	if pc, ok := cfg.Plugins["tailscale"]; ok {
+		cp, _ := pc.Config["controlPlane"].(string)
+		p := plug{name: "tailscale", enabled: pc.Enable, units: []string{"tailscaled.service"}}
+		if strings.EqualFold(cp, "headscale") {
+			p.extraHeadscale = true
+			p.units = append(p.units, "headscale.service")
+		}
+		planned = append(planned, p)
+	}
+	// zerotier
+	if pc, ok := cfg.Plugins["zerotier"]; ok {
+		planned = append(planned, plug{name: "zerotier", enabled: pc.Enable, units: []string{"zerotier-one.service"}})
+	}
+	// vlan: notes-only, no units
+	if pc, ok := cfg.Plugins["vlan"]; ok {
+		if pc.Enable {
+			notes = append(notes, "vlan: notes-only; manage via systemd-networkd if configured")
+		} else {
+			notes = append(notes, "vlan: disabled; no units to stop")
+		}
+	}
+	for _, p := range planned {
+		if len(p.units) == 0 {
+			continue
+		}
+		if p.enabled {
+			for _, u := range p.units {
+				if err := s.runner.Run("systemctl", "-q", "try-reload-or-restart", u); err != nil {
+					notes = append(notes, fmt.Sprintf("%s: unit %s missing or not reloadable (%v)", p.name, u, err))
+				} else {
+					notes = append(notes, fmt.Sprintf("%s: reloaded %s", p.name, u))
+				}
+			}
+		} else {
+			for _, u := range p.units {
+				if err := s.runner.Run("systemctl", "-q", "try-stop", u); err != nil {
+					notes = append(notes, fmt.Sprintf("%s: unit %s not running or absent (%v)", p.name, u, err))
+				} else {
+					notes = append(notes, fmt.Sprintf("%s: stopped %s", p.name, u))
+				}
+			}
+		}
+	}
+	return notes
 }
 func (s *Server) clientKey(r *http.Request) string {
 	host, _, _ := strings.Cut(r.RemoteAddr, ":")
