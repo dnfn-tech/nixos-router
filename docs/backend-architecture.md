@@ -275,7 +275,8 @@ type CoreRegistry interface {
 
 ### 模块化映射（内置一方）
 - 将当前功能以模块形态实现，即使在 v1 作为“内置”：
-  - `wan`、`lan`、`wifi`、`firewall`、`nat`/`upnp`、`qos`、`parental`、`ddns`、`ipv6`
+  - 基础：`wan`、`lan`、`wifi`、`firewall`、`nat`/`upnp`、`ddns`、`ipv6`、`ssh`、`system`
+  - 可选：`qos`、`parental`、`adblock`（广告过滤，基于 dnsmasq 列表）、`traffic`（流量统计，vnstat 或 nft/conntrack 聚合）
 - 好处
   - 职责清晰、边界明确；后续替换/增强任一模块不影响核心与其他模块
   - 第三方仅需遵守合同与能力声明，即可新增业务能力（例如广告过滤、VPN、报表等）
@@ -291,4 +292,12 @@ type CoreRegistry interface {
   - 不再执行其 `ApplyHook`，不生成对应运行时配置
   - 核心在 `preReload`/`postReload` 阶段根据需要撤销/下线相关服务与规则（例如移除对应 nftables chain、停止相关 unit）
   - 审计记录“禁用插件导致的配置撤销”，便于追溯
+
+### 可选模块的 Apply 要点（摘要）
+- adblock
+  - 写入 `dnsmasq.d/adblock.conf` 或等价生成文件（如 `address=/domain/0.0.0.0`），并在状态目录缓存下载的列表；执行 `dnsmasq` reload
+  - 禁用时移除/停用相关片段并 reload
+- traffic
+  - 选择 `vnstat` 作为首选采集器（或在 `collectors` 中选择 `nft/conntrack` 聚合），由模块管理其 unit/定时器；读取统计供 UI 展示
+  - 禁用时停止采集器服务，保留历史数据由保留策略决定
 

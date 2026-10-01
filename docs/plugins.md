@@ -38,3 +38,24 @@
 - Shell/导航不硬编码完整功能清单，而是根据返回结果动态绘制
 - v1 冷加载：启用/禁用后可能需要 API 进程重启；在 apply 作业完成后刷新前端即可生效
 
+## 可选内置模块示例
+
+### AdBlock（广告过滤）
+- 目标：基于 DNS 层的拦截（dnsmasq），支持引入常见 Blocklist；后续可选 AdGuard Home 方案
+- 配置：`plugins.adblock`（例如）
+  - `enabled`：是否启用
+  - `lists[]`：订阅 URL 或内置集合名（后端解析为 dnsmasq 可读格式）
+  - `mode`：`hosts` / `address` / `custom`（生成 `address=/domain/0.0.0.0` 等）
+  - `updateInterval`：列表刷新周期（可选）
+- UI：侧栏“网络服务”分组新增“广告过滤”，页面展示订阅、启用状态与（later）统计
+- Apply：下载/刷新列表至状态目录（不进入 `config.json`），生成 `dnsmasq.d/adblock.conf` 或等价片段；`dnsmasq` reload
+
+### Traffic（流量统计）
+- 目标：接口/客户端的流量统计与可视化（vnstat，或基于 nft/conntrack 聚合）
+- 配置：`plugins.traffic`（例如）
+  - `enabled`：是否启用
+  - `retentionDays`：保留天数（或数据源自身保留策略）
+  - `collectors[]`：`vnstat` / `nft` / `conntrack`（可选其一或组合，v1 选择保守方案）
+- UI：侧栏“网络服务”分组新增“流量统计”，页面展示开关、保留期与图表（后端提供只读数据）
+- Apply：启停采集器相关服务/定时任务；读路径为只读 API（查询统计），写路径主要用于 `enabled` 切换
+

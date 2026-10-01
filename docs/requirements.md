@@ -29,7 +29,7 @@
 
 ## 信息架构（侧栏）
 - 基础：概览、上网（WAN）、局域网（LAN）、WiFi、设备
-- 网络服务：DNS、防火墙、QoS、家长控制、动态 DNS、IPv6
+- 网络服务：DNS、防火墙、QoS、家长控制、动态 DNS、IPv6、广告过滤（AdBlock，可选）、流量统计（Traffic，可选）
 - 系统：远程管理（SSH）、系统、插件（模块管理）
 
 说明：概览为状态卡片与“扁平网口视图”（WAN/LAN1… 并列，无拓扑；不展示无线拓扑）。
@@ -52,6 +52,8 @@
 - SSH：启用、密码/root 登录开关、wheel 免密 sudo
 - 系统：修改密码、备份/恢复（`config.json` 或完整包 `config.json+state.db`）、审计、重启
 - DHCP/DNS 后端：以 dnsmasq 为主（提供 DHCP 池、静态绑定、内网域名与上游转发）；不引入 Kea 作为 v1 路径
+- 广告过滤（可选 `plugins.adblock`）：基于 dnsmasq 的 blocklist（`hosts`/`address=/` 生成）；后续可选 AdGuard Home；支持订阅、刷新周期、（later）统计
+- 流量统计（可选 `plugins.traffic`）：接口/客户端流量展示；首选 vnstat（或 nft/conntrack 聚合）；只读统计 API 与启用/保留期配置
 
 ## 保存/应用 UX 状态机
 - 状态
@@ -99,7 +101,7 @@
 - 广告过滤与家长内容分级
  
 ## 验收（插件页面控制）
-- 关闭可选插件（如 QoS/DDNS/IPv6）后，其侧栏入口与页面不可见；相关 API 返回 404/disabled
+- 关闭可选插件（如 QoS/DDNS/IPv6/AdBlock/Traffic）后，其侧栏入口与页面不可见；相关 API 返回 404/disabled
 - 重新启用后，入口与页面恢复；核心页面（overview/wan/lan/wifi/clients/dns/firewall/ssh/system/plugins-mgmt）始终存在且不可通过 WebUI 禁用
 
 ## 参考
