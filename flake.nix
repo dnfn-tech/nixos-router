@@ -13,6 +13,8 @@
           pname = "routerd";
           version = "0.1.0";
           src = ./.;
+          # 指定 Go 模块根，便于 vendorHash 计算与后续 vendor 固定
+          modRoot = "./backend";
           subPackages = [ "backend/cmd/routerd" ];
           # TODO(M10): 首次可在有 nix 的环境执行：
           #   ./scripts/compute-vendor-hash.sh --apply
