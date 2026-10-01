@@ -52,7 +52,7 @@ WebUI 会从以下位置确定后端 API 基址（优先级从高到低）：
 - 系统（#/system）：编辑 `config.system`（hostname、timezone），展示 `health/status` 摘要
 - 系统页附带“生成配置（不应用运行态）”：点击调用 `POST /api/v1/apply`，展示返回的 `jobId/mode/appliedRuntime`，并查询 `GET /api/v1/jobs/{id}` 显示状态/错误。说明：当前仅生成到服务端 stateDir，不会重载网络服务
 - 系统页（M7 扩展）：修改密码（尝试 `POST /api/v1/session/password` 或 `PUT /api/v1/account/password`，若未提供则提示）、备份下载（`GET /api/v1/backup` 或 `/api/v1/system/backup`）、恢复上传（`POST /api/v1/backup/restore` 或 `/api/v1/system/restore`）、审计日志（`GET /api/v1/audit?limit=50`）、重启（`POST /api/v1/system/reboot`）；接口缺失时显示“接口尚未提供”
-- 客户端（#/clients）：若后端提供 `GET /api/v1/clients` 则展示；否则明确标注“接口尚未提供”
+- 客户端（#/clients）：展示 `GET /api/v1/clients` 返回；若提供 `PATCH /api/v1/clients/{mac}`，支持行内重命名与阻止切换；404 时自动降级为只读；否则明确标注“接口尚未提供”
 - 插件管理（#/plugins）：从 `GET /api/v1/plugins` 列表加载，切换启用状态优先调用 `PUT /api/v1/plugins/{id}`（若 404 再回退到 `PUT /api/v1/config`）；保存后刷新导航。插件详情页（如 `#/tailscale`/`#/zerotier` 等）在插件启用且后端导航提供时可直接进入；若未提供配置则以“未提供”提示并禁用保存
 - 登录页：用户名/密码，错误提示，提交调用 `POST /api/v1/session`
 - 401 统一处理：自动返回登录页
