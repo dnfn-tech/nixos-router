@@ -30,6 +30,7 @@ func main() {
 	seed := flag.Bool("seed-default-config", false, "If set and config file missing, write default config.json (dev convenience)")
 	webDir := flag.String("web-dir", "", "Serve WebUI from local directory instead of embedded assets (dev only)")
 	applyReload := flag.Bool("apply-reload", envBool("NIXOS_ROUTER_APPLY_RELOAD", false), "Allow runtime reload during apply (currently stub)")
+	applyTC := flag.Bool("apply-traffic-control", envBool("NIXOS_ROUTER_APPLY_TRAFFIC_CONTROL", false), "Allow applying generated QoS (tc) script during apply; requires privileges")
 	allowReboot := flag.Bool("allow-reboot", envBool("NIXOS_ROUTER_ALLOW_REBOOT", false), "Allow system reboot endpoint to execute reboot")
 	flag.Parse()
 
@@ -68,6 +69,7 @@ func main() {
 		WebFS:      webfs.Embedded,
 		WebDir:     *webDir,
 		ApplyReload: *applyReload,
+		ApplyTrafficControl: *applyTC,
 	})
 
 	srv := &http.Server{
@@ -77,7 +79,7 @@ func main() {
 	}
 
 	_ = allowReboot // flag currently only gates env; printed hint below
-	log.Printf("routerd %s listening on %s (config=%s, stateDir=%s, dev=%v, webDir=%s, allowReboot=%v)", version, *addr, cfgPath, opts.StateDir, *dev, *webDir, *allowReboot)
+	log.Printf("routerd %s listening on %s (config=%s, stateDir=%s, dev=%v, webDir=%s, allowReboot=%v, applyReload=%v, applyTrafficControl=%v)", version, *addr, cfgPath, opts.StateDir, *dev, *webDir, *allowReboot, *applyReload, *applyTC)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("listen: %v", err)
 	}
