@@ -122,4 +122,6 @@ services.nixosRouter = {
 
 ## 许可
 
-当前仓库尚未附带 LICENSE 文件；许可证将于正式发布前确定（计划采用主流开源许可）。在 LICENSE 合并前，贡献行为默认遵循将来兼容的宽松许可预期。
+本项目采用 Apache License 2.0（Apache-2.0）开源许可，详见 `LICENSE`。
+
+Copyright 2026 dnfn-tech
