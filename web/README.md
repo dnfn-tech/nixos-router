@@ -38,24 +38,32 @@ WebUI 会从以下位置确定后端 API 基址（优先级从高到低）：
 
 所有 API 请求均携带 `credentials: 'include'`，以便使用后端设置的 Cookie。未登录访问受保护接口将返回 401，前端会自动跳转到登录页；登录成功后回到主界面；点击“退出”将清理会话并返回登录页。
 
-### 功能概览（只读）
+### 功能概览（只读 + 可编辑）
 
 - 左侧边栏导航 + 右侧主内容区
 - 导航优先从后端获取；若失败则使用内置核心导航（总览、外网、内网、无线、客户端、DNS、防火墙、SSH、系统、插件）
 - 概览：读取 `/api/v1/status`、`/api/v1/config`、`/api/v1/health`，展示主机名、运行时长、WAN/LAN 摘要、接口列表（按 role）、WiFi 能力（`/api/v1/capabilities/wifi`）；缺字段时优雅降级并清晰提示
-- 外网（#/wan）：展示 `config.wan` 与状态中 WAN 接口（模式 dhcp/static/pppoe、接口名、静态地址/GW/DNS 等）；PPPoE 密码以 `••••` 显示
-- 内网（#/lan）：展示 `config.lan`（桥、IPv4 CIDR、DHCP 范围、租约时长，端口/静态租约未提供则标注“未提供”）
-- 无线（#/wifi）：展示 `config.wifi`（启用/桥接、AP 列表）+ `status.wifi` + `capabilities/wifi`
-- DNS（#/dns）：展示 `config.dns`（enableDnsmasq、upstreams、domain）
-- 防火墙（#/firewall）：展示 `config.firewall`（enable、natEnabled、description），端口转发等后续扩展
-- SSH（#/ssh）：展示 `config.ssh`（enable、port、passwordAuth、authorizedKeys）与 `status.ssh`
-- 系统（#/system）：展示 `config.system` 与 `health/status` 摘要（hostname、timezone、uptime、version 等）
+- 外网（#/wan）：编辑 `config.wan`（mode dhcp/static/pppoe、接口名、静态地址/GW/DNS、PPPoE 账号/密码），显示状态摘要。PPPoE/WiFi/DDNS 等密钥型字段未更改时保留为 `****` 或留空，后端将保留原值
+- 内网（#/lan）：编辑 `config.lan`（桥、IPv4 CIDR、DHCP 范围/租约、ports[]、staticLeases[]），显示状态摘要
+- 无线（#/wifi）：编辑 `config.wifi`（启用/桥接、aps[ssid/band/channel/psk/guest/isolate]），capabilities.maxAP 限制 AP 数；显示状态摘要
+- DNS（#/dns）：编辑 `config.dns`（enableDnsmasq、upstreams[]、domain）
+- 防火墙（#/firewall）：编辑 `config.firewall`（enable、natEnabled、portForwards[]、upnp），显示说明
+- SSH（#/ssh）：编辑 `config.ssh`（enable、port、passwordAuth、authorizedKeys[]）并显示 `status.ssh`
+- 系统（#/system）：编辑 `config.system`（hostname、timezone），展示 `health/status` 摘要
 - 系统页附带“生成配置（不应用运行态）”：点击调用 `POST /api/v1/apply`，展示返回的 `jobId/mode/appliedRuntime`，并查询 `GET /api/v1/jobs/{id}` 显示状态/错误。说明：当前仅生成到服务端 stateDir，不会重载网络服务
 - 客户端（#/clients）：若后端提供 `GET /api/v1/clients` 则展示；否则明确标注“接口尚未提供”
 - 登录页：用户名/密码，错误提示，提交调用 `POST /api/v1/session`
 - 401 统一处理：自动返回登录页
 - 侧栏“退出”：调用 `DELETE /api/v1/session`
 - 其他核心路由为占位页（只读里程碑，不包含写入与应用）
+
+### 编辑与保存
+
+- 所有编辑页面提供底部操作条（保存 / 保存并生成配置），显示“有未保存的更改”
+- 离开页面或刷新时，如有未保存更改会提示确认
+- 保存：向 `PUT /api/v1/config` 提交完整配置（将当前页面修改合并入最近一次载入的配置）；后端校验失败会在页面内提示
+- 保存并生成：保存后调用 `POST /api/v1/apply`，仅在服务端 stateDir 生成，不会重载运行态
+- 密钥/口令字段约定：若未改动，前端提交 `****` 或空串，后端按“保留原值”处理
 
 ### 约束
 
