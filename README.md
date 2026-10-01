@@ -14,4 +14,4 @@ inputs.nixos-router.url = "github:dnfn-tech/nixos-router";
 
 ## Development
 
-前端 WebUI 原型见 `web/` 目录（在 `web/` 运行 `python -m http.server`；API 基址可用 `?api=` 或 `window.NIXOS_ROUTER_API` 指定）。
+前端 WebUI 原型见 `web/` 目录（在 `web/` 运行 `python -m http.server`；默认同源访问 API，拆分端口时用 `?api=` 或 `window.NIXOS_ROUTER_API` 覆盖）。

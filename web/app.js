@@ -12,7 +12,9 @@
   function getApiBase() {
     const fromWin = typeof window.NIXOS_ROUTER_API === "string" && window.NIXOS_ROUTER_API.trim();
     const fromQuery = getQueryParam("api");
-    const base = (fromQuery || fromWin || "http://127.0.0.1:8080").replace(/\/+$/, "");
+    // 默认使用页面同源（用户以局域网 IP 打开时，直接同源访问后端）
+    const origin = (typeof window.location?.origin === "string" && window.location.origin) || "";
+    const base = (fromQuery || fromWin || origin).replace(/\/+$/, "");
     return base;
   }
 

@@ -17,9 +17,9 @@ python -m http.server
 
 WebUI 会从以下位置确定后端 API 基址（优先级从高到低）：
 
-1. URL 查询参数：`?api=http://127.0.0.1:8080`
-2. 全局变量：`window.NIXOS_ROUTER_API = "http://127.0.0.1:8080"`
-3. 默认值：`http://127.0.0.1:8080`
+1. URL 查询参数：`?api=http://host:port`
+2. 全局变量：`window.NIXOS_ROUTER_API = "http://host:port"`
+3. 默认值：同源 `window.location.origin`（会去掉末尾 `/`）
 
 后端暂定的只读接口（由并行的后端 PR 提供，未就绪时会回退到内置导航并显示“后端未连接”横幅）：
 
@@ -27,6 +27,11 @@ WebUI 会从以下位置确定后端 API 基址（优先级从高到低）：
 - `GET /api/v1/plugins`：插件列表（作为次要来源）
 - `GET /api/v1/status`：系统状态（概览页展示）
 - `GET /api/v1/config`：当前配置（概览页展示）
+
+当你用同一主机（同域名/端口）托管 WebUI 与后端时，无需任何配置，前端会以“同源”访问 `/api/v1/*`。若本地开发时将静态文件与后端拆分到不同端口（例如 `python -m http.server` 在 8000、后端在 8080），请用以下任一方式覆盖：
+
+- 在地址栏追加参数：`?api=http://127.0.0.1:8080`
+- 或在页面加载前设置：`window.NIXOS_ROUTER_API = "http://127.0.0.1:8080"`
 
 ### 功能概览
 
