@@ -113,4 +113,5 @@
 - 交互原型：`docs/prototypes/index.html`（可选随仓库提供）
 - 存储选型：`docs/storage-choice.md`（开放 PR 已提供）
 - 目标主机说明：`docs/target-host-notes.md`（首批对象机型迁移方向）
+ - 测试计划：`docs/test-plan.md`
 
