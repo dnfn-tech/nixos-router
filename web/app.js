@@ -21,6 +21,8 @@
   const apiBase = getApiBase();
   const state = {
     backendConnected: false,
+    loggedIn: false,
+    currentUser: null,
     navItems: [],
     coreNav: [
       { id: "overview", label: "总览", path: "#/overview" },
@@ -44,16 +46,69 @@
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
 
+  function onUnauthorized() {
+    state.loggedIn = false;
+    state.currentUser = null;
+    showLoginView();
+  }
+
+  function showLoginView() {
+    const layout = q(".layout");
+    const login = q("#login-view");
+    const banner = q("#status-banner");
+    layout?.classList.add("hidden");
+    login?.classList.remove("hidden");
+    banner?.classList.add("hidden");
+    const apiEl = q("#login-api-base");
+    if (apiEl) apiEl.textContent = apiBase;
+    updateBannerApiBase();
+  }
+  function hideLoginView() {
+    const layout = q(".layout");
+    const login = q("#login-view");
+    layout?.classList.remove("hidden");
+    login?.classList.add("hidden");
+  }
+
+  function setUserDisplay() {
+    const el = q("#user-display");
+    if (!el) return;
+    const name = state?.currentUser?.username || state?.currentUser?.name || state?.currentUser?.user || "";
+    el.textContent = name ? `已登录：${name}` : "";
+  }
+
   async function fetchJson(path, init = {}) {
     const url = `${apiBase}${path}`;
+    const {
+      method = "GET",
+      body,
+      headers = {},
+      ...rest
+    } = init || {};
+    const finalHeaders = {
+      "Accept": "application/json",
+      ...headers,
+    };
+    let finalBody = body;
+    if (body && typeof body === "object" && !(body instanceof FormData)) {
+      finalHeaders["Content-Type"] = "application/json";
+      finalBody = JSON.stringify(body);
+    }
     const resp = await withTimeout(fetch(url, {
-      method: "GET",
-      headers: {
-        "Accept": "application/json",
-        ...init.headers,
-      },
-      ...init,
+      method,
+      credentials: "include",
+      headers: finalHeaders,
+      body: finalBody,
+      ...rest,
     }));
+    if (resp.status === 401) {
+      onUnauthorized();
+      const text401 = await resp.text().catch(() => "");
+      const err401 = new Error("unauthorized");
+      err401.status = 401;
+      err401.responseText = text401;
+      throw err401;
+    }
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       const err = new Error(`HTTP ${resp.status} ${resp.statusText} for ${path}`);
@@ -83,20 +138,38 @@
     if (hint) {
       hint.innerHTML = `API: <code>${apiBase}</code>`;
     }
+    const loginApi = q("#login-api-base");
+    if (loginApi) loginApi.textContent = apiBase;
+  }
+
+  function toHashPath(p, fallbackId) {
+    if (!p) return `#/${fallbackId ?? ""}`;
+    if (p.startsWith("#")) return p;
+    if (p === "/") return "#/overview";
+    if (p.startsWith("/")) return `#${p}`;
+    return `#/${p}`;
   }
 
   function normalizeNav(items) {
-    // Try to support various likely shapes
-    if (!Array.isArray(items)) return [];
-    return items
-      .map((it) => {
-        if (!it) return null;
-        const id = it.id || it.key || it.name || it.slug || it.route || it.path || "";
-        const label = it.label || it.name || it.title || id || "项目";
-        const path = it.path || it.route || (`#/plugins/${id}`);
-        return id ? { id: String(id), label: String(label), path: String(path) } : null;
-      })
-      .filter(Boolean);
+    // 平铺化导航，兼容 {nav:[{id,title,path,children:[]},...]} 或直接数组
+    const src = Array.isArray(items) ? items : (items?.nav || items?.items || []);
+    if (!Array.isArray(src)) return [];
+    const out = [];
+    const walk = (arr) => {
+      for (const it of arr) {
+        if (!it) continue;
+        if (Array.isArray(it.children) && it.children.length) {
+          walk(it.children);
+          continue;
+        }
+        const id = it.id || it.key || it.name || (typeof it.path === "string" ? it.path.replace(/^\//, "") : "") || "";
+        const label = it.title || it.label || it.name || id || "项目";
+        const path = toHashPath(it.path, id);
+        if (id) out.push({ id: String(id), label: String(label), path: String(path) });
+      }
+    };
+    walk(src);
+    return out;
   }
 
   function renderNav(items) {
@@ -154,7 +227,7 @@
     try {
       // Try ui/nav first
       const uiNav = await fetchJson("/api/v1/ui/nav");
-      const normalized = normalizeNav(uiNav?.items || uiNav);
+      const normalized = normalizeNav(uiNav);
       if (normalized.length > 0) {
         state.navItems = mergeCoreAndExternal(state.coreNav, normalized);
         state.backendConnected = true;
@@ -164,13 +237,16 @@
       }
       // If empty, try plugins list
       const plugins = await fetchJson("/api/v1/plugins");
-      const pluginItems = normalizeNav(
-        (Array.isArray(plugins) ? plugins : plugins?.items || []).map((p) => ({
-          id: typeof p === "string" ? p : (p.id || p.name || p.key),
-          label: (typeof p === "string" ? p : (p.label || p.name || p.id)),
-          path: `#/plugins?name=${encodeURIComponent(typeof p === "string" ? p : (p.id || p.name || ""))}`,
-        }))
-      );
+      const list = Array.isArray(plugins) ? plugins : (plugins?.plugins || plugins?.items || []);
+      const pluginItems = (Array.isArray(list) ? list : []).map((p) => {
+        const name = (typeof p === "string") ? p : (p.name || p.id || p.key);
+        if (!name) return null;
+        return {
+          id: `plugin:${name}`,
+          label: `插件 ${name}`,
+          path: `#/plugins/${encodeURIComponent(name)}`,
+        };
+      }).filter(Boolean);
       state.navItems = mergeCoreAndExternal(state.coreNav, pluginItems);
       state.backendConnected = true;
       setBannerVisible(false);
@@ -246,13 +322,19 @@
 
     let statusData = null;
     let configData = null;
+    let healthData = null;
+    let wifiCaps = null;
     try {
-      const [statusRes, configRes] = await Promise.allSettled([
+      const [statusRes, configRes, healthRes, wifiCapsRes] = await Promise.allSettled([
         fetchJson("/api/v1/status"),
         fetchJson("/api/v1/config"),
+        fetchJson("/api/v1/health"),
+        fetchJson("/api/v1/capabilities/wifi"),
       ]);
       if (statusRes.status === "fulfilled") statusData = statusRes.value;
       if (configRes.status === "fulfilled") configData = configRes.value;
+      if (healthRes.status === "fulfilled") healthData = healthRes.value;
+      if (wifiCapsRes.status === "fulfilled") wifiCaps = wifiCapsRes.value;
       if (statusRes.status === "fulfilled" || configRes.status === "fulfilled") {
         state.backendConnected = true;
         setBannerVisible(false);
@@ -262,21 +344,54 @@
     }
 
     const summaryEntries = [];
-    const hostname = (statusData?.hostname || configData?.hostname || configData?.system?.hostname);
-    const uptime = (statusData?.uptime || statusData?.system?.uptime);
-    const wanIp = (statusData?.wan?.ip || statusData?.wan?.publicIP);
-    const lanCidr = (statusData?.lan?.cidr || statusData?.lan?.ip || configData?.lan?.cidr);
-    const clients = (statusData?.clients?.count || (Array.isArray(statusData?.clients) ? statusData.clients.length : undefined));
-    const wifiRadios = (statusData?.wifi?.radios || configData?.wifi?.radios);
+    const cfg = (configData && (configData.config || configData)) || null;
+    const hostname = (statusData?.system?.hostname || cfg?.system?.hostname);
+    const uptime = (healthData?.uptimeSecs != null ? `${healthData.uptimeSecs}s` : undefined);
+    const ifs = Array.isArray(statusData?.interfaces) ? statusData.interfaces : [];
+    const lan = ifs.find(i => i?.role === "lan");
+    const wan = ifs.find(i => i?.role === "wan");
+    const lanCidr = lan?.cidr || cfg?.lan?.ipv4Cidr;
+    const wanMode = wan?.mode || cfg?.wan?.mode;
+    const wifiAps = (statusData?.wifi?.aps ?? (Array.isArray(cfg?.wifi?.aps) ? cfg.wifi.aps.length : undefined));
 
     if (hostname) summaryEntries.push(["主机名", String(hostname)]);
     if (uptime != null) summaryEntries.push(["运行时间", String(uptime)]);
-    if (wanIp) summaryEntries.push(["外网 IP", String(wanIp)]);
+    if (typeof wanMode === "string") summaryEntries.push(["外网模式", String(wanMode)]);
     if (lanCidr) summaryEntries.push(["内网", String(lanCidr)]);
-    if (clients != null) summaryEntries.push(["在线客户端", String(clients)]);
-    if (wifiRadios != null) summaryEntries.push(["无线射频", Array.isArray(wifiRadios) ? String(wifiRadios.length) : String(wifiRadios)]);
+    if (wifiAps != null) summaryEntries.push(["AP 数量", String(wifiAps)]);
 
     grid.appendChild(renderKeyValueCard("系统概览", summaryEntries.length ? summaryEntries : [["状态", state.backendConnected ? "连接正常" : "未知"]]));
+
+    // 接口列表（按 role 简要展示）
+    if (ifs.length > 0) {
+      const ifaceCard = document.createElement("div");
+      ifaceCard.className = "card";
+      const items = ifs.map((it) => {
+        const lines = [
+          ["名称", it?.name ?? "-"],
+          ["角色", it?.role ?? "-"],
+          ["状态", (it?.up === true ? "已连接" : (it?.up === false ? "未连接" : "未知"))],
+        ];
+        if (it?.role === "wan" && it?.mode) lines.push(["模式", it.mode]);
+        if (it?.role === "lan" && it?.cidr) lines.push(["CIDR", it.cidr]);
+        const rows = lines.map(([k, v]) => html`<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`).join("");
+        return html`<div class="kv iface">${rows}</div>`;
+      }).join("<hr class=\"sep\" />");
+      ifaceCard.innerHTML = html`
+        <h3>接口</h3>
+        <div class="iface-list">${items}</div>
+      `;
+      grid.appendChild(ifaceCard);
+    }
+
+    // WiFi 能力摘要
+    if (wifiCaps) {
+      const capsEntries = [];
+      if (wifiCaps.maxAP != null) capsEntries.push(["最大 AP 数", String(wifiCaps.maxAP)]);
+      if (Array.isArray(wifiCaps.bands)) capsEntries.push(["支持频段", wifiCaps.bands.join(", ") || "-"]);
+      if (wifiCaps.driver) capsEntries.push(["驱动", String(wifiCaps.driver)]);
+      grid.appendChild(renderKeyValueCard("WiFi 能力", capsEntries.length ? capsEntries : [["信息", "未提供"]]));
+    }
 
     if (statusData) {
       grid.appendChild(renderJSONCard("状态 JSON", statusData));
@@ -290,6 +405,80 @@
     }
   }
 
+  async function renderWAN() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    let statusData = null;
+    let configData = null;
+    try {
+      const [s, c] = await Promise.allSettled([
+        fetchJson("/api/v1/status"),
+        fetchJson("/api/v1/config"),
+      ]);
+      if (s.status === "fulfilled") statusData = s.value;
+      if (c.status === "fulfilled") configData = c.value;
+    } catch (_) {}
+    const cfg = (configData && (configData.config || configData)) || null;
+    const wanIf = (Array.isArray(statusData?.interfaces) ? statusData.interfaces : []).find(i => i?.role === "wan") || {};
+    const wanCfg = cfg?.wan || {};
+    const mode = wanIf.mode || wanCfg.mode;
+    const iface = wanCfg.interface || wanIf.name;
+    const staticCfg = wanCfg.static || {};
+    const pppoe = wanCfg.pppoe || {};
+    const rows = [];
+    if (mode) rows.push(["模式", String(mode)]);
+    if (iface) rows.push(["接口", String(iface)]);
+    if (mode === "static" && (staticCfg.addressCidr || staticCfg.gateway || (Array.isArray(staticCfg.dns) && staticCfg.dns.length))) {
+      if (staticCfg.addressCidr) rows.push(["地址/CIDR", String(staticCfg.addressCidr)]);
+      if (staticCfg.gateway) rows.push(["网关", String(staticCfg.gateway)]);
+      if (Array.isArray(staticCfg.dns)) rows.push(["DNS", staticCfg.dns.join(", ") || "-"]);
+    }
+    if (mode === "pppoe" && (pppoe.username || pppoe.password)) {
+      if (pppoe.username) rows.push(["PPPoE 用户名", String(pppoe.username)]);
+      if (pppoe.password != null) rows.push(["PPPoE 密码", "••••"]);
+    }
+    if (wanIf.up != null) rows.push(["链路", wanIf.up ? "已连接" : "未连接"]);
+    grid.appendChild(renderKeyValueCard("外网（只读）", rows.length ? rows : [["信息", "未提供"]]));
+    // 原始 JSON 便于排错
+    if (configData) grid.appendChild(renderJSONCard("配置 JSON", configData));
+    if (statusData) grid.appendChild(renderJSONCard("状态 JSON", statusData));
+  }
+
+  async function renderLAN() {
+    const content = clearMain();
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    content.appendChild(grid);
+    let statusData = null;
+    let configData = null;
+    try {
+      const [s, c] = await Promise.allSettled([
+        fetchJson("/api/v1/status"),
+        fetchJson("/api/v1/config"),
+      ]);
+      if (s.status === "fulfilled") statusData = s.value;
+      if (c.status === "fulfilled") configData = c.value;
+    } catch (_) {}
+    const cfg = (configData && (configData.config || configData)) || null;
+    const lanIf = (Array.isArray(statusData?.interfaces) ? statusData.interfaces : []).find(i => i?.role === "lan") || {};
+    const lanCfg = cfg?.lan || {};
+    const dhcp = lanCfg.dhcp || {};
+    const rows = [];
+    if (lanCfg.bridgeName) rows.push(["桥（Bridge）", String(lanCfg.bridgeName)]);
+    if (lanCfg.ipv4Cidr) rows.push(["IPv4 CIDR", String(lanCfg.ipv4Cidr)]);
+    if (lanIf.up != null) rows.push(["链路", lanIf.up ? "已连接" : "未连接"]);
+    // 端口/静态租约未提供时优雅降级
+    rows.push(["端口", "未提供"]);
+    if (dhcp.enable != null) rows.push(["DHCP", dhcp.enable ? "启用" : "关闭"]);
+    if (dhcp.rangeStart || dhcp.rangeEnd) rows.push(["DHCP 范围", `${dhcp.rangeStart || "-"} - ${dhcp.rangeEnd || "-"}`]);
+    if (dhcp.leaseMins != null) rows.push(["租约（分钟）", String(dhcp.leaseMins)]);
+    rows.push(["静态租约", "未提供"]);
+    grid.appendChild(renderKeyValueCard("内网（只读）", rows.length ? rows : [["信息", "未提供"]]));
+    if (configData) grid.appendChild(renderJSONCard("配置 JSON", configData));
+    if (statusData) grid.appendChild(renderJSONCard("状态 JSON", statusData));
+  }
   function renderPlaceholder(id) {
     const content = clearMain();
     const wrap = document.createElement("div");
@@ -315,8 +504,8 @@
 
   const routes = {
     "overview": renderOverview,
-    "wan": () => renderPlaceholder("wan"),
-    "lan": () => renderPlaceholder("lan"),
+    "wan": () => renderWAN(),
+    "lan": () => renderLAN(),
     "wifi": () => renderPlaceholder("wifi"),
     "clients": () => renderPlaceholder("clients"),
     "dns": () => renderPlaceholder("dns"),
@@ -331,6 +520,10 @@
   }
 
   async function renderRoute() {
+    if (!state.loggedIn) {
+      // 登录视图下不渲染主壳内容
+      return;
+    }
     setActiveLink();
     const id = currentRoute();
     const fn = routes[id] || (() => renderPlaceholder(id));
@@ -351,19 +544,92 @@
       await loadNav();
       await renderRoute();
     });
+    const form = q("#login-form");
+    form?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const u = q("#login-username")?.value?.trim() || "";
+      const p = q("#login-password")?.value || "";
+      const errEl = q("#login-error");
+      errEl?.classList.add("hidden");
+      errEl.textContent = "";
+      const btn = q("#login-submit");
+      btn?.setAttribute("disabled", "true");
+      try {
+        await fetchJson("/api/v1/session", {
+          method: "POST",
+          body: { username: u, password: p },
+        });
+        // 登录成功后，重新检查会话并进入主壳
+        await checkSession();
+        if (state.loggedIn) {
+          hideLoginView();
+          await afterLoginEnter();
+        }
+      } catch (e) {
+        const msg = (e?.status === 401) ? "用户名或密码错误" : `登录失败：${e?.message || "未知错误"}`;
+        if (errEl) {
+          errEl.textContent = msg;
+          errEl.classList.remove("hidden");
+        } else {
+          alert(msg);
+        }
+      } finally {
+        btn?.removeAttribute("disabled");
+      }
+    });
+    const logout = q("#logout-btn");
+    logout?.addEventListener("click", async () => {
+      try {
+        await fetchJson("/api/v1/session", { method: "DELETE" });
+      } catch (_) {
+        // ignore
+      }
+      onUnauthorized();
+    });
     // Expose a tiny API for debugging
     window.app = {
       retryConnect: async () => { await loadNav(); await renderRoute(); },
       get apiBase() { return apiBase; },
       get state() { return state; },
+      async logout() { await fetchJson("/api/v1/session", { method: "DELETE" }).catch(() => {}); onUnauthorized(); },
     };
+  }
+
+  async function checkSession() {
+    try {
+      const s = await fetchJson("/api/v1/session");
+      state.loggedIn = true;
+      state.currentUser = s?.user || s || null;
+      hideLoginView();
+      setUserDisplay();
+      return true;
+    } catch (e) {
+      if (e?.status === 401) {
+        onUnauthorized();
+        return false;
+      }
+      // If endpoint not ready yet, treat as unauthorized to gate content until merged
+      onUnauthorized();
+      return false;
+    }
+  }
+
+  async function afterLoginEnter() {
+    setUserDisplay();
+    await loadNav();
+    if (!location.hash) location.hash = "#/overview";
+    await renderRoute();
   }
 
   async function boot() {
     initEvents();
-    await loadNav();
-    if (!location.hash) location.hash = "#/overview";
-    await renderRoute();
+    updateBannerApiBase();
+    const ok = await checkSession();
+    if (ok) {
+      await afterLoginEnter();
+    } else {
+      showLoginView();
+    }
   }
 
   // Start
