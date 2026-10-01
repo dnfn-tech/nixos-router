@@ -25,6 +25,9 @@ type Config struct {
 	Firewall FirewallConfig          `json:"firewall"`
 	SSH      SSHConfig               `json:"ssh"`
 	DDNS     DDNSConfig              `json:"ddns"`
+	QoS      QoSConfig               `json:"qos"`
+	Parental ParentalConfig          `json:"parental"`
+	IPv6     IPv6Config              `json:"ipv6"`
 	Plugins  map[string]PluginConfig `json:"plugins,omitempty"`
 }
 
@@ -160,6 +163,40 @@ type PluginConfig struct {
 	Config map[string]interface{} `json:"config,omitempty"`
 }
 
+// QoS: global bandwidth and per-device stubs
+type QoSConfig struct {
+	Enable       bool                 `json:"enable"`
+	UpMbps       int                  `json:"upMbps,omitempty"`
+	DownMbps     int                  `json:"downMbps,omitempty"`
+	DevicePolicy []QoSDevicePolicy    `json:"devicePolicy,omitempty"`
+}
+type QoSDevicePolicy struct {
+	MAC      string `json:"mac,omitempty"`
+	IP       string `json:"ip,omitempty"`
+	Priority string `json:"priority,omitempty"` // "low"|"normal"|"high"
+	LimitKbps int   `json:"limitKbps,omitempty"`
+}
+
+// Parental control: device/group schedule stubs
+type ParentalConfig struct {
+	Enable bool            `json:"enable"`
+	Rules  []ParentalRule  `json:"rules,omitempty"`
+}
+type ParentalRule struct {
+	TargetMACs []string `json:"targetMacs,omitempty"`
+	Group      string   `json:"group,omitempty"`
+	Schedule   string   `json:"schedule,omitempty"` // stub like "Mon-Fri 22:00-07:00"
+	Action     string   `json:"action"`             // "block"|"allow"
+}
+
+// IPv6: WAN mode and LAN PD/RA stubs
+type IPv6Config struct {
+	Enable bool   `json:"enable"`
+	WANMode string `json:"wanMode,omitempty"` // "dhcpv6"|"slaac"|"pppoe6"|"disabled"
+	LANPD   bool   `json:"lanPrefixDelegation,omitempty"`
+	LANRA   bool   `json:"lanRouterAdvertisement,omitempty"`
+}
+
 // DefaultConfig returns a minimal, safe default config for first-time setup.
 func DefaultConfig() Config {
 	return Config{
@@ -201,6 +238,21 @@ func DefaultConfig() Config {
 		},
 		DDNS: DDNSConfig{
 			Enable: false,
+		},
+		QoS: QoSConfig{
+			Enable:   false,
+			UpMbps:   0,
+			DownMbps: 0,
+		},
+		Parental: ParentalConfig{
+			Enable: false,
+			Rules:  []ParentalRule{},
+		},
+		IPv6: IPv6Config{
+			Enable: false,
+			WANMode: "disabled",
+			LANPD:  false,
+			LANRA:  false,
 		},
 		Plugins: map[string]PluginConfig{},
 	}
@@ -297,6 +349,29 @@ func (c *Config) Validate() error {
 	// SSH port sanity
 	if c.SSH.Port < 0 || c.SSH.Port > 65535 {
 		return errors.New("ssh.port must be 0-65535")
+	}
+	// QoS sanity
+	for _, dp := range c.QoS.DevicePolicy {
+		if dp.MAC == "" && dp.IP == "" {
+			return errors.New("qos.devicePolicy[] requires mac or ip")
+		}
+		if dp.MAC != "" {
+			if _, err := net.ParseMAC(dp.MAC); err != nil {
+				return fmt.Errorf("qos.devicePolicy mac invalid: %s", dp.MAC)
+			}
+		}
+		if dp.IP != "" && net.ParseIP(dp.IP) == nil {
+			return fmt.Errorf("qos.devicePolicy ip invalid: %s", dp.IP)
+		}
+		if dp.LimitKbps < 0 {
+			return errors.New("qos.devicePolicy.limitKbps must be >=0")
+		}
+	}
+	// IPv6 sanity
+	switch c.IPv6.WANMode {
+	case "dhcpv6", "slaac", "pppoe6", "disabled", "":
+	default:
+		return errors.New("ipv6.wanMode must be one of: dhcpv6, slaac, pppoe6, disabled")
 	}
 	// Firewall port forwards
 	for _, pf := range c.Firewall.PortForwards {

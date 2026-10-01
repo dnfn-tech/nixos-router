@@ -109,6 +109,35 @@ func (d *DB) AddAudit(actor, action, detail string) {
 		time.Now().Unix(), actor, action, detail)
 }
 
+type AuditEntry struct {
+	TS     time.Time
+	Actor  string
+	Action string
+	Detail string
+}
+
+func (d *DB) ListAudit(limit int) ([]AuditEntry, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	rows, err := d.SQL.Query(`SELECT ts, actor, action, detail FROM audit_log ORDER BY ts DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditEntry
+	for rows.Next() {
+		var a AuditEntry
+		var ts int64
+		if err := rows.Scan(&ts, &a.Actor, &a.Action, &a.Detail); err != nil {
+			return nil, err
+		}
+		a.TS = time.Unix(ts, 0)
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) GetUserPasswordHash(username string) (string, error) {
 	var hash string
 	err := d.SQL.QueryRow(`SELECT password_hash FROM users WHERE username=?`, username).Scan(&hash)

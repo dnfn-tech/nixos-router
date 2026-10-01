@@ -33,3 +33,22 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestClientsEndpoint(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.LAN.StaticLeases = []config.StaticLease{{MAC: "AA:BB:CC:DD:EE:FF", IP: "192.168.1.50", Hostname: "pc"}}
+	srv := New(Options{Config: cfg, DevMode: true})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if _, ok := body["clients"]; !ok {
+		t.Fatalf("missing clients")
+	}
+}
+

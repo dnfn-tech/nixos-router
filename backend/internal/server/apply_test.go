@@ -134,5 +134,8 @@ func TestApplyValidGeneratesFiles(t *testing.T) {
 			t.Fatalf("expected %s to exist, err=%v", f, err)
 		}
 	}
+	// extra notes may exist
+	_ , _ = os.Stat(filepath.Join(gen, "ipv6.nft.fragment"))
+	_ , _ = os.Stat(filepath.Join(gen, "ddns.env.fragment"))
 }
 

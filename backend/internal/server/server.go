@@ -95,6 +95,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/apply", s.handleApply)
 	mux.HandleFunc("/api/v1/jobs/", s.handleJobByID)
 	mux.HandleFunc("/api/v1/jobs", s.handleJobs)
+	mux.HandleFunc("/api/v1/audit", s.handleAudit)
 	// Static UI for non-/api paths
 	mux.Handle("/", http.HandlerFunc(s.handleSPA))
 }
@@ -390,6 +391,10 @@ func (s *Server) handleUINav(w http.ResponseWriter, r *http.Request) {
 			{"id": "wifi", "title": "WiFi", "path": "/wifi"},
 			{"id": "dns", "title": "DNS", "path": "/dns"},
 			{"id": "firewall", "title": "Firewall", "path": "/firewall"},
+			{"id": "ddns", "title": "DDNS", "path": "/ddns"},
+			{"id": "ipv6", "title": "IPv6", "path": "/ipv6"},
+			{"id": "qos", "title": "QoS", "path": "/qos"},
+			{"id": "parental", "title": "Parental", "path": "/parental"},
 		}},
 		{"id": "system", "title": "System", "path": "/system"},
 	}
@@ -407,18 +412,104 @@ func (s *Server) handleUINav(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
-	list := []map[string]interface{}{}
-	for name, p := range s.cfg.Plugins {
-		item := map[string]interface{}{
-			"name":    name,
-			"enabled": p.Enable,
+	if r.Method == http.MethodGet {
+		builtins := []struct {
+			id    string
+			title string
+			group string
+			path  string
+		}{
+			{"adblock", "AdBlock", "网络服务", "/adblock"},
+			{"traffic", "Traffic", "网络服务", "/traffic"},
+			{"mihomo", "Mihomo", "网络服务", "/mihomo"},
+			{"vlan", "VLAN", "网络服务", "/vlan"},
+			{"tailscale", "Tailscale", "网络服务", "/tailscale"},
+			{"zerotier", "Zerotier", "网络服务", "/zerotier"},
+			{"qos", "QoS", "网络服务", "/qos"},
+			{"parental", "家长控制", "网络服务", "/parental"},
+			{"ddns", "动态DNS", "网络服务", "/ddns"},
+			{"ipv6", "IPv6", "网络服务", "/ipv6"},
 		}
-		if p.Config != nil {
-			item["configKeys"] = keysOf(p.Config)
+		list := []map[string]interface{}{}
+		seen := map[string]bool{}
+		for _, b := range builtins {
+			p := s.cfg.Plugins[b.id]
+			item := map[string]interface{}{
+				"id":      b.id,
+				"title":   b.title,
+				"enabled": p.Enable,
+				"nav": map[string]interface{}{
+					"group": b.group,
+					"path":  b.path,
+				},
+			}
+			if p.Config != nil {
+				item["configKeys"] = keysOf(p.Config)
+			}
+			list = append(list, item)
+			seen[b.id] = true
 		}
-		list = append(list, item)
+		// Include any extra plugin entries not in builtins
+		for name, p := range s.cfg.Plugins {
+			if seen[name] {
+				continue
+			}
+			list = append(list, map[string]interface{}{
+				"id":      name,
+				"title":   name,
+				"enabled": p.Enable,
+				"nav":     map[string]interface{}{},
+				"configKeys": func() []string {
+					if p.Config != nil {
+						return keysOf(p.Config)
+					}
+					return nil
+				}(),
+			})
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"plugins": list})
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"plugins": list})
+	if r.Method == http.MethodPut || r.Method == http.MethodPatch {
+		// PUT /api/v1/plugins/{id}
+		id := strings.TrimPrefix(r.URL.Path, "/api/v1/plugins/")
+		if id == "" || strings.Contains(id, "/") {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Enabled *bool                  `json:"enabled"`
+			Config  map[string]interface{} `json:"config"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		cur := s.cfg.Plugins[id]
+		// Merge config with secret-preserve
+		if body.Config != nil {
+			cur.Config = mergePreserveSecretsMap(cur.Config, body.Config)
+		}
+		if body.Enabled != nil {
+			cur.Enable = *body.Enabled
+		}
+		if s.cfg.Plugins == nil {
+			s.cfg.Plugins = map[string]config.PluginConfig{}
+		}
+		s.cfg.Plugins[id] = cur
+		// persist
+		if err := config.SaveToFile(s.cfgPath, s.cfg); err != nil {
+			http.Error(w, "failed to save config", http.StatusInternalServerError)
+			return
+		}
+		s.db.AddAudit("plugins", "update", fmt.Sprintf("%s enabled=%v", id, cur.Enable))
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":     true,
+			"plugin": map[string]interface{}{"id": id, "enabled": cur.Enable, "configKeys": keysOf(cur.Config)},
+		})
+		return
+	}
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
@@ -544,6 +635,49 @@ func (s *Server) mergeSecrets(oldCfg config.Config, in config.Config) config.Con
 	return out
 }
 
+func mergePreserveSecretsMap(old, in map[string]interface{}) map[string]interface{} {
+	if old == nil && in == nil {
+		return nil
+	}
+	if old == nil {
+		return in
+	}
+	if in == nil {
+		return old
+	}
+	out := map[string]interface{}{}
+	// include all keys from either map
+	seen := map[string]bool{}
+	for k := range old {
+		seen[k] = true
+	}
+	for k := range in {
+		seen[k] = true
+	}
+	for k := range seen {
+		ov, okOld := old[k]
+		nv, okNew := in[k]
+		if okNew {
+			// If redacted string, keep old
+			if sv, ok := nv.(string); ok && isRedactedOrEmpty(sv) {
+				out[k] = ov
+				continue
+			}
+			// Recurse into maps
+			if nm, ok := nv.(map[string]interface{}); ok {
+				if om, ok2 := ov.(map[string]interface{}); ok2 {
+					out[k] = mergePreserveSecretsMap(om, nm)
+					continue
+				}
+			}
+			out[k] = nv
+		} else if okOld {
+			out[k] = ov
+		}
+	}
+	return out
+}
+
 type creds struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
@@ -580,6 +714,35 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"jobs": items})
+}
+
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	items, err := s.db.ListAudit(limit)
+	if err != nil {
+		// If table missing or error, stub empty list with shape
+		writeJSON(w, http.StatusOK, map[string]interface{}{"audit": []interface{}{}, "source": "stub"})
+		return
+	}
+	out := make([]map[string]interface{}, 0, len(items))
+	for _, a := range items {
+		out = append(out, map[string]interface{}{
+			"ts":     a.TS.UTC().Format(time.RFC3339),
+			"actor":  a.Actor,
+			"action": a.Action,
+			"detail": a.Detail,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"audit": out})
 }
 
 func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
@@ -752,6 +915,31 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "hostapd.conf.fragment"), []byte(host), 0o644); err != nil {
 		return err
+	}
+	// IPv6 notes
+	ipv6 := "# IPv6 generate-only\n"
+	ipv6 += fmt.Sprintf("# wanMode=%s lanPD=%v lanRA=%v\n", cfg.IPv6.WANMode, cfg.IPv6.LANPD, cfg.IPv6.LANRA)
+	_ = os.WriteFile(filepath.Join(dir, "ipv6.nft.fragment"), []byte(ipv6), 0o644)
+	// DDNS env notes (redacted)
+	ddns := "# DDNS generate-only\n"
+	ddns += fmt.Sprintf("# provider=%s enabled=%v\n", cfg.DDNS.Provider, cfg.DDNS.Enable)
+	_ = os.WriteFile(filepath.Join(dir, "ddns.env.fragment"), []byte(ddns), 0o644)
+	// QoS notes
+	qos := "# QoS generate-only\n"
+	qos += fmt.Sprintf("# upMbps=%d downMbps=%d\n", cfg.QoS.UpMbps, cfg.QoS.DownMbps)
+	_ = os.WriteFile(filepath.Join(dir, "qos.conf.fragment"), []byte(qos), 0o644)
+	// Parental notes
+	par := "# Parental generate-only\n"
+	par += fmt.Sprintf("# rules=%d\n", len(cfg.Parental.Rules))
+	_ = os.WriteFile(filepath.Join(dir, "parental.conf.fragment"), []byte(par), 0o644)
+	// Plugins notes (enabled/disabled)
+	for _, pid := range []string{"adblock", "traffic", "mihomo", "vlan", "tailscale", "zerotier"} {
+		fn := filepath.Join(dir, "plugin."+pid+".notes")
+		if p, ok := cfg.Plugins[pid]; ok && p.Enable {
+			_ = os.WriteFile(fn, []byte("# "+pid+" enabled\n"), 0o644)
+		} else {
+			_ = os.WriteFile(fn, []byte("# "+pid+" disabled\n"), 0o644)
+		}
 	}
 	return nil
 }

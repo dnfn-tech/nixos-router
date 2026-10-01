@@ -97,6 +97,16 @@ func TestLoginSuccessAndLogout(t *testing.T) {
 	if w2.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w2.Code)
 	}
+	// plugins list should be 200 as well
+	reqP := httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil)
+	for _, c := range cookies {
+		reqP.AddCookie(c)
+	}
+	wP := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(wP, reqP)
+	if wP.Code != http.StatusOK {
+		t.Fatalf("plugins list expected 200, got %d", wP.Code)
+	}
 	// Logout
 	req3 := httptest.NewRequest(http.MethodDelete, "/api/v1/session", nil)
 	for _, c := range cookies {

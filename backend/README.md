@@ -29,6 +29,7 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - `GET /api/v1/status`：状态概览（桩值）
 - `GET /api/v1/ui/nav`：UI 导航（内置页面 + 已启用插件）
 - `GET /api/v1/plugins`：插件列表（来自配置）
+- `PUT /api/v1/plugins/{id}`：启用/禁用（以及配置项变更，`"****"`/空值会被视为“保持原有机密值不变”）
 - `GET /api/v1/clients`：客户端列表（优先租约来源，否则基于静态租约，`source: "stub"`）
 - `GET /api/v1/capabilities/wifi`：WiFi 能力（桩值/来自 env）
 - `POST /api/v1/session`：登录，设置 HttpOnly Cookie（SameSite=Lax）
@@ -39,6 +40,7 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - `POST /api/v1/apply`：生成运行时片段到 `stateDir/generated/`（dnsmasq/nftables/hostapd 占位），记录作业；默认不 reload 系统单元
 - `GET /api/v1/jobs/{id}`：查询作业状态（`mode: generate-only`，`appliedRuntime: false`）
 - `GET /api/v1/jobs?limit=20`：按创建时间倒序返回最近作业
+- `GET /api/v1/audit?limit=50`：审计日志（时间倒序）
 
 ## WebUI（静态资源）
 
@@ -83,7 +85,7 @@ curl -s -b cookie.txt -H 'Content-Type: application/json' \
   -X PUT http://localhost:8080/api/v1/config | jq .
 
 # 秘密字段合并规则（避免误清空）
-# - 当 UI 以 \"****\" 或空字符串提交时，后端将保留已存储的密钥/口令（PPPoE、WiFi PSK、DDNS Token 等）
+# - 当 UI 以 \"****\" 或空字符串提交时，后端将保留已存储的密钥/口令（PPPoE、WiFi PSK、DDNS Token、插件密钥等）
 # - 若要显式清除，请传入明确的空值协议（后续里程碑可提供专门 API）
 
 # 6) 生成（仅生成，不 reload）
@@ -93,6 +95,7 @@ JOB=$(curl -s -b cookie.txt -X POST http://localhost:8080/api/v1/apply | jq -r .
 curl -s -b cookie.txt http://localhost:8080/api/v1/jobs/$JOB | jq .
 curl -s -b cookie.txt 'http://localhost:8080/api/v1/jobs?limit=5' | jq .
 ls -la ./_state/generated/
+curl -s -b cookie.txt 'http://localhost:8080/api/v1/audit?limit=20' | jq .
 
 # 7) 登出
 curl -i -X DELETE -b cookie.txt http://localhost:8080/api/v1/session
@@ -133,4 +136,9 @@ go test ./...
 
 - `POST /api/v1/apply` 创建作业并串行执行：validate → 生成到 `stateDir/generated/`（dnsmasq.conf.fragment、nftables.nft.fragment、hostapd.conf.fragment）→ success/failed；仅生成、不 reload。
 - `GET /api/v1/jobs/{id}` 可查询状态；`GET /api/v1/jobs` 列表暂未实现。
+
+## 插件管理（M6）
+- 内置可选插件：adblock、traffic、mihomo、vlan、tailscale、zerotier（以及 qos/parental/ddns/ipv6 若以插件化建模）
+- `GET /api/v1/plugins` 返回插件清单（含启用状态与导航元数据）
+- `PUT /api/v1/plugins/{id}` 可启用/禁用与更新配置；生效语义为“冷加载”，下一次生成/服务重启后生效；前端导航会依据启用状态显示/隐藏
 
