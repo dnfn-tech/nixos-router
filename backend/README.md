@@ -20,6 +20,8 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - `NIXOS_ROUTER_ADDR=:8080`：监听地址
 - `NIXOS_ROUTER_WIFI_MAX_APS=2`：WiFi 能力上限（示例）
 - `NIXOS_ROUTER_CORS_ORIGIN`：dev 下可覆盖 CORS Origin（默认 `*`）
+- `NIXOS_ROUTER_CONSUME_GENERATED=1`：尝试消费生成片段（当前包括以 `nft -f` 应用 `nftables.nft.fragment`）
+- `NIXOS_ROUTER_PRIVILEGED_APPLY=1`：允许运行态动作（`nft`/`tc` 等）；默认关闭
 - `NIXOS_ROUTER_ADMIN_PASSWORD`：首次无用户时用于创建初始 `admin` 账户（未设置且 `--dev`/`--seed-default-config` 时会用默认弱口令，生产请务必设置）
 
 ## API（前缀 /api/v1）
@@ -39,6 +41,7 @@ go run ./cmd/routerd --dev --state-dir ./_state --seed-default-config
 - 兼容路径 `POST /api/v1/auth/login` 已转发到 `/api/v1/session`
 - `PUT /api/v1/config`：保存完整配置（Schema/语义校验通过后原子写入）；仅保存，不 apply
 - `POST /api/v1/apply`：生成运行时片段到 `stateDir/generated/`（dnsmasq/nftables/hostapd 占位），记录作业；默认不 reload 系统单元
+- 当显式启用 `--apply-reload` 时：会尝试 reload `dnsmasq/nftables/hostapd` 与插件编排（best-effort）。若再启用 `--consume-generated` 且 `--privileged-apply`，会在 reload 之前以 `nft -f` 直接应用 `nftables.nft.fragment`。失败将尝试回滚至 last-good（见下）。
 - `GET /api/v1/jobs/{id}`：查询作业状态（`mode: generate-only`，`appliedRuntime: false`）
 - `GET /api/v1/jobs?limit=20`：按创建时间倒序返回最近作业
 - `GET /api/v1/audit?limit=50`：审计日志（时间倒序）
@@ -138,6 +141,8 @@ go test ./...
 - flake `packages.<system>.routerd`：包含嵌入的 WebUI
 - NixOS 模块：`services.nixos-router.backend.enable = true;` 启用后访问 `http://<lan-ip>:8080/` 即可同源打开 UI 与 API
   - 可选：`services.nixos-router.backend.applyReload = true;` 启用占位 reload 钩子（默认关闭）
+  - 可选：`services.nixos-router.backend.consumeGenerated = true;` 由模块为 dnsmasq/等接入 `generated/` 片段（例如为 dnsmasq 追加 `conf-file=/var/lib/nixos-router/generated/dnsmasq.conf.fragment`）
+  - 可选：`services.nixos-router.backend.privilegedApply = true;` 允许后端在运行时执行 `nft`/`tc` 等命令（默认沙盒）
   - 可选：`services.nixos-router.backend.allowReboot = true;` 显式允许后端执行重启（默认关闭）
 
 ### 计算 vendorHash（M10）
@@ -155,7 +160,7 @@ nix build .#routerd                        # 成功后表示 vendorHash 正确
 
 ## 实现现状
 
-简述见 `docs/implementation-status.md`（当前默认 generate-only；当 `applyReload=true` 时提供保守的插件编排骨架：mihomo/tailscale/zerotier 按启用状态做 `systemctl try-reload-or-restart/try-stop`，缺失单元仅记录 notes；VLAN 仅注记）。
+简述见 `docs/implementation-status.md`（当前默认 generate-only；当 `applyReload=true` 时提供保守的插件编排骨架：mihomo/tailscale/zerotier 按启用状态做 `systemctl try-reload-or-restart/try-stop`，缺失单元仅记录 notes；VLAN 仅注记）。可选 `consumeGenerated` + `privilegedApply` 时，`nftables` 会直接以 `nft -f` 应用，失败自动回滚到 last-good。
 
 ## 账户与会话
 

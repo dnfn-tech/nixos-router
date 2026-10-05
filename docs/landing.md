@@ -95,12 +95,17 @@ nix build .#routerd
 2. 点击 Apply：
    - 仅生成：`appliedRuntime=false`；`generated/` 下应出现对应片段。
    - generate+reload：若成功会返回 `notes`（包括哪些单元已尝试 reload，QoS 是否执行）。
+   - generate+reload+consume（启用 `consumeGenerated` 且 `privilegedApply` 时）：在 reload 前会以 `nft -f` 直接应用 `nftables` 片段；成功后将把 `generated/` 快照为 last-good（见下）
 3. 查看 `generated/`：
    - `dnsmasq.conf.fragment`
    - `nftables.nft.fragment`
    - `hostapd.conf.fragment`
    - `qos.sh`（当 QoS 启用且提供速率时）
    - `plugins/*`（各插件的注记或配置）
+4. 成功后快照（仅 generate+reload 成功时）：
+   - `${stateDir}/revisions/<rev>/`：保存当次生成的完整片段集
+   - `${stateDir}/last-good.rev`：文本指针，指向最近一次成功的 `<rev>`
+   - `${stateDir}/last-good.json`：对应的完整 `config.json` 备份
 
 ## 5) 常见问题
 
@@ -110,4 +115,6 @@ nix build .#routerd
   - 在极简容器/环境中可能不存在 systemctl；Apply 会带上说明并继续（仅生成）。
 - QoS 未生效：
   - 确认 `applyTrafficControl=true` 且 `privilegedApply=true`，并检查 `qos.sh` 是否根据你的 WAN/LAN 接口名称生成正确。
+- 失败与回滚：
+  - 当 `consumeGenerated` 或 reload 任一步失败时，后端将尝试把 `generated/` 回滚为 `${stateDir}/revisions/$(cat last-good.rev)/`，并在具备权限时以 `nft -f` 重新加载 last-good；随后 best-effort reload 核心单元。失败原因与回滚说明会在作业 `notes` 中体现。
 
