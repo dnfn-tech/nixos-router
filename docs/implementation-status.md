@@ -75,3 +75,19 @@
 - 已固定：`vendorHash = "sha256-MM1ODEBButuG1Yalmyxv1mkJmc4Va4tclJpq1q0IAcc="`；flake.lock 已锁定 `nixpkgs-unstable`；已在私有 worker 上验证 `nix build .#routerd` 成功。
 - 如后续依赖变更需重算 vendor：请在有 Nix 的主机执行 `./scripts/compute-vendor-hash.sh --apply` 并提交；随后 `nix build .#routerd` 应继续成功。
 
+## 新增（M15）
+- Apply 闭环（可选、默认安全）：
+  - 新增运行期开关：
+    - `--consume-generated` / `NIXOS_ROUTER_CONSUME_GENERATED=1`：尝试“消费”生成片段（当前包括以 `nft -f` 直接应用 `nftables.nft.fragment`；dnsmasq/hostapd 仍依赖 NixOS 模块将 `generated/` 片段纳入主配置）
+    - `--privileged-apply` / `NIXOS_ROUTER_PRIVILEGED_APPLY=1`：允许运行态动作（`nft`/`tc` 等）；默认关闭
+    - `--apply-traffic-control`：在 `--apply-reload` 时尝试执行 `generated/qos.sh`（失败仅记录 notes）
+  - Apply 流程（显式启用 `--apply-reload` 后）：
+    1) validate + 生成至 `${stateDir}/generated/`
+    2) 若启用 `consumeGenerated`：先尝试直接应用（当前为 `nft -f`）；失败视为作业失败
+    3) reload 核心单元（dnsmasq/nftables/hostapd）与插件编排（best-effort）；reload 失败视为作业失败
+    4) 成功后将 `generated/` 快照到 `${stateDir}/revisions/<rev>/`，并更新 `${stateDir}/last-good.rev` 指针与 `${stateDir}/last-good.json`
+  - 失败与回滚：
+    - 在消费或 reload 任一步骤失败时，尝试将 `generated/` 回滚为 `${stateDir}/revisions/$(cat last-good.rev)/`，并在具备权限时以 `nft -f` 重新加载 last-good；随后 best-effort reload 核心单元
+    - 作业状态标记为 `failed`，审计包含失败原因与回滚说明
+  - 默认值不变：`applyReload=false`、`consumeGenerated=false`、`applyTrafficControl=false`、`privilegedApply=false`，维持生产安全默认
+

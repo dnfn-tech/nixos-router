@@ -44,6 +44,8 @@ type Server struct {
 	requireAuth bool
 	loginFails map[string][]time.Time
 	applyReload bool
+	consumeGenerated bool
+	privilegedApply  bool
 	applyMu     sync.Mutex
 	runner      CommandRunner
 	// Live status helpers
@@ -66,6 +68,11 @@ type Options struct {
 	// ApplyTrafficControl: when true and ApplyReload is also true, attempt to run generated qos.sh.
 	// Defaults to false for safety.
 	ApplyTrafficControl bool
+	// ConsumeGenerated: when true, attempt to directly apply generated fragments where safe (e.g. nft -f).
+	// Defaults to false for safety. For dnsmasq/hostapd, rely on system units to include generated fragments as wired by NixOS module.
+	ConsumeGenerated bool
+	// PrivilegedApply: when true, allow privileged runtime actions (nft/tc). Defaults to false for safety.
+	PrivilegedApply bool
 }
 
 // CommandRunner abstracts command lookups and execution to allow tests to inject a mock
@@ -106,6 +113,8 @@ func New(opts Options) *Server {
 		requireAuth: !opts.DevMode,
 		loginFails:  make(map[string][]time.Time),
 		applyReload: opts.ApplyReload,
+		consumeGenerated: opts.ConsumeGenerated,
+		privilegedApply:  opts.PrivilegedApply,
 		runner:      defaultRunner{},
 		ifPrev:      make(map[string]ifacePrev),
 		applyTrafficControl: opts.ApplyTrafficControl,
@@ -1179,6 +1188,148 @@ type creds struct {
 
 // --- Jobs & Apply (generate-only) ---
 
+// dirCopy copies regular files (non-recursive symlinks ignored) from src to dst recursively.
+func (s *Server) dirCopy(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		sp := filepath.Join(src, e.Name())
+		dp := filepath.Join(dst, e.Name())
+		info, err := e.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			// skip symlinks
+			continue
+		}
+		if e.IsDir() {
+			if err := s.dirCopy(sp, dp); err != nil {
+				return err
+			}
+			continue
+		}
+		// regular file
+		data, err := os.ReadFile(sp)
+		if err != nil {
+			return err
+		}
+		mode := info.Mode() & 0o777
+		if mode == 0 {
+			mode = 0o644
+		}
+		if err := os.WriteFile(dp, data, mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) lastGoodRevPath() string {
+	return filepath.Join(s.stateDir, "last-good.rev")
+}
+
+func (s *Server) readLastGoodRev() (string, bool) {
+	p := s.lastGoodRevPath()
+	data, err := os.ReadFile(p)
+	if err != nil || len(data) == 0 {
+		return "", false
+	}
+	return strings.TrimSpace(string(data)), true
+}
+
+func (s *Server) lastGoodDir() (string, bool) {
+	rev, ok := s.readLastGoodRev()
+	if !ok {
+		return "", false
+	}
+	dir := filepath.Join(s.stateDir, "revisions", rev)
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		return dir, true
+	}
+	return "", false
+}
+
+func (s *Server) writeLastGoodRev(rev string) error {
+	p := s.lastGoodRevPath()
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, []byte(rev+"\n"), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+func (s *Server) snapshotGeneratedToRevision(genDir, rev string) error {
+	dst := filepath.Join(s.stateDir, "revisions", rev)
+	return s.dirCopy(genDir, dst)
+}
+
+// doConsumeGenerated attempts to apply runtime changes based on generated fragments.
+// Currently this includes applying nftables via `nft -f`. Returns notes and a fatal error if consumption failed.
+func (s *Server) doConsumeGenerated(genDir string) ([]string, error) {
+	var notes []string
+	// nftables
+	nftPath := filepath.Join(genDir, "nftables.nft.fragment")
+	if fi, err := os.Stat(nftPath); err == nil && fi.Size() > 0 {
+		if !s.privilegedApply {
+			notes = append(notes, "nftables: privilegedApply=false; skipped direct apply")
+		} else {
+			if err := s.runner.Run("nft", "-f", nftPath); err != nil {
+				return notes, fmt.Errorf("nft apply failed: %w", err)
+			}
+			notes = append(notes, "nftables: applied from generated")
+		}
+	} else {
+		notes = append(notes, "nftables: fragment missing; skipped")
+	}
+	// dnsmasq/hostapd: rely on systemd reload to pick up includes configured by NixOS module (consumeGenerated)
+	notes = append(notes, "dnsmasq/hostapd: rely on unit reload and NixOS module include; no direct write by backend")
+	return notes, nil
+}
+
+// rollbackToLastGood restores generated fragments from last-good revision and tries to re-apply runtime state.
+func (s *Server) rollbackToLastGood(genDir string) []string {
+	var notes []string
+	lastDir, ok := s.lastGoodDir()
+	if !ok {
+		notes = append(notes, "rollback: no last-good available; left runtime as-is")
+		return notes
+	}
+	// Restore generated/
+	_ = os.RemoveAll(genDir)
+	_ = os.MkdirAll(genDir, 0o755)
+	if err := s.dirCopy(lastDir, genDir); err != nil {
+		notes = append(notes, "rollback: failed to restore generated from last-good: "+err.Error())
+		return notes
+	}
+	notes = append(notes, "rollback: restored generated/ from last-good")
+	// Attempt to re-apply nftables from last-good when privileged
+	nftPath := filepath.Join(lastDir, "nftables.nft.fragment")
+	if s.privilegedApply {
+		if fi, err := os.Stat(nftPath); err == nil && fi.Size() > 0 {
+			if err := s.runner.Run("nft", "-f", nftPath); err != nil {
+				notes = append(notes, "rollback: nft apply last-good failed: "+err.Error())
+			} else {
+				notes = append(notes, "rollback: nft applied from last-good")
+			}
+		}
+	} else {
+		notes = append(notes, "rollback: privilegedApply=false; skipped nft re-apply")
+	}
+	// Best-effort reload core units to pick includes
+	if ok, msg := s.reloadCoreUnits(); !ok && strings.TrimSpace(msg) != "" {
+		notes = append(notes, "rollback: reload note: "+msg)
+	} else {
+		notes = append(notes, "rollback: reloaded core units")
+	}
+	return notes
+}
+
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1421,31 +1572,30 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "generate_failed", "jobId": jid})
 		return
 	}
-	// (Optional) reload stubs
-	if s.applyReload {
-		// core networking units
-		okReload, msg := s.reloadCoreUnits()
-		// plugin orchestration - non-fatal notes
-		notes := s.orchestratePlugins(cfg)
-		// Optional: traffic control script execution when explicitly enabled
-		if s.applyTrafficControl {
-			script := filepath.Join(genDir, "qos.sh")
-			if fi, err := os.Stat(script); err == nil && fi.Mode().Perm()&0o111 != 0 {
-				// Best-effort run; failures are noted but do not fail the apply
-				if err := s.runner.Run(script); err != nil {
-					notes = append(notes, "qos: failed to run qos.sh (ignored): "+err.Error())
-				} else {
-					notes = append(notes, "qos: executed qos.sh")
-				}
-			} else {
-				notes = append(notes, "qos: script not present or not executable; skipped")
-			}
-		} else {
-			notes = append(notes, "qos: applyTrafficControl=false; generation only")
-		}
-		if !okReload {
+	// generate-only by default
+	if !s.applyReload {
+		_ = s.db.UpdateJobStatus(jid, "success", "")
+		s.db.AddAudit(user, "apply", "generate-only success")
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"jobId":          jid,
+			"appliedRuntime": false,
+			"mode":           "generate-only",
+		})
+		return
+	}
+	// From here: runtime actions enabled
+	var notes []string
+	// Optionally consume generated fragments first (e.g. nft apply)
+	if s.consumeGenerated {
+		cn, err := s.doConsumeGenerated(genDir)
+		notes = append(notes, cn...)
+		if err != nil {
+			// Fatal: attempt rollback to last-good and mark failed
+			rn := s.rollbackToLastGood(genDir)
+			notes = append(notes, rn...)
+			msg := "consume failed: " + err.Error()
 			_ = s.db.UpdateJobStatus(jid, "failed", msg)
-			s.db.AddAudit(user, "apply", "reload failed: "+msg)
+			s.db.AddAudit(user, "apply", "consume+rollback failed: "+err.Error())
 			writeJSON(w, http.StatusOK, map[string]interface{}{
 				"jobId":          jid,
 				"appliedRuntime": false,
@@ -1455,22 +1605,61 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		_ = s.db.UpdateJobStatus(jid, "success", "")
-		s.db.AddAudit(user, "apply", "reload success")
+	} else {
+		notes = append(notes, "consumeGenerated=false; relying on unit reload and system wiring")
+	}
+	// core networking units reload
+	okReload, msg := s.reloadCoreUnits()
+	// plugin orchestration - non-fatal notes
+	notes = append(notes, s.orchestratePlugins(cfg)...)
+	// Optional: traffic control script execution when explicitly enabled
+	if s.applyTrafficControl {
+		script := filepath.Join(genDir, "qos.sh")
+		if fi, err := os.Stat(script); err == nil && fi.Mode().Perm()&0o111 != 0 {
+			// Best-effort run; failures are noted but do not fail the apply
+			if err := s.runner.Run(script); err != nil {
+				notes = append(notes, "qos: failed to run qos.sh (ignored): "+err.Error())
+			} else {
+				notes = append(notes, "qos: executed qos.sh")
+			}
+		} else {
+			notes = append(notes, "qos: script not present or not executable; skipped")
+		}
+	} else {
+		notes = append(notes, "qos: applyTrafficControl=false; generation only")
+	}
+	if !okReload {
+		// Rollback to last-good if available
+		rn := s.rollbackToLastGood(genDir)
+		notes = append(notes, rn...)
+		_ = s.db.UpdateJobStatus(jid, "failed", msg)
+		s.db.AddAudit(user, "apply", "reload failed: "+msg+"; rollback attempted")
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"jobId":          jid,
-			"appliedRuntime": true,
+			"appliedRuntime": false,
 			"mode":           "generate+reload",
+			"error":          msg,
 			"notes":          notes,
 		})
 		return
 	}
+	// Success: snapshot as last-good
+	rev := time.Now().UTC().Format("20060102-150405Z")
+	if err := s.snapshotGeneratedToRevision(genDir, rev); err == nil {
+		_ = s.writeLastGoodRev(rev)
+		// Persist a copy of the config for diagnostics
+		_ = config.SaveToFile(filepath.Join(s.stateDir, "last-good.json"), cfg)
+		notes = append(notes, "last-good: updated to "+rev)
+	} else {
+		notes = append(notes, "last-good: snapshot failed: "+err.Error())
+	}
 	_ = s.db.UpdateJobStatus(jid, "success", "")
-	s.db.AddAudit(user, "apply", "generate-only success")
+	s.db.AddAudit(user, "apply", "reload success")
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"jobId":          jid,
-		"appliedRuntime": false,
-		"mode":           "generate-only",
+		"appliedRuntime": true,
+		"mode":           "generate+reload",
+		"notes":          notes,
 	})
 }
 
