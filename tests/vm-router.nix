@@ -17,6 +17,7 @@
       # 使用 settings（nixos-unstable 推荐）
       settings = {
         interface = "eth1";
+        authoritative = true;
         bind-interfaces = true;
         listen-address = "10.0.0.1";
         domain-needed = true;
@@ -57,6 +58,7 @@
       enable = true;
       settings = {
         interface = "eth2";
+        authoritative = true;
         bind-interfaces = true;
         listen-address = "192.168.1.1";
         domain-needed = true;

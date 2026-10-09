@@ -44,6 +44,10 @@
           testScript = ''
             import json, time
             start_all()
+            # 预热与调试信息
+            router.succeed("ip -4 addr || true")
+            upstream.succeed("ip -4 addr || true")
+            client.succeed("ip -4 addr || true")
             # upstream: dnsmasq (dhcp+dns)
             upstream.wait_for_unit("dnsmasq.service")
             # router: backend + dnsmasq
