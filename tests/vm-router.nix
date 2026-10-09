@@ -17,7 +17,7 @@
       # 使用 settings（nixos-unstable 推荐）
       settings = {
         interface = "eth1";
-        authoritative = true;
+        "dhcp-authoritative" = true;
         # 仅限定接口，避免绑定特定地址造成早期竞态
         domain-needed = true;
         bogus-priv = true;
@@ -57,7 +57,7 @@
       enable = true;
       settings = {
         interface = "eth2";
-        authoritative = true;
+        "dhcp-authoritative" = true;
         # 仅限定接口，避免绑定特定地址造成早期竞态
         domain-needed = true;
         bogus-priv = true;
