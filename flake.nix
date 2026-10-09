@@ -48,6 +48,11 @@
             router.succeed("ip -4 addr || true")
             upstream.succeed("ip -4 addr || true")
             client.succeed("ip -4 addr || true")
+            upstream.succeed("ss -luunp || true")
+            router.succeed("ss -luunp || true")
+            upstream.succeed("journalctl -u dnsmasq --no-pager -n 200 || true")
+            router.succeed("journalctl -u dnsmasq --no-pager -n 200 || true")
+            router.succeed("nft list ruleset | sed -n '1,200p' || true")
             # upstream: dnsmasq (dhcp+dns)
             upstream.wait_for_unit("dnsmasq.service")
             # router: backend + dnsmasq

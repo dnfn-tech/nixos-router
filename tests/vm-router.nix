@@ -9,6 +9,8 @@
       address = "10.0.0.1";
       prefixLength = 24;
     }];
+    # 放行 DNS/DHCP（UDP 53/67）
+    networking.firewall.allowedUDPPorts = [ 53 67 ];
 
     environment.systemPackages = with pkgs; [ curl iproute2 iputils ];
 
@@ -43,6 +45,8 @@
       address = "192.168.1.1";
       prefixLength = 24;
     }];
+    # 仅在 LAN 口放行 DNS/DHCP（UDP 53/67）
+    networking.firewall.interfaces.eth2.allowedUDPPorts = [ 53 67 ];
 
     # NAT：LAN -> WAN
     networking.nat = {
