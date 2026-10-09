@@ -49,8 +49,7 @@
             # router: backend + dnsmasq
             router.wait_for_unit("nixos-router-backend.service")
             router.wait_for_unit("dnsmasq.service")
-            # client up
-            client.wait_for_unit("network-online.target")
+            # client: 直接等 IP 出现（network-online.target 在最小系统中可能未触发）
 
             # 1) backend 端口 8080 打开
             router.wait_until_succeeds("ss -ltn | grep ':8080'")
