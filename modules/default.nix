@@ -145,7 +145,8 @@ in
     # 解析端口：匹配最后一个冒号后的数字；不支持 IPv6 字面量。
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall (
       let
-        m = builtins.match ".*:(\\d+)$" cfg.address;
+        # Nix 的正则不支持 \\d，使用 [0-9]+
+        m = builtins.match ".*:([0-9]+)$" cfg.address;
         port = if m == null then 8080 else builtins.fromJSON (builtins.head m);
       in [ port ]
     );
