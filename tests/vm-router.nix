@@ -18,8 +18,7 @@
       settings = {
         interface = "eth1";
         authoritative = true;
-        bind-interfaces = true;
-        listen-address = "10.0.0.1";
+        # 仅限定接口，避免绑定特定地址造成早期竞态
         domain-needed = true;
         bogus-priv = true;
         # 上游随便指一个公共 DNS，避免其他查询卡住
@@ -59,8 +58,7 @@
       settings = {
         interface = "eth2";
         authoritative = true;
-        bind-interfaces = true;
-        listen-address = "192.168.1.1";
+        # 仅限定接口，避免绑定特定地址造成早期竞态
         domain-needed = true;
         bogus-priv = true;
         # DNS 上游指向 ISP
