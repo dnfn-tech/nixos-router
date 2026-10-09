@@ -55,6 +55,8 @@
     networking.firewall = {
       enable = true;
       interfaces.eth2.allowedUDPPorts = [ 53 67 ];
+      # 允许从 LAN 口转发的流量（配合 NAT），避免 ICMP 转发被默认策略拦截
+      trustedInterfaces = [ "eth2" ];
     };
     # 避免与 dnsmasq 抢占 :53
     services.resolved.enable = false;
