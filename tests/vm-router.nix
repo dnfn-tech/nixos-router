@@ -111,7 +111,7 @@
       interfaces.eth1.useDHCP = true;
     };
 
-    environment.systemPackages = with pkgs; [ curl iproute2 iputils ];
+    environment.systemPackages = with pkgs; [ curl iproute2 iputils gnugrep ];
   };
 }
 
