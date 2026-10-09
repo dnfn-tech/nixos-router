@@ -112,14 +112,15 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       serviceConfig = {
-        ExecStart = ''
-          ${routerdPkg}/bin/routerd \
-            --state-dir ${cfg.stateDir} \
-            --addr ${cfg.address}\
-            ${lib.optionalString cfg.dev " --dev"}\
-            ${lib.optionalString cfg.applyReload " --apply-reload"}\
-            ${lib.optionalString cfg.applyTrafficControl " --apply-traffic-control"}
-        '';
+        ExecStart = lib.concatStringsSep " " (
+          [ "${routerdPkg}/bin/routerd"
+            "--state-dir ${cfg.stateDir}"
+            "--addr ${cfg.address}"
+          ]
+          ++ lib.optional cfg.dev "--dev"
+          ++ lib.optional cfg.applyReload "--apply-reload"
+          ++ lib.optional cfg.applyTrafficControl "--apply-traffic-control"
+        );
         DynamicUser = lib.mkDefault true;
         StateDirectory = "nixos-router";
         Restart = "on-failure";

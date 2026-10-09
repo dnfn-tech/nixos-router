@@ -1,0 +1,35 @@
+name: NixOS VM Tests
+
+on:
+  push:
+    branches:
+      - main
+      - 'cursor/**'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  vm-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+
+      - name: Enable /dev/kvm if available
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chown root:kvm /dev/kvm || true
+            sudo chmod 666 /dev/kvm || true
+          fi
+          echo "KVM availability:"; ls -l /dev/kvm || true
+
+      - name: Build flake check (vm-router)
+        run: nix build .#checks.x86_64-linux.vm-router -L
+
