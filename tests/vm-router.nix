@@ -12,6 +12,7 @@
     # 防火墙：收紧为仅放行 DNS/DHCP（UDP 53/67）
     networking.firewall = {
       enable = true;
+      allowPing = true;
       allowedUDPPorts = [ 53 67 ];
     };
     # 避免与 dnsmasq 抢占 :53
