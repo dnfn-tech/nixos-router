@@ -62,7 +62,7 @@
             assert out.strip().endswith("201"), "unexpected login status: %s" % out
 
             # 4) client 拿到 LAN DHCP 租约（192.168.1.0/24）
-            client.wait_until_succeeds("ip -4 addr show dev eth1 | grep -E 'inet 192\\\\.168\\\\.1\\\\.'")
+            client.wait_until_succeeds("ip -4 -o addr | grep -E 'inet 192\\\\.168\\\\.1\\\\.'")
 
             # 5) client 经 NAT 能 ping 通 10.0.0.1（上游 upstream）
             client.succeed("ping -c1 -W2 10.0.0.1")

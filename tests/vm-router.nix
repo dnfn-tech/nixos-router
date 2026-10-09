@@ -2,7 +2,7 @@
 {
   # 上游“ISP”节点：vlan1，静态 10.0.0.1/24，dnsmasq 提供 DHCP+DNS，test.isp → 10.0.0.1
   upstream = { config, pkgs, ... }: {
-    virtualisation.vlans = [ 1 ];
+    virtualisation.interfaces.eth1.vlan = 1;
 
     networking.useDHCP = false;
     networking.interfaces.eth1.ipv4.addresses = [{
@@ -34,7 +34,8 @@
   # 路由器节点：导入模块，vlan1=WAN(DHCP)、vlan2=LAN(192.168.1.1/24)
   router = { config, pkgs, ... }: {
     imports = [ self.nixosModules.default ];
-    virtualisation.vlans = [ 1 2 ];
+    virtualisation.interfaces.eth1.vlan = 1; # WAN
+    virtualisation.interfaces.eth2.vlan = 2; # LAN
 
     networking.useDHCP = false;
     networking.interfaces.eth1.useDHCP = true; # WAN via upstream dnsmasq
@@ -87,7 +88,7 @@
 
   # 客户端：vlan2，DHCP 获取地址与 DNS
   client = { config, pkgs, ... }: {
-    virtualisation.vlans = [ 2 ];
+    virtualisation.interfaces.eth1.vlan = 2;
     networking.useDHCP = false;
     networking.interfaces.eth1.useDHCP = true;
 
