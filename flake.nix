@@ -48,16 +48,17 @@
             router.succeed("ip -4 addr || true")
             upstream.succeed("ip -4 addr || true")
             client.succeed("ip -4 addr || true")
-            upstream.succeed("ss -luunp || true")
-            router.succeed("ss -luunp || true")
-            upstream.succeed("journalctl -u dnsmasq --no-pager -n 200 || true")
-            router.succeed("journalctl -u dnsmasq --no-pager -n 200 || true")
-            router.succeed("nft list ruleset | sed -n '1,200p' || true")
             # upstream: dnsmasq (dhcp+dns)
             upstream.wait_for_unit("dnsmasq.service")
             # router: backend + dnsmasq
             router.wait_for_unit("nixos-router-backend.service")
             router.wait_for_unit("dnsmasq.service")
+            # 单元就绪后的诊断
+            upstream.succeed("ss -luunp || true")
+            router.succeed("ss -luunp || true")
+            upstream.succeed("journalctl -u dnsmasq --no-pager -n 200 || true")
+            router.succeed("journalctl -u dnsmasq --no-pager -n 200 || true")
+            router.succeed("nft list ruleset | sed -n '1,200p' || true")
             # client: 直接等 IP 出现（network-online.target 在最小系统中可能未触发）
 
             # 1) backend 端口 8080 打开
@@ -71,6 +72,7 @@
             assert out.strip().endswith("201"), "unexpected login status: %s" % out
 
             # 4) client 拿到 LAN DHCP 租约（192.168.1.0/24）
+            client.succeed("journalctl -u dhcpcd --no-pager -n 50 || true")
             client.wait_until_succeeds("ip -4 -o addr | grep -E 'inet 192\\\\.168\\\\.1\\\\.'")
 
             # 5) client 经 NAT 能 ping 通 10.0.0.1（上游 upstream）
