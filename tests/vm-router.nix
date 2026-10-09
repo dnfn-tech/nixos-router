@@ -9,8 +9,13 @@
       address = "10.0.0.1";
       prefixLength = 24;
     }];
-    # 验证期先关闭防火墙，定位 DHCP 广播/应答是否受限
-    networking.firewall.enable = false;
+    # 防火墙：收紧为仅放行 DNS/DHCP（UDP 53/67）
+    networking.firewall = {
+      enable = true;
+      allowedUDPPorts = [ 53 67 ];
+    };
+    # 避免与 dnsmasq 抢占 :53
+    services.resolved.enable = false;
 
     environment.systemPackages = with pkgs; [ curl iproute2 iputils ];
 
@@ -45,8 +50,13 @@
       address = "192.168.1.1";
       prefixLength = 24;
     }];
-    # 验证期先关闭防火墙，定位 DHCP 广播/应答是否受限
-    networking.firewall.enable = false;
+    # 防火墙：仅在 LAN 口放行 UDP 53/67
+    networking.firewall = {
+      enable = true;
+      interfaces.eth2.allowedUDPPorts = [ 53 67 ];
+    };
+    # 避免与 dnsmasq 抢占 :53
+    services.resolved.enable = false;
 
     # NAT：LAN -> WAN
     networking.nat = {
@@ -93,8 +103,13 @@
   # 客户端：vlan2，DHCP 获取地址与 DNS
   client = { config, pkgs, ... }: {
     virtualisation.interfaces.eth1.vlan = 2;
-    networking.useDHCP = false;
-    networking.interfaces.eth1.useDHCP = true;
+    networking = {
+      useDHCP = false;
+      # 使用 systemd-networkd 作为 DHCP 客户端
+      useNetworkd = true;
+      dhcpcd.enable = false;
+      interfaces.eth1.useDHCP = true;
+    };
 
     environment.systemPackages = with pkgs; [ curl iproute2 iputils ];
   };
