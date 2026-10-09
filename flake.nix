@@ -73,7 +73,7 @@
 
             # 4) client 拿到 LAN DHCP 租约（192.168.1.0/24）
             client.succeed("journalctl -u systemd-networkd --no-pager -n 200 || true")
-            client.wait_until_succeeds("journalctl -u systemd-networkd --no-pager | grep -E 'DHCPv4 address 192\\\\.168\\\\.1\\\\.'")
+            client.succeed("sh -c 'i=0; while [ $i -lt 120 ]; do if journalctl -u systemd-networkd --no-pager | grep -E \"DHCPv4 address 192\\\\.168\\\\.1\\\\.\"; then exit 0; fi; i=$((i+1)); sleep 1; done; exit 1'")
 
             # 5) client 经 NAT 能 ping 通 10.0.0.1（上游 upstream）
             client.succeed("ping -c1 -W2 10.0.0.1")
