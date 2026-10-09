@@ -94,7 +94,7 @@ in
       default = false;
       description = ''
         由模块轻量接线消费部分生成片段（保守默认关闭）：
-        - dnsmasq：通过 extraConfig 包含 “${stateDir}/generated/dnsmasq.conf.fragment”
+        - dnsmasq：通过 extraConfig 包含 “${cfg.stateDir}/generated/dnsmasq.conf.fragment”
         仅当你明确希望直接采用生成片段时再开启，避免影响现有网络配置。
       '';
     };
