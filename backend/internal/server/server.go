@@ -128,6 +128,7 @@ func New(opts Options) *Server {
 
 func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
+	mux.HandleFunc("/api/v1/healthz", s.handleHealth) // alias for docs alignment
 	mux.HandleFunc("/api/v1/config", s.handleConfig)
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
 	mux.HandleFunc("/api/v1/ui/nav", s.handleUINav)
@@ -144,6 +145,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/api/v1/audit", s.handleAudit)
 	mux.HandleFunc("/api/v1/backup", s.handleBackup)
+	mux.HandleFunc("/api/v1/backup/config", s.handleBackup) // alias for docs alignment
 	mux.HandleFunc("/api/v1/system/backup", s.handleBackup) // alias
 	mux.HandleFunc("/api/v1/backup/restore", s.handleRestore)
 	mux.HandleFunc("/api/v1/system/reboot", s.handleReboot)
@@ -179,7 +181,7 @@ func (s *Server) wrapAuth(next http.Handler) http.Handler {
 			return
 		}
 		// Allow: health, POST /session, and static UI (non-/api paths)
-		if r.URL.Path == "/api/v1/health" ||
+		if r.URL.Path == "/api/v1/health" || r.URL.Path == "/api/v1/healthz" ||
 			(r.URL.Path == "/api/v1/session" && r.Method == http.MethodPost) ||
 			!strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
@@ -226,7 +228,7 @@ func (s *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Access-Control-Allow-Origin", s.allowedCORS)
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 	w.Header().Set("Vary", "Origin")
 }
