@@ -48,6 +48,7 @@
 - nixpkgs 升级：将 flake 的 `inputs.nixpkgs` 从 `nixos-24.05` 升至可提供 Go ≥ 1.26 的通道（当前采用 `nixos-unstable` 以满足 `backend/go.mod` 的 `go 1.26` 要求）。
 - 构建与 vendorHash：已固定 `vendorHash = "sha256-MM1ODEBButuG1Yalmyxv1mkJmc4Va4tclJpq1q0IAcc="`，并将 flake.lock 锁定到 `nixpkgs-unstable`；已在私有 worker 上验证 `nix build .#routerd` 成功。
 - 安全与模块默认行为未改变：仍为“仅生成”，`applyReload=false`、`applyTrafficControl=false`、`privilegedApply=false`、`openFirewall=false`。
+- 测试：新增 NixOS VM 多节点 flake check（`checks.x86_64-linux.vm-router`），并接入 GitHub Actions。详见 `docs/testing.md`。
 
 ## 默认安全策略
 - 默认不执行 reload/restart（`applyReload=false`），保守生成

@@ -15,6 +15,7 @@ inputs.nixos-router.url = "github:dnfn-tech/nixos-router";
 - 插件与功能模块：`docs/plugins.md`
 - 存储选型（JSON + SQLite）：`docs/storage-choice.md`
 - 实现现状：`docs/implementation-status.md`
+- 测试（NixOS VM 多节点）：`docs/testing.md`
 
 ## Development (Backend + WebUI)
 

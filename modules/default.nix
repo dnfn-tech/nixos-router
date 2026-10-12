@@ -115,14 +115,15 @@ in
       path = [ pkgs.systemd ]
         ++ lib.optionals cfg.privilegedApply [ pkgs.nftables pkgs.iproute2 ];
       serviceConfig = {
-        ExecStart = ''
-          ${routerdPkg}/bin/routerd \
-            --state-dir ${cfg.stateDir} \
-            --addr ${cfg.address}\
-            ${lib.optionalString cfg.dev " --dev"}\
-            ${lib.optionalString cfg.applyReload " --apply-reload"}\
-            ${lib.optionalString cfg.applyTrafficControl " --apply-traffic-control"}
-        '';
+        ExecStart = lib.concatStringsSep " " (
+          [ "${routerdPkg}/bin/routerd"
+            "--state-dir ${cfg.stateDir}"
+            "--addr ${cfg.address}"
+          ]
+          ++ lib.optional cfg.dev "--dev"
+          ++ lib.optional cfg.applyReload "--apply-reload"
+          ++ lib.optional cfg.applyTrafficControl "--apply-traffic-control"
+        );
         DynamicUser = lib.mkDefault true;
         StateDirectory = "nixos-router";
         Restart = "on-failure";
@@ -149,7 +150,8 @@ in
     # 解析端口：匹配最后一个冒号后的数字；不支持 IPv6 字面量。
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall (
       let
-        m = builtins.match ".*:(\\d+)$" cfg.address;
+        # Nix 的正则不支持 \\d，使用 [0-9]+
+        m = builtins.match ".*:([0-9]+)$" cfg.address;
         port = if m == null then 8080 else builtins.fromJSON (builtins.head m);
       in [ port ]
     );
