@@ -32,7 +32,7 @@ func main() {
 	applyReload := flag.Bool("apply-reload", envBool("NIXOS_ROUTER_APPLY_RELOAD", false), "Allow runtime reload during apply (currently stub)")
 	applyTC := flag.Bool("apply-traffic-control", envBool("NIXOS_ROUTER_APPLY_TRAFFIC_CONTROL", false), "Allow applying generated QoS (tc) script during apply; requires privileges")
 	consumeGen := flag.Bool("consume-generated", envBool("NIXOS_ROUTER_CONSUME_GENERATED", false), "Consume generated fragments (nft apply, rely on system units to include fragments); safe-by-default off")
-	privApply := flag.Bool("privileged-apply", envBool("NIXOS_ROUTER_PRIVILEGED_APPLY", false), "Elevate to root for runtime actions (nft/tc); default off")
+	privApply := flag.Bool("privileged-apply", envBool("NIXOS_ROUTER_PRIVILEGED_APPLY", false), "Allow runtime actions (nft/tc); requires existing privileges; default off")
 	allowReboot := flag.Bool("allow-reboot", envBool("NIXOS_ROUTER_ALLOW_REBOOT", false), "Allow system reboot endpoint to execute reboot")
 	flag.Parse()
 

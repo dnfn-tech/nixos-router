@@ -116,5 +116,7 @@ nix build .#routerd
 - QoS 未生效：
   - 确认 `applyTrafficControl=true` 且 `privilegedApply=true`，并检查 `qos.sh` 是否根据你的 WAN/LAN 接口名称生成正确。
 - 失败与回滚：
-  - 当 `consumeGenerated` 或 reload 任一步失败时，后端将尝试把 `generated/` 回滚为 `${stateDir}/revisions/$(cat last-good.rev)/`，并在具备权限时以 `nft -f` 重新加载 last-good；随后 best-effort reload 核心单元。失败原因与回滚说明会在作业 `notes` 中体现。
+  - 当 `consumeGenerated` 或 reload 任一步失败时，后端将尝试把 `generated/` 回滚为 `${stateDir}/revisions/$(cat last-good.rev)/`，并在 `consumeGenerated` 与 `privilegedApply` 均开启时以 `nft -f` 重新加载 last-good；随后 best-effort reload 核心单元。失败原因与回滚说明会在作业 `notes` 中体现。
 
+
+- 直接消费 nft 使用 `routerd_filter` / `routerd_tmp` / `routerd_nat` 专属表并原子替换，跳过 nftables 单元 reload。旧实验版本的通用表及快照需按 backend/README.md 的升级说明人工迁移。
