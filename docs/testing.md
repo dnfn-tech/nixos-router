@@ -9,6 +9,8 @@
 
 ## 运行方式
 
+需要 x86_64 Linux 构建器支持 KVM，并允许 Nix 构建用户读写 `/dev/kvm`；此 check 声明了 `kvm` 和 `nixos-test` 构建特性，不会自动回退到软件模拟。
+
 构建并执行 check：
 
 ```bash
@@ -31,11 +33,10 @@ nix run .#checks.x86_64-linux.vm-router.driverInteractive
 2) `GET /api/v1/status` 200
 3) `POST /api/v1/session` 登录成功（测试使用 `admin/adminadmin`）
 4) client 在 LAN 上通过 DHCP 正常拿到租约（`192.168.1.0/24`）
-5) client 通过 NAT 能 `ping 10.0.0.1`（上游）
+5) 等待 router 的 WAN DHCP 地址和上游路由就绪后，client 通过 NAT 能 `ping 10.0.0.1`（上游，最多重试 120 秒）
 6) client 解析 `test.isp` 得到 `10.0.0.1`
 7) 通过 API 触发一次 apply 作业并轮询到 `success`（本测试以 generate-only 运行，不做运行态 reload）
 
 ## CI
 
-GitHub Actions 使用 `cachix/install-nix-action` 运行该 check；若宿主支持 KVM，会尝试开放 `/dev/kvm` 以加速虚拟化（不可用时自动回退纯 QEMU）。
-
+GitHub Actions 使用 `cachix/install-nix-action` 运行该 check；运行前检查并开放 `/dev/kvm`。宿主没有 KVM 设备或设备不可读写时直接失败，需要改用支持 KVM 的 runner。

@@ -76,7 +76,10 @@
             client.succeed("sh -c 'i=0; while [ $i -lt 120 ]; do if journalctl -u systemd-networkd --no-pager | grep -E \"DHCPv4 address 192\\\\.168\\\\.1\\\\.\"; then exit 0; fi; i=$((i+1)); sleep 1; done; exit 1'")
 
             # 5) client 经 NAT 能 ping 通 10.0.0.1（上游 upstream）
-            client.succeed("ping -c1 -W2 10.0.0.1")
+            # LAN 租约与 WAN DHCP 独立完成；先等 WAN 地址和直连路由就绪。
+            router.wait_until_succeeds("ip -4 -o addr show dev eth1 scope global | grep -E 'inet 10[.]0[.]0[.][0-9]+/24 '", timeout=120)
+            router.wait_until_succeeds("ip -4 route get 10.0.0.1 | grep -E 'dev eth1 .*src 10[.]0[.]0[.]'", timeout=120)
+            client.wait_until_succeeds("ping -c1 -W2 10.0.0.1", timeout=120)
 
             # 6) client 经 dnsmasq 解析 test.isp -> 10.0.0.1
             client.succeed("getent hosts test.isp | grep 10.0.0.1")

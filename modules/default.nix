@@ -26,10 +26,10 @@ in
       type = lib.types.bool;
       default = false;
       description = ''
-        是否在 apply 时尝试执行运行态 reload（best-effort，可能失败不致命）。
+        是否在 apply 时尝试执行运行态 reload；核心单元失败时报告失败并尝试回滚。
         注意：要真正执行到 systemctl reload/try-restart 等动作，建议结合
         `privilegedApply = true;` 以 root 账户运行本服务；默认为安全考虑不提升权限，
-        开启本开关但不提权时，后端会记录失败并继续完成“仅生成”。
+        开启本开关但不提权时，systemctl 可能因权限不足而失败。
       '';
     };
 
@@ -38,7 +38,7 @@ in
       default = false;
       description = ''
         是否允许在 apply 时尝试应用 QoS 生成脚本（qos.sh，需要 CAP_NET_ADMIN）。
-        仅当 `applyReload = true` 时才会尝试执行；默认关闭，仅生成片段。
+        仅当 `applyReload = true` 且 `privilegedApply = true` 时执行；默认关闭，仅生成片段。
         如需真正执行 tc，请同时设置 `privilegedApply = true;`（root 运行）。
         也可通过环境变量 `NIXOS_ROUTER_APPLY_TRAFFIC_CONTROL=1` 控制。
       '';
@@ -94,7 +94,8 @@ in
       default = false;
       description = ''
         由模块轻量接线消费部分生成片段（保守默认关闭）：
-        - dnsmasq：通过 extraConfig 包含 “${cfg.stateDir}/generated/dnsmasq.conf.fragment”
+        - nftables：传递消费开关，结合 applyReload/privilegedApply 应用专属表。
+        - dnsmasq：通过 settings.conf-file 包含 “${cfg.stateDir}/generated/dnsmasq.conf.fragment”
         仅当你明确希望直接采用生成片段时再开启，避免影响现有网络配置。
       '';
     };
@@ -111,6 +112,8 @@ in
       description = "NixOS Router Backend API";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
+      path = [ pkgs.systemd ]
+        ++ lib.optionals cfg.privilegedApply [ pkgs.nftables pkgs.iproute2 ];
       serviceConfig = {
         ExecStart = lib.concatStringsSep " " (
           [ "${routerdPkg}/bin/routerd"
@@ -137,6 +140,8 @@ in
         NIXOS_ROUTER_DEV = lib.boolToString cfg.dev;
         NIXOS_ROUTER_ALLOW_REBOOT = lib.boolToString cfg.allowReboot;
         NIXOS_ROUTER_APPLY_TRAFFIC_CONTROL = lib.boolToString cfg.applyTrafficControl;
+        NIXOS_ROUTER_CONSUME_GENERATED = lib.boolToString cfg.consumeGenerated;
+        NIXOS_ROUTER_PRIVILEGED_APPLY = lib.boolToString cfg.privilegedApply;
       };
     };
 
@@ -152,7 +157,9 @@ in
     );
 
     # 可选：消费 dnsmasq 生成片段（不会自动启用/禁用 dnsmasq，仅追加配置）
-    services.dnsmasq.extraConfig = lib.mkIf cfg.consumeGenerated
-      ("conf-file=" + cfg.stateDir + "/generated/dnsmasq.conf.fragment");
+    services.dnsmasq.settings.conf-file = lib.mkIf cfg.consumeGenerated (lib.mkAfter (
+      lib.optional config.services.dnsmasq.resolveLocalQueries "/etc/dnsmasq-conf.conf"
+      ++ [ (toString cfg.stateDir + "/generated/dnsmasq.conf.fragment") ]
+    ));
   };
 }
