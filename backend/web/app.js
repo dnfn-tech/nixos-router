@@ -1205,15 +1205,9 @@ async function renderSSH() {
   }
 
   function setNavOpen(open) {
-    const layout = q(".layout");
-    layout?.classList.toggle("nav-open", !!open);
+    q("#top-nav")?.classList.toggle("open", !!open);
     const btn = q("#nav-toggle");
     if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
-    const backdrop = q("#sidebar-backdrop");
-    if (backdrop) {
-      if (open) backdrop.removeAttribute("hidden");
-      else backdrop.setAttribute("hidden", "");
-    }
   }
 
   async function putConfig(fullConfig) {
@@ -1366,7 +1360,7 @@ async function renderSSH() {
   }
 
   function showLoginView() {
-    const layout = q(".layout");
+    const layout = q("#main-view");
     const login = q("#login-view");
     const banner = q("#status-banner");
     layout?.classList.add("hidden");
@@ -1377,7 +1371,7 @@ async function renderSSH() {
     updateBannerApiBase();
   }
   function hideLoginView() {
-    const layout = q(".layout");
+    const layout = q("#main-view");
     const login = q("#login-view");
     layout?.classList.remove("hidden");
     login?.classList.add("hidden");
@@ -1523,55 +1517,63 @@ async function renderSSH() {
     return "服务";
   }
 
-  function renderNav(items) {
-    const nav = q("#nav-list");
-    if (!nav) return;
-    nav.innerHTML = "";
-    const all = items && items.length ? items : state.coreNav;
-    const groups = new Map();
-    for (const item of all) {
-      const g = inferNavGroup(item);
-      if (!groups.has(g)) groups.set(g, []);
-      groups.get(g).push(item);
+  function renderSectionTabs() {
+    const tabs = q("#section-tabs");
+    if (!tabs) return;
+    const hash = location.hash || "#/overview";
+    const id = (hash.replace(/^#\//, "") || "overview").split("?")[0];
+    const all = state.navItems.length ? state.navItems : state.coreNav;
+    const group = inferNavGroup(all.find((i) => i.id === id || i.path === hash) || { id });
+    const items = all.filter((item) => inferNavGroup(item) === group);
+    if (group === "状态" || items.length <= 1) {
+      tabs.classList.add("hidden");
+      tabs.innerHTML = "";
+      return;
     }
-    const order = ["状态", "网络", "服务", "系统", "高级"];
-    const keys = [...groups.keys()].sort((a, b) => {
-      const ia = order.indexOf(a);
-      const ib = order.indexOf(b);
-      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
-    });
-    for (const g of keys) {
-      const label = document.createElement("li");
-      label.className = "nav-group";
-      label.textContent = g;
-      nav.appendChild(label);
-      for (const item of groups.get(g)) {
-        const li = document.createElement("li");
-        const a = document.createElement("a");
-        a.className = "nav-link";
-        a.href = item.path || (`#/${item.id}`);
-        a.appendChild(document.createTextNode(item.label || item.id));
-        if (item.soon) {
-          const badge = document.createElement("span");
-          badge.className = "soon";
-          badge.textContent = "Soon";
-          a.appendChild(badge);
-        }
-        li.appendChild(a);
-        nav.appendChild(li);
+    tabs.classList.remove("hidden");
+    tabs.innerHTML = "";
+    for (const item of items) {
+      const a = document.createElement("a");
+      a.className = "tab-btn";
+      a.href = item.path || (`#/${item.id}`);
+      a.appendChild(document.createTextNode(item.label || item.id));
+      if (item.soon) {
+        const badge = document.createElement("span");
+        badge.className = "soon";
+        badge.textContent = "Soon";
+        a.appendChild(badge);
       }
+      if (hash === a.getAttribute("href")) a.classList.add("active");
+      tabs.appendChild(a);
     }
+  }
+
+  function renderNav(items) {
+    if (items && items.length) state.navItems = items;
+    renderSectionTabs();
     setActiveLink();
   }
 
   function setActiveLink() {
     const hash = location.hash || "#/overview";
-    qc(".nav-link").forEach(a => {
-      const href = a.getAttribute("href") || "";
-      a.classList.toggle("active", href === hash);
+    const id = (hash.replace(/^#\//, "") || "overview").split("?")[0];
+    const all = state.navItems.length ? state.navItems : state.coreNav;
+    const group = inferNavGroup(all.find((i) => i.id === id || i.path === hash) || { id });
+    const sectionByGroup = {
+      "状态": "status",
+      "网络": "network",
+      "服务": "services",
+      "系统": "system",
+      "高级": "advanced",
+    };
+    const sec = sectionByGroup[group] || "services";
+    qc("#top-nav a").forEach((a) => {
+      a.classList.toggle("active", a.dataset.section === sec);
     });
+    renderSectionTabs();
     const title = routeTitle(hash);
-    q("#page-title").textContent = title;
+    const titleEl = q("#page-title");
+    if (titleEl) titleEl.textContent = title;
   }
 
   function routeTitle(hash) {
@@ -1706,17 +1708,24 @@ async function renderSSH() {
     let configData = null;
     let healthData = null;
     let wifiCaps = null;
+    let clientCount = null;
     try {
-      const [statusRes, configRes, healthRes, wifiCapsRes] = await Promise.allSettled([
+      const [statusRes, configRes, healthRes, wifiCapsRes, clientsRes] = await Promise.allSettled([
         fetchJson("/api/v1/status"),
         fetchJson("/api/v1/config"),
         fetchJson("/api/v1/health"),
         fetchJson("/api/v1/capabilities/wifi"),
+        fetchJson("/api/v1/clients"),
       ]);
       if (statusRes.status === "fulfilled") statusData = statusRes.value;
       if (configRes.status === "fulfilled") configData = configRes.value;
       if (healthRes.status === "fulfilled") healthData = healthRes.value;
       if (wifiCapsRes.status === "fulfilled") wifiCaps = wifiCapsRes.value;
+      if (clientsRes.status === "fulfilled") {
+        const raw = clientsRes.value;
+        const list = Array.isArray(raw) ? raw : (raw?.clients || raw?.items || []);
+        clientCount = Array.isArray(list) ? list.length : null;
+      }
       if (statusRes.status === "fulfilled" || configRes.status === "fulfilled") {
         state.backendConnected = true;
         setBannerVisible(false);
@@ -1741,6 +1750,98 @@ async function renderSSH() {
     if (typeof wanMode === "string") summaryEntries.push(["外网模式", String(wanMode)]);
     if (lanCidr) summaryEntries.push(["内网", String(lanCidr)]);
     if (wifiAps != null) summaryEntries.push(["AP 数量", String(wifiAps)]);
+
+    const wanUp = wan?.up === true;
+    const wanDown = wan?.up === false;
+    const heroClass = wanUp ? "online" : (wanDown ? "offline" : "unknown");
+    const heroText = wanUp ? "已连接" : (wanDown ? "未连接" : "未知");
+    const formatRate = (bps) => {
+      if (typeof bps !== "number" || !Number.isFinite(bps)) return "—";
+      const bits = bps * 8;
+      if (bits >= 1e6) return `${(bits / 1e6).toFixed(1)} Mbps`;
+      if (bits >= 1e3) return `${Math.round(bits / 1e3)} Kbps`;
+      return `${Math.round(bits)} bps`;
+    };
+    const formatUptime = (secs) => {
+      const s = Number(secs);
+      if (!Number.isFinite(s)) return "—";
+      const d = Math.floor(s / 86400);
+      const h = Math.floor((s % 86400) / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      if (d > 0) return `${d}d ${h}h`;
+      if (h > 0) return `${h}h ${m}m`;
+      return `${m}m ${Math.floor(s % 60)}s`;
+    };
+    const wanAddr = wan?.cidr || wan?.address || (wanMode ? String(wanMode).toUpperCase() : "—");
+    const dash = document.createElement("div");
+    dash.className = "dashboard";
+    dash.innerHTML = `
+      <div class="hero-card ${heroClass}">
+        <div class="hero-status">
+          <div class="hero-indicator">●</div>
+          <div class="hero-text">
+            <div class="hero-label">互联网状态</div>
+            <div class="hero-value">${escapeHtml(heroText)}</div>
+          </div>
+        </div>
+        <div class="hero-details">
+          <div class="hero-detail">
+            <span class="hero-detail-label">LAN</span>
+            <span class="hero-detail-value">${escapeHtml(lanCidr || "—")}</span>
+          </div>
+          <div class="hero-detail">
+            <span class="hero-detail-label">WAN</span>
+            <span class="hero-detail-value">${escapeHtml(String(wanAddr))}</span>
+          </div>
+          <div class="hero-detail">
+            <span class="hero-detail-label">主机</span>
+            <span class="hero-detail-value">${escapeHtml(hostname || "—")}</span>
+          </div>
+        </div>
+      </div>
+      <div class="stats-grid metrics-3col">
+        <div class="stat-card metric-card">
+          <div class="metric-icon">↓</div>
+          <div class="metric-content">
+            <div class="metric-value">${escapeHtml(formatRate(wan?.rxBps))}</div>
+            <div class="metric-label">下载</div>
+          </div>
+        </div>
+        <div class="stat-card metric-card">
+          <div class="metric-icon">↑</div>
+          <div class="metric-content">
+            <div class="metric-value">${escapeHtml(formatRate(wan?.txBps))}</div>
+            <div class="metric-label">上传</div>
+          </div>
+        </div>
+        <div class="stat-card metric-card">
+          <div class="metric-icon">◆</div>
+          <div class="metric-content">
+            <div class="metric-value">${escapeHtml(clientCount == null ? "—" : String(clientCount))}</div>
+            <div class="metric-label">设备</div>
+          </div>
+        </div>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">运行时间</div>
+          <div class="stat-value">${escapeHtml(formatUptime(healthData?.uptimeSecs))}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">主机名</div>
+          <div class="stat-value">${escapeHtml(hostname || "—")}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">外网模式</div>
+          <div class="stat-value">${escapeHtml(wanMode || "—")}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">无线 AP</div>
+          <div class="stat-value">${escapeHtml(wifiAps == null ? "—" : String(wifiAps))}</div>
+        </div>
+      </div>
+    `;
+    content.insertBefore(dash, grid);
 
     grid.appendChild(renderKeyValueCard("系统概览", summaryEntries.length ? summaryEntries : [["状态", state.backendConnected ? "连接正常" : "未知"]]));
 
@@ -2122,18 +2223,18 @@ async function renderLAN() {
     state.prevHash = location.hash || "#/overview";
     renderRoute();
   });
-    const nav = q("#nav-list");
-    nav.addEventListener("click", (e) => {
+    const onNavClick = (e) => {
       const a = e.target.closest("a");
       if (!a) return;
       setNavOpen(false);
       setTimeout(setActiveLink, 0);
-    });
+    };
+    q("#top-nav")?.addEventListener("click", onNavClick);
+    q("#section-tabs")?.addEventListener("click", onNavClick);
     q("#nav-toggle")?.addEventListener("click", () => {
-      const open = !q(".layout")?.classList.contains("nav-open");
+      const open = !q("#top-nav")?.classList.contains("open");
       setNavOpen(open);
     });
-    q("#sidebar-backdrop")?.addEventListener("click", () => setNavOpen(false));
     q("#apply-undo")?.addEventListener("click", async () => {
       if (!state.pageDirty) {
         setApplyMsg("没有可撤销的更改");
