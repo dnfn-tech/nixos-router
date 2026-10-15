@@ -17,59 +17,55 @@
         <span>API 基址：<code id="banner-api-base">—</code></span>
         <button id="retry-btn" class="btn-link" type="button">重试连接</button>
       </div>
-      <div id="login-view" class="login-view hidden">
+
+      <div id="login-view" class="view login-view hidden">
         <div class="login-card">
-          <div class="brand brand-center">
-            <div class="brand-title">NixOS 路由器</div>
-            <div class="brand-subtitle">管理面板</div>
-          </div>
+          <h1>NIXOS</h1>
+          <p class="login-sub">路由器管理</p>
           <form id="login-form" class="login-form" novalidate>
-            <div class="form-row">
-              <label for="login-username">用户名</label>
-              <input id="login-username" name="username" type="text" autocomplete="username" required />
-            </div>
-            <div class="form-row">
-              <label for="login-password">密码</label>
-              <input id="login-password" name="password" type="password" autocomplete="current-password" required />
-            </div>
-            <div class="form-actions">
-              <button id="login-submit" class="btn-primary" type="submit">登录</button>
-            </div>
+            <input id="login-username" name="username" type="text" autocomplete="username" placeholder="用户名" required />
+            <input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="密码" required />
+            <button id="login-submit" type="submit">登录</button>
             <div id="login-error" class="error hidden" role="alert" aria-live="assertive"></div>
             <div class="muted small mt8">API：<code id="login-api-base"></code></div>
           </form>
         </div>
       </div>
-      <div class="layout">
-        <aside id="sidebar" class="sidebar">
-          <div class="brand">
-            <div class="brand-title">NixOS 路由器</div>
-            <div class="brand-subtitle">管理面板</div>
+
+      <div id="main-view" class="view">
+        <header class="header">
+          <button id="nav-toggle" class="menu-toggle" type="button" aria-controls="top-nav" aria-expanded="false" aria-label="打开导航">
+            <span></span><span></span><span></span>
+          </button>
+          <div class="logo">
+            <span class="logo-mark">◆</span>
+            <span>NIXOS</span>
           </div>
-          <nav aria-label="主导航">
-            <ul id="nav-list" class="nav-list"></ul>
+          <nav id="top-nav" class="nav" aria-label="主导航">
+            <a href="#/overview" data-section="status">总览</a>
+            <a href="#/wan" data-section="network">网络</a>
+            <a href="#/ssh" data-section="services">服务</a>
+            <a href="#/system" data-section="system">系统</a>
+            <a href="#/qos" data-section="advanced">高级 <span class="soon">Soon</span></a>
           </nav>
-          <div class="sidebar-foot">
-            <small id="sidebar-api-hint"></small>
-            <div class="user-row">
-              <span id="user-display" class="muted"></span>
-              <button id="logout-btn" class="btn-link" type="button">退出</button>
-            </div>
+          <div class="header-actions">
+            <span id="apply-dirty" class="dirty-indicator hidden">未保存</span>
+            <span id="apply-msg" class="apply-msg" role="status" aria-live="polite"></span>
+            <button id="apply-undo" class="action-btn" type="button">撤销</button>
+            <button id="apply-save" class="action-btn" type="button">保存</button>
+            <button id="apply-run" class="action-btn" type="button">应用</button>
+            <span id="user-display" class="user-display"></span>
+            <button id="logout-btn" class="logout-btn" type="button">退出</button>
           </div>
-        </aside>
-        <main id="main" class="main">
-          <header id="page-header" class="page-header">
-            <h1 id="page-title">总览</h1>
-          </header>
-          <section id="page-content" class="page-content">
-            <!-- 初始内容由 app.js 渲染 -->
-          </section>
+        </header>
+        <main class="content">
+          <nav id="section-tabs" class="tabs hidden" aria-label="分区"></nav>
+          <h2 id="page-title">总览</h2>
+          <section id="page-content" class="page-content"></section>
+          <p id="sidebar-api-hint" class="api-hint"></p>
         </main>
       </div>
     </div>
-    <noscript>
-      需要启用 JavaScript 才能使用此页面。
-    </noscript>
+    <noscript>需要启用 JavaScript 才能使用此页面。</noscript>
   </body>
-  </html>
-
+</html>

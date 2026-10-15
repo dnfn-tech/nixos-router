@@ -867,93 +867,16 @@ async function renderSSH() {
       setBackupMsg(`恢复失败：${e?.message || "未知错误"}`);
     }
   });
-    // 生成配置（不应用运行态）
-    const applyCard = document.createElement("div");
-    applyCard.className = "card";
-    applyCard.innerHTML = `
-      <h3>生成配置（不应用运行态）</h3>
+    const applyNote = document.createElement("div");
+    applyNote.className = "card";
+    applyNote.innerHTML = `
+      <h3>应用配置</h3>
       <p class="muted small">
-        该操作只会在服务器 <code>stateDir</code> 下生成/更新配置片段，
-        不会重载网络服务或切换当前运行态。后续应用将于下个里程碑实现。
+        生成与应用已并入顶部 Apply 条。「保存」写入配置（PUT /api/v1/config），
+        「应用配置」提交作业（POST /api/v1/apply，默认仅生成、不切换运行态）。
       </p>
-      <div class="form-actions">
-        <button id="apply-generate-btn" class="btn-primary" type="button">生成配置（不应用运行态）</button>
-      </div>
-      <div id="apply-result" class="mt8"></div>
     `;
-    grid.appendChild(applyCard);
-
-    const resultEl = applyCard.querySelector("#apply-result");
-    const btn = applyCard.querySelector("#apply-generate-btn");
-    btn?.addEventListener("click", async () => {
-      btn.setAttribute("disabled", "true");
-      resultEl.innerHTML = `<span class="muted">正在请求生成...</span>`;
-      try {
-        // 最小对接：POST /api/v1/apply（不带请求体，后端默认为 generate-only）
-        const res = await fetchJson("/api/v1/apply", { method: "POST" });
-        const jobId = res?.jobId || res?.id;
-        const mode = res?.mode || "generate-only";
-        const appliedRuntime = res?.appliedRuntime;
-
-        const head = document.createElement("div");
-        head.className = "kv";
-        const headRows = [
-          ["jobId", String(jobId ?? "-")],
-          ["mode", String(mode)],
-          ["appliedRuntime", String(appliedRuntime ?? false)],
-        ].map(([k, v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(v)}</div>`).join("");
-        head.innerHTML = headRows;
-
-        // 展示返回 JSON
-        const raw = document.createElement("pre");
-        raw.className = "json-view";
-        raw.textContent = JSON.stringify(res, null, 2);
-
-        resultEl.innerHTML = "";
-        const resCard = document.createElement("div");
-        resCard.className = "card";
-        resCard.innerHTML = `<h3>作业已提交</h3>`;
-        resCard.appendChild(head);
-        resCard.appendChild(raw);
-        resultEl.appendChild(resCard);
-
-        // 单次再拉取作业状态
-        if (jobId) {
-          try {
-            const job = await fetchJson(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
-            const jobCard = document.createElement("div");
-            jobCard.className = "card";
-            const status = job?.status || job?.state || "-";
-            const errMsg = job?.error || job?.err || null;
-            const lines = [
-              ["状态", String(status)],
-              ...(job?.startedAt ? [["开始时间", String(job.startedAt)]] : []),
-              ...(job?.finishedAt ? [["完成时间", String(job.finishedAt)]] : []),
-              ...(errMsg ? [["错误", String(errMsg)]] : []),
-            ];
-            jobCard.appendChild(renderKeyValueCard("作业状态", lines));
-            const jobRaw = document.createElement("pre");
-            jobRaw.className = "json-view";
-            jobRaw.textContent = JSON.stringify(job, null, 2);
-            jobCard.appendChild(jobRaw);
-            resultEl.appendChild(jobCard);
-          } catch (e) {
-            const errCard = document.createElement("div");
-            errCard.className = "card";
-            errCard.innerHTML = `<h3>作业状态查询失败</h3><p class="muted">${escapeHtml(e?.message || "未知错误")}</p>`;
-            resultEl.appendChild(errCard);
-          }
-        }
-      } catch (e) {
-        const err = document.createElement("div");
-        err.className = "error";
-        err.textContent = `生成失败：${e?.status === 401 ? "未登录或会话已过期" : (e?.message || "未知错误")}`;
-        resultEl.innerHTML = "";
-        resultEl.appendChild(err);
-      } finally {
-        btn.removeAttribute("disabled");
-      }
-    });
+    grid.appendChild(applyNote);
 
     // 最近作业
     try {
@@ -1208,25 +1131,26 @@ async function renderSSH() {
     currentUser: null,
     configCache: null,
     pageDirty: false,
+    pageUx: null,
     prevHash: null,
     suppressHashRevert: false,
     clientsPatchAvailable: null,
     navItems: [],
     coreNav: [
-      { id: "overview", label: "总览", path: "#/overview" },
-      { id: "wan", label: "外网", path: "#/wan" },
-      { id: "lan", label: "内网", path: "#/lan" },
-      { id: "wifi", label: "无线", path: "#/wifi" },
-      { id: "clients", label: "客户端", path: "#/clients" },
-      { id: "dns", label: "DNS", path: "#/dns" },
-      { id: "firewall", label: "防火墙", path: "#/firewall" },
-      { id: "ssh", label: "SSH", path: "#/ssh" },
-      { id: "system", label: "系统", path: "#/system" },
-      { id: "ddns", label: "DDNS", path: "#/ddns" },
-      { id: "qos", label: "QoS", path: "#/qos" },
-      { id: "parental", label: "家长控制", path: "#/parental" },
-      { id: "ipv6", label: "IPv6", path: "#/ipv6" },
-      { id: "plugins", label: "插件", path: "#/plugins" },
+      { id: "overview", label: "总览", path: "#/overview", group: "状态" },
+      { id: "wan", label: "WAN", path: "#/wan", group: "网络" },
+      { id: "lan", label: "LAN", path: "#/lan", group: "网络" },
+      { id: "clients", label: "客户端", path: "#/clients", group: "网络" },
+      { id: "dns", label: "DNS", path: "#/dns", group: "网络" },
+      { id: "wifi", label: "WiFi", path: "#/wifi", group: "网络" },
+      { id: "firewall", label: "防火墙", path: "#/firewall", group: "网络" },
+      { id: "ssh", label: "SSH", path: "#/ssh", group: "服务" },
+      { id: "plugins", label: "插件", path: "#/plugins", group: "服务" },
+      { id: "system", label: "系统", path: "#/system", group: "系统" },
+      { id: "qos", label: "QoS", path: "#/qos", group: "高级", soon: true },
+      { id: "parental", label: "家长控制", path: "#/parental", group: "高级", soon: true },
+      { id: "ddns", label: "DDNS", path: "#/ddns", group: "高级", soon: true },
+      { id: "ipv6", label: "IPv6", path: "#/ipv6", group: "高级", soon: true },
     ],
   };
 
@@ -1250,35 +1174,40 @@ async function renderSSH() {
     return state.configCache;
   }
 
+  function syncDirtyIndicator() {
+    const hidden = !state.pageDirty;
+    q("#ux-dirty")?.classList.toggle("hidden", hidden);
+    q("#apply-dirty")?.classList.toggle("hidden", hidden);
+  }
+  function setApplyMsg(text) {
+    const el = q("#apply-msg");
+    if (el) el.textContent = text || "";
+  }
+  function setApplyBusy(busy) {
+    ["#apply-undo", "#apply-save", "#apply-run", "#nav-toggle"].forEach((sel) => {
+      const el = q(sel);
+      if (!el) return;
+      if (busy) el.setAttribute("disabled", "true");
+      else el.removeAttribute("disabled");
+    });
+  }
   function markDirty() {
-    if (!state.pageDirty) {
-      state.pageDirty = true;
-      const ind = q("#ux-dirty");
-      if (ind) ind.classList.remove("hidden");
-    }
+    state.pageDirty = true;
+    syncDirtyIndicator();
   }
   function clearDirty() {
     state.pageDirty = false;
-    const ind = q("#ux-dirty");
-    if (ind) ind.classList.add("hidden");
+    syncDirtyIndicator();
   }
 
-  function mountUxBar(container, { onSave, onSaveAndGenerate }) {
-    const bar = document.createElement("div");
-    bar.className = "ux-bar";
-    bar.innerHTML = `
-      <span id="ux-dirty" class="dirty-indicator hidden">有未保存的更改</span>
-      <span class="spacer"></span>
-      <button id="ux-save" class="btn">保存</button>
-      <button id="ux-save-generate" class="btn primary">保存并生成配置</button>
-    `;
-    container.appendChild(bar);
-    q("#ux-save", bar)?.addEventListener("click", async () => {
-      await onSave?.();
-    });
-    q("#ux-save-generate", bar)?.addEventListener("click", async () => {
-      await onSaveAndGenerate?.();
-    });
+  function mountUxBar(_container, handlers) {
+    state.pageUx = handlers || null;
+  }
+
+  function setNavOpen(open) {
+    q("#top-nav")?.classList.toggle("open", !!open);
+    const btn = q("#nav-toggle");
+    if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
   }
 
   async function putConfig(fullConfig) {
@@ -1431,7 +1360,7 @@ async function renderSSH() {
   }
 
   function showLoginView() {
-    const layout = q(".layout");
+    const layout = q("#main-view");
     const login = q("#login-view");
     const banner = q("#status-banner");
     layout?.classList.add("hidden");
@@ -1442,7 +1371,7 @@ async function renderSSH() {
     updateBannerApiBase();
   }
   function hideLoginView() {
-    const layout = q(".layout");
+    const layout = q("#main-view");
     const login = q("#login-view");
     layout?.classList.remove("hidden");
     login?.classList.add("hidden");
@@ -1574,35 +1503,77 @@ async function renderSSH() {
     return out;
   }
 
-  function renderNav(items) {
-    const nav = q("#nav-list");
-    if (!nav) return;
-    nav.innerHTML = "";
-    const current = location.hash || "#/overview";
-    const all = items && items.length ? items : state.coreNav;
-    for (const item of all) {
-      const li = document.createElement("li");
-      const a = document.createElement("a");
-      a.className = "nav-link";
-      a.href = item.path || (`#/${item.id}`);
-      a.textContent = item.label || item.id;
-      if (current === a.href.split("#")[1] ? "#" + a.href.split("#")[1] : a.getAttribute("href")) {
-        // no-op; rely on hashchange to set active
-      }
-      li.appendChild(a);
-      nav.appendChild(li);
+  function inferNavGroup(item) {
+    const id = String(item?.id || "");
+    const known = {
+      overview: "状态",
+      wan: "网络", lan: "网络", clients: "网络", dns: "网络", wifi: "网络", firewall: "网络",
+      ssh: "服务", plugins: "服务",
+      system: "系统",
+      qos: "高级", parental: "高级", ddns: "高级", ipv6: "高级",
+    };
+    if (item?.group) return item.group;
+    if (known[id]) return known[id];
+    return "服务";
+  }
+
+  function renderSectionTabs() {
+    const tabs = q("#section-tabs");
+    if (!tabs) return;
+    const hash = location.hash || "#/overview";
+    const id = (hash.replace(/^#\//, "") || "overview").split("?")[0];
+    const all = state.navItems.length ? state.navItems : state.coreNav;
+    const group = inferNavGroup(all.find((i) => i.id === id || i.path === hash) || { id });
+    const items = all.filter((item) => inferNavGroup(item) === group);
+    if (group === "状态" || items.length <= 1) {
+      tabs.classList.add("hidden");
+      tabs.innerHTML = "";
+      return;
     }
+    tabs.classList.remove("hidden");
+    tabs.innerHTML = "";
+    for (const item of items) {
+      const a = document.createElement("a");
+      a.className = "tab-btn";
+      a.href = item.path || (`#/${item.id}`);
+      a.appendChild(document.createTextNode(item.label || item.id));
+      if (item.soon) {
+        const badge = document.createElement("span");
+        badge.className = "soon";
+        badge.textContent = "Soon";
+        a.appendChild(badge);
+      }
+      if (hash === a.getAttribute("href")) a.classList.add("active");
+      tabs.appendChild(a);
+    }
+  }
+
+  function renderNav(items) {
+    if (items && items.length) state.navItems = items;
+    renderSectionTabs();
     setActiveLink();
   }
 
   function setActiveLink() {
     const hash = location.hash || "#/overview";
-    qc(".nav-link").forEach(a => {
-      const href = a.getAttribute("href") || "";
-      a.classList.toggle("active", href === hash);
+    const id = (hash.replace(/^#\//, "") || "overview").split("?")[0];
+    const all = state.navItems.length ? state.navItems : state.coreNav;
+    const group = inferNavGroup(all.find((i) => i.id === id || i.path === hash) || { id });
+    const sectionByGroup = {
+      "状态": "status",
+      "网络": "network",
+      "服务": "services",
+      "系统": "system",
+      "高级": "advanced",
+    };
+    const sec = sectionByGroup[group] || "services";
+    qc("#top-nav a").forEach((a) => {
+      a.classList.toggle("active", a.dataset.section === sec);
     });
+    renderSectionTabs();
     const title = routeTitle(hash);
-    q("#page-title").textContent = title;
+    const titleEl = q("#page-title");
+    if (titleEl) titleEl.textContent = title;
   }
 
   function routeTitle(hash) {
@@ -1721,6 +1692,7 @@ async function renderSSH() {
   }
 
   function clearMain() {
+    state.pageUx = null;
     const content = q("#page-content");
     content.innerHTML = "";
     return content;
@@ -1736,17 +1708,24 @@ async function renderSSH() {
     let configData = null;
     let healthData = null;
     let wifiCaps = null;
+    let clientCount = null;
     try {
-      const [statusRes, configRes, healthRes, wifiCapsRes] = await Promise.allSettled([
+      const [statusRes, configRes, healthRes, wifiCapsRes, clientsRes] = await Promise.allSettled([
         fetchJson("/api/v1/status"),
         fetchJson("/api/v1/config"),
         fetchJson("/api/v1/health"),
         fetchJson("/api/v1/capabilities/wifi"),
+        fetchJson("/api/v1/clients"),
       ]);
       if (statusRes.status === "fulfilled") statusData = statusRes.value;
       if (configRes.status === "fulfilled") configData = configRes.value;
       if (healthRes.status === "fulfilled") healthData = healthRes.value;
       if (wifiCapsRes.status === "fulfilled") wifiCaps = wifiCapsRes.value;
+      if (clientsRes.status === "fulfilled") {
+        const raw = clientsRes.value;
+        const list = Array.isArray(raw) ? raw : (raw?.clients || raw?.items || []);
+        clientCount = Array.isArray(list) ? list.length : null;
+      }
       if (statusRes.status === "fulfilled" || configRes.status === "fulfilled") {
         state.backendConnected = true;
         setBannerVisible(false);
@@ -1771,6 +1750,98 @@ async function renderSSH() {
     if (typeof wanMode === "string") summaryEntries.push(["外网模式", String(wanMode)]);
     if (lanCidr) summaryEntries.push(["内网", String(lanCidr)]);
     if (wifiAps != null) summaryEntries.push(["AP 数量", String(wifiAps)]);
+
+    const wanUp = wan?.up === true;
+    const wanDown = wan?.up === false;
+    const heroClass = wanUp ? "online" : (wanDown ? "offline" : "unknown");
+    const heroText = wanUp ? "已连接" : (wanDown ? "未连接" : "未知");
+    const formatRate = (bps) => {
+      if (typeof bps !== "number" || !Number.isFinite(bps)) return "—";
+      const bits = bps * 8;
+      if (bits >= 1e6) return `${(bits / 1e6).toFixed(1)} Mbps`;
+      if (bits >= 1e3) return `${Math.round(bits / 1e3)} Kbps`;
+      return `${Math.round(bits)} bps`;
+    };
+    const formatUptime = (secs) => {
+      const s = Number(secs);
+      if (!Number.isFinite(s)) return "—";
+      const d = Math.floor(s / 86400);
+      const h = Math.floor((s % 86400) / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      if (d > 0) return `${d}d ${h}h`;
+      if (h > 0) return `${h}h ${m}m`;
+      return `${m}m ${Math.floor(s % 60)}s`;
+    };
+    const wanAddr = wan?.cidr || wan?.address || (wanMode ? String(wanMode).toUpperCase() : "—");
+    const dash = document.createElement("div");
+    dash.className = "dashboard";
+    dash.innerHTML = `
+      <div class="hero-card ${heroClass}">
+        <div class="hero-status">
+          <div class="hero-indicator">●</div>
+          <div class="hero-text">
+            <div class="hero-label">互联网状态</div>
+            <div class="hero-value">${escapeHtml(heroText)}</div>
+          </div>
+        </div>
+        <div class="hero-details">
+          <div class="hero-detail">
+            <span class="hero-detail-label">LAN</span>
+            <span class="hero-detail-value">${escapeHtml(lanCidr || "—")}</span>
+          </div>
+          <div class="hero-detail">
+            <span class="hero-detail-label">WAN</span>
+            <span class="hero-detail-value">${escapeHtml(String(wanAddr))}</span>
+          </div>
+          <div class="hero-detail">
+            <span class="hero-detail-label">主机</span>
+            <span class="hero-detail-value">${escapeHtml(hostname || "—")}</span>
+          </div>
+        </div>
+      </div>
+      <div class="stats-grid metrics-3col">
+        <div class="stat-card metric-card">
+          <div class="metric-icon">↓</div>
+          <div class="metric-content">
+            <div class="metric-value">${escapeHtml(formatRate(wan?.rxBps))}</div>
+            <div class="metric-label">下载</div>
+          </div>
+        </div>
+        <div class="stat-card metric-card">
+          <div class="metric-icon">↑</div>
+          <div class="metric-content">
+            <div class="metric-value">${escapeHtml(formatRate(wan?.txBps))}</div>
+            <div class="metric-label">上传</div>
+          </div>
+        </div>
+        <div class="stat-card metric-card">
+          <div class="metric-icon">◆</div>
+          <div class="metric-content">
+            <div class="metric-value">${escapeHtml(clientCount == null ? "—" : String(clientCount))}</div>
+            <div class="metric-label">设备</div>
+          </div>
+        </div>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">运行时间</div>
+          <div class="stat-value">${escapeHtml(formatUptime(healthData?.uptimeSecs))}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">主机名</div>
+          <div class="stat-value">${escapeHtml(hostname || "—")}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">外网模式</div>
+          <div class="stat-value">${escapeHtml(wanMode || "—")}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">无线 AP</div>
+          <div class="stat-value">${escapeHtml(wifiAps == null ? "—" : String(wifiAps))}</div>
+        </div>
+      </div>
+    `;
+    content.insertBefore(dash, grid);
 
     grid.appendChild(renderKeyValueCard("系统概览", summaryEntries.length ? summaryEntries : [["状态", state.backendConnected ? "连接正常" : "未知"]]));
 
@@ -2152,12 +2223,62 @@ async function renderLAN() {
     state.prevHash = location.hash || "#/overview";
     renderRoute();
   });
-    const nav = q("#nav-list");
-    nav.addEventListener("click", (e) => {
+    const onNavClick = (e) => {
       const a = e.target.closest("a");
       if (!a) return;
-      // Let browser handle hash change; no preventDefault needed
+      setNavOpen(false);
       setTimeout(setActiveLink, 0);
+    };
+    q("#top-nav")?.addEventListener("click", onNavClick);
+    q("#section-tabs")?.addEventListener("click", onNavClick);
+    q("#nav-toggle")?.addEventListener("click", () => {
+      const open = !q("#top-nav")?.classList.contains("open");
+      setNavOpen(open);
+    });
+    q("#apply-undo")?.addEventListener("click", async () => {
+      if (!state.pageDirty) {
+        setApplyMsg("没有可撤销的更改");
+        return;
+      }
+      clearDirty();
+      state.configCache = null;
+      setApplyMsg("已撤销未保存的更改");
+      await renderRoute();
+    });
+    q("#apply-save")?.addEventListener("click", async () => {
+      const fn = state.pageUx?.onSave;
+      if (!fn) {
+        setApplyMsg("当前页面没有可保存的更改");
+        return;
+      }
+      setApplyBusy(true);
+      try {
+        await fn();
+        if (!state.pageDirty) setApplyMsg("已保存");
+      } finally {
+        setApplyBusy(false);
+      }
+    });
+    q("#apply-run")?.addEventListener("click", async () => {
+      setApplyBusy(true);
+      setApplyMsg("正在应用配置…");
+      try {
+        if (state.pageDirty && state.pageUx?.onSave) {
+          await state.pageUx.onSave();
+          if (state.pageDirty) {
+            setApplyMsg("保存未完成，已取消应用");
+            return;
+          }
+        }
+        const res = await fetchJson("/api/v1/apply", { method: "POST" });
+        const jobId = res?.jobId || res?.id;
+        const mode = res?.mode || "generate-only";
+        setApplyMsg(jobId ? `已提交 ${mode} 作业 ${jobId}` : `已提交应用（${mode}）`);
+      } catch (e) {
+        setApplyMsg(`应用失败：${e?.status === 401 ? "未登录或会话已过期" : (e?.message || "未知错误")}`);
+      } finally {
+        setApplyBusy(false);
+      }
     });
     const retry = q("#retry-btn");
     retry?.addEventListener("click", async () => {
