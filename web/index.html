@@ -20,6 +20,7 @@
       <div id="login-view" class="login-view hidden">
         <div class="login-card">
           <div class="brand brand-center">
+            <div class="brand-kicker">NIXOS ROUTER</div>
             <div class="brand-title">NixOS 路由器</div>
             <div class="brand-subtitle">管理面板</div>
           </div>
@@ -41,8 +42,10 @@
         </div>
       </div>
       <div class="layout">
+        <div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
         <aside id="sidebar" class="sidebar">
           <div class="brand">
+            <div class="brand-kicker">NIXOS ROUTER</div>
             <div class="brand-title">NixOS 路由器</div>
             <div class="brand-subtitle">管理面板</div>
           </div>
@@ -57,14 +60,25 @@
             </div>
           </div>
         </aside>
-        <main id="main" class="main">
-          <header id="page-header" class="page-header">
-            <h1 id="page-title">总览</h1>
+        <div class="main-col">
+          <header id="apply-bar" class="apply-bar">
+            <button id="nav-toggle" class="btn nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false">菜单</button>
+            <span id="apply-dirty" class="dirty-indicator hidden">有未保存的更改</span>
+            <span id="apply-msg" class="apply-msg" role="status" aria-live="polite"></span>
+            <span class="spacer"></span>
+            <button id="apply-undo" class="btn" type="button">撤销</button>
+            <button id="apply-save" class="btn" type="button">保存</button>
+            <button id="apply-run" class="btn primary" type="button">应用配置</button>
           </header>
-          <section id="page-content" class="page-content">
-            <!-- 初始内容由 app.js 渲染 -->
-          </section>
-        </main>
+          <main id="main" class="main">
+            <header id="page-header" class="page-header">
+              <h1 id="page-title">总览</h1>
+            </header>
+            <section id="page-content" class="page-content">
+              <!-- 初始内容由 app.js 渲染 -->
+            </section>
+          </main>
+        </div>
       </div>
     </div>
     <noscript>
@@ -72,4 +86,3 @@
     </noscript>
   </body>
   </html>
-

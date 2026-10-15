@@ -92,5 +92,12 @@
     - 作业状态标记为 `failed`，审计包含失败原因与回滚说明
   - 默认值不变：`applyReload=false`、`consumeGenerated=false`、`applyTrafficControl=false`、`privilegedApply=false`，维持生产安全默认
 
+## WebUI P0（机柜台）
+- 视觉参考 [MoCI](https://hudsongraeme.github.io/MoCI/)：深底、玻璃卡片、等宽小节标题、状态色绿/黄/红。未移植 MoCI 源码或 ubus。
+- 布局：保留左侧栏，并按状态 / 网络 / 服务 / 系统 / 高级分组。高级（QoS、家长控制、DDNS、IPv6）标 Soon，不新增真编辑。
+- 主区顶部 sticky Apply 条：脏状态、撤销、保存（既有 `PUT /api/v1/config`）、应用配置（`POST /api/v1/apply`）。系统页旧「生成配置」按钮并入该条。
+- 视口 ≤768px：侧栏改为抽屉，Apply 条保留。API 与 hash 路由不变。
+- `web/` 与 `backend/web/` 静态资源保持同步，嵌入仍以 `backend/web` 为准。
+
 - 审查修复：nft 片段使用专属表并在单事务内替换；直接消费后跳过 nftables 单元 reload。NixOS 模块传递两个后端开关并提供 nft/tc PATH，dnsmasq 接线使用当前 nixpkgs 的 settings.conf-file。
 - 验证覆盖：32 组运行态开关/失败组合、隔离网络命名空间内的真实 nft 原子替换/删除/回滚、NixOS 模块默认与显式启用配置评估。
