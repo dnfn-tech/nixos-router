@@ -3,7 +3,7 @@ let
   flake = builtins.getFlake (toString ../.);
   nixpkgs = flake.inputs.nixpkgs;
   lib = nixpkgs.lib;
-  evaluate = enabled:
+  evaluate = enabled: extra:
     (import (nixpkgs + "/nixos/lib/eval-config.nix") {
       system = builtins.currentSystem;
       modules = [
@@ -17,17 +17,19 @@ let
             privilegedApply = enabled;
             applyTrafficControl = enabled;
           };
+          networking.dhcpcd.enable = lib.mkDefault false;
           # The include must compose with operator-provided dnsmasq settings.
           services.dnsmasq.settings.conf-file = [ "/etc/custom-dnsmasq.conf" ];
           system.stateVersion = "26.05";
           boot.loader.grub.enable = false;
           fileSystems."/" = { device = "none"; fsType = "tmpfs"; };
         })
+        extra
       ];
     }).config;
   check = enabled:
     let
-      config = evaluate enabled;
+      config = evaluate enabled {};
       service = config.systemd.services.nixos-router-backend;
       expected = lib.boolToString enabled;
       includes = config.services.dnsmasq.settings.conf-file;
@@ -46,4 +48,21 @@ let
       (lib.concatMapStringsSep "\n" (entry: entry.message)
         (lib.filter (entry: !entry.assertion) config.assertions));
     true;
-in { defaults = check false; optedIn = check true; }
+  conflicts = [
+    { networking.networkmanager.enable = true; }
+    { systemd.network.enable = true; }
+    { networking.dhcpcd.enable = true; }
+    { services.connman.enable = true; }
+  ];
+  routerFailures = config: lib.filter
+    (entry: !entry.assertion && lib.hasPrefix "nixos-router runtime apply" entry.message)
+    config.assertions;
+  checkConflict = extra:
+    assert builtins.length (routerFailures (evaluate true extra)) > 0;
+    assert routerFailures (evaluate false extra) == [];
+    true;
+in {
+  defaults = check false;
+  optedIn = check true;
+  exclusiveManagers = map checkConflict conflicts;
+}

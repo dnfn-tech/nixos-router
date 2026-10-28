@@ -32,5 +32,14 @@ jobs:
           test -r /dev/kvm && test -w /dev/kvm
           ls -l /dev/kvm
 
-      - name: Build flake check (vm-router)
-        run: nix build .#checks.x86_64-linux.vm-router -L
+      - name: Evaluate module contracts
+        run: |
+          nix eval --impure --json --file tests/module-apply.nix
+          nix eval --impure --json --file tests/module-managed.nix
+
+      - name: Build gateway checks
+        run: |
+          nix build --keep-going \
+            .#checks.x86_64-linux.vm-router \
+            .#checks.x86_64-linux.vm-managed-router \
+            .#checks.x86_64-linux.vm-managed-wifi -L

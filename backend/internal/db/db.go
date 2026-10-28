@@ -206,7 +206,7 @@ func (d *DB) ListJobs(limit int) ([]Job, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
-	rows, err := d.SQL.Query(`SELECT id, kind, status, created_at, updated_at, payload, error FROM jobs ORDER BY created_at DESC LIMIT ?`, limit)
+	rows, err := d.SQL.Query(`SELECT id, kind, status, created_at, updated_at, COALESCE(payload, ''), COALESCE(error, '') FROM jobs ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +251,7 @@ func (d *DB) UpdateJobStatus(id, status, errText string) error {
 func (d *DB) GetJob(id string) (Job, bool, error) {
 	var j Job
 	var created, updated int64
-	err := d.SQL.QueryRow(`SELECT id, kind, status, created_at, updated_at, payload, error FROM jobs WHERE id=?`, id).
+	err := d.SQL.QueryRow(`SELECT id, kind, status, created_at, updated_at, COALESCE(payload, ''), COALESCE(error, '') FROM jobs WHERE id=?`, id).
 		Scan(&j.ID, &j.Kind, &j.Status, &created, &updated, &j.Payload, &j.Error)
 	if err == sql.ErrNoRows {
 		return Job{}, false, nil
@@ -264,3 +264,13 @@ func (d *DB) GetJob(id string) (Job, bool, error) {
 	return j, true, nil
 }
 
+// FinishJob publishes a terminal state and its result atomically. Readers must
+// never observe success with an old queued payload.
+func (d *DB) FinishJob(id, status, payload, errText string) error {
+	_, err := d.SQL.Exec(`UPDATE jobs SET status=?, updated_at=?, payload=?, error=? WHERE id=?`, status, time.Now().Unix(), payload, errText, id)
+	return err
+}
+func (d *DB) InterruptRunningJobs() error {
+	_, err := d.SQL.Exec(`UPDATE jobs SET status='failed', updated_at=?, error='interrupted by daemon restart; runtime restored from last-good' WHERE status='running'`, time.Now().Unix())
+	return err
+}

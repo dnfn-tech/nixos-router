@@ -1,2606 +1,2132 @@
 (() => {
   "use strict";
-
-  const q = (sel, el = document) => el.querySelector(sel);
-  const qc = (sel, el = document) => el.querySelectorAll(sel);
-
-  function getQueryParam(name) {
-    const url = new URL(window.location.href);
-    return url.searchParams.get(name);
-  }
-
-  async function renderPlugins() {
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-
-    // Load from API and config
-    const [base, listResp] = await Promise.all([
-      loadConfigCached(false),
-      fetchJson("/api/v1/plugins").catch(() => ({})),
-    ]);
-    const draftPlugins = deepClone(base.plugins || {});
-    const list = Array.isArray(listResp) ? listResp : (listResp?.plugins || []);
-    const card = document.createElement("div");
-    card.className = "card";
-    const body = document.createElement("div");
-    card.innerHTML = `<h3>插件管理</h3>`;
-
-    if (!Array.isArray(list) || list.length === 0) {
-      const empty = document.createElement("p");
-      empty.className = "muted";
-      empty.textContent = "未提供插件列表";
-      card.appendChild(empty);
-    } else {
-      list.forEach((p) => {
-        const name = p?.name || p?.id || p?.key;
-        if (!name) return;
-        const enabled = !!(p?.enabled ?? draftPlugins?.[name]?.enable);
-        if (!draftPlugins[name]) draftPlugins[name] = { enable: enabled, config: {} };
-        const row = document.createElement("div");
-        row.className = "form-row";
-        const lab = document.createElement("label");
-        lab.textContent = name;
-        const chk = createInput("checkbox", { checked: enabled });
-        chk.addEventListener("change", () => {
-          draftPlugins[name].enable = chk.checked;
-          markDirty();
-        });
-        row.appendChild(lab);
-        row.appendChild(chk);
-        body.appendChild(row);
-      });
-      card.appendChild(body);
-    }
-    const hint = document.createElement("div");
-    hint.className = "muted small mt8";
-    hint.textContent = "切换启用状态后保存。保存成功将刷新导航。核心内置页面只读列出，不在此处开关。";
-    card.appendChild(hint);
-    grid.appendChild(card);
-
-    mountUxBar(content, {
-      onSave: async () => {
-        // 尝试逐个 PUT /plugins/{id}；若全部 404 则回退到 PUT /config
-        const names = new Set([
-          ...Object.keys(draftPlugins || {}),
-          ...list.map(p => (typeof p === "string" ? p : (p?.name || p?.id || p?.key))).filter(Boolean),
-        ]);
-        let anySuccess = false;
-        let all404 = true;
-        let lastErr = null;
-        for (const name of names) {
-          try {
-            await putPlugin(name, draftPlugins[name]);
-            anySuccess = true;
-            all404 = false;
-          } catch (e) {
-            lastErr = e;
-            if (e?.status === 404) {
-              // keep all404 only if all fail as 404
-            } else {
-              all404 = false;
-            }
-          }
-        }
-        if (all404) {
-          const res = await saveSection("plugins", draftPlugins, { andGenerate: false });
-          if (!res.saved) { alert(`保存失败：${res.error?.message || "未知错误"}`); return; }
-        } else if (!anySuccess && lastErr) {
-          alert(`保存失败：${lastErr?.message || "未知错误"}`);
-          return;
-        }
-        await loadNav(); setActiveLink();
-      },
-      onSaveAndGenerate: async () => {
-        const names = new Set([
-          ...Object.keys(draftPlugins || {}),
-          ...list.map(p => (typeof p === "string" ? p : (p?.name || p?.id || p?.key))).filter(Boolean),
-        ]);
-        let anySuccess = false;
-        let all404 = true;
-        let lastErr = null;
-        for (const name of names) {
-          try {
-            await putPlugin(name, draftPlugins[name]);
-            anySuccess = true;
-            all404 = false;
-          } catch (e) {
-            lastErr = e;
-            if (e?.status === 404) {
-              // will consider fallback
-            } else {
-              all404 = false;
-            }
-          }
-        }
-        if (all404) {
-          const res = await saveSection("plugins", draftPlugins, { andGenerate: true });
-          if (!res.saved) { alert(`保存失败：${res.error?.message || "未知错误"}`); return; }
-        } else if (!anySuccess && lastErr) {
-          alert(`保存失败：${lastErr?.message || "未知错误"}`);
-          return;
-        } else {
-          await fetchJson("/api/v1/apply", { method: "POST" }).catch(() => {});
-        }
-        await loadNav(); setActiveLink(); alert("已保存并提交生成任务（不应用运行态）");
-      },
-    });
-  }
-
-  async function renderPluginGeneric(name) {
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-    const cfg = await loadConfigCached(false);
-    const plug = deepClone((cfg.plugins || {})[name] || null);
-    if (!plug) {
-      const card = document.createElement("div");
-      card.className = "card";
-      card.innerHTML = `<h3>插件 ${escapeHtml(name)}</h3><p class="muted">插件未启用或未提供配置</p>`;
-      grid.appendChild(card);
-      return;
-    }
-    if (!plug.config) plug.config = {};
-    const card = document.createElement("div");
-    card.className = "card";
-    const form = document.createElement("div");
-    form.className = "form";
-    const chk = createInput("checkbox", { checked: !!plug.enable });
-    chk.addEventListener("change", () => { plug.enable = chk.checked; markDirty(); });
-    form.appendChild(createRow("启用插件", chk));
-    // Render known simple KV editor for generic maps
-    Object.entries(plug.config).forEach(([k, v]) => {
-      const isSecret = /password|psk|secret|token/i.test(k);
-      const input = createInput(isSecret ? "password" : "text", { value: isSecret ? "****" : (v ?? "") });
-      input.addEventListener("input", () => { plug.config[k] = input.value; markDirty(); });
-      form.appendChild(createRow(k, input));
-    });
-    const addK = createInput("text", { placeholder: "键名" });
-    const addV = createInput("text", { placeholder: "键值" });
-    const addBtn = document.createElement("button");
-    addBtn.className = "btn";
-    addBtn.textContent = "新增键";
-    addBtn.addEventListener("click", () => {
-      const k = addK.value.trim();
-      if (!k) return;
-      plug.config[k] = addV.value;
-      addK.value = ""; addV.value = "";
-      markDirty();
-      // simple rerender append
-      const isSecret = /password|psk|secret|token/i.test(k);
-      const input = createInput(isSecret ? "password" : "text", { value: isSecret ? "****" : (plug.config[k] ?? "") });
-      input.addEventListener("input", () => { plug.config[k] = input.value; markDirty(); });
-      form.appendChild(createRow(k, input));
-    });
-    const addRow = document.createElement("div");
-    addRow.className = "form-row";
-    addRow.appendChild(addK);
-    addRow.appendChild(addV);
-    addRow.appendChild(addBtn);
-    form.appendChild(addRow);
-    card.appendChild(form);
-    grid.appendChild(card);
-
-    mountUxBar(content, {
-      onSave: async () => {
-        try {
-          await putPlugin(name, plug);
-          alert("已保存");
-        } catch (e) {
-          if (e?.status === 404) {
-            const res = await saveSection(`plugins.${name}`, plug, { andGenerate: false });
-            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存");
-          } else {
-            alert(`保存失败：${e?.message || "未知错误"}`);
-          }
-        }
-      },
-      onSaveAndGenerate: async () => {
-        try {
-          await putPlugin(name, plug);
-          await fetchJson("/api/v1/apply", { method: "POST" });
-          alert("已保存并提交生成任务（不应用运行态）");
-        } catch (e) {
-          if (e?.status === 404) {
-            const res = await saveSection(`plugins.${name}`, plug, { andGenerate: true });
-            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-            else alert("已保存并提交生成任务（不应用运行态）");
-          } else {
-            alert(`保存失败：${e?.message || "未知错误"}`);
-          }
-        }
-      },
-    });
-  }
-
-async function renderWiFi() {
-  const content = clearMain();
-  const grid = document.createElement("div");
-  grid.className = "grid";
-  content.appendChild(grid);
-  const [base, status, caps] = await Promise.all([
-    loadConfigCached(false),
-    fetchJson("/api/v1/status").catch(() => ({})),
-    fetchJson("/api/v1/capabilities/wifi").catch(() => ({})),
-  ]);
-  const draft = deepClone(base.wifi || { enable: false, bridgeToLan: true, aps: [] });
-  if (!Array.isArray(draft.aps)) draft.aps = [];
-  const maxAP = caps?.maxAP;
-
-  const card = document.createElement("div");
-  card.className = "card";
-  const form = document.createElement("div");
-  form.className = "form";
-  const chkEnable = createInput("checkbox", { checked: !!draft.enable });
-  chkEnable.addEventListener("change", () => { draft.enable = chkEnable.checked; markDirty(); });
-  form.appendChild(createRow("启用 WiFi", chkEnable));
-  const chkBridge = createInput("checkbox", { checked: !!draft.bridgeToLan });
-  chkBridge.addEventListener("change", () => { draft.bridgeToLan = chkBridge.checked; markDirty(); });
-  form.appendChild(createRow("桥接到 LAN", chkBridge));
-  if (maxAP != null) {
-    const note = document.createElement("div");
-    note.className = "muted small";
-    note.textContent = `能力限制：最多 ${maxAP} 个 AP`;
-    form.appendChild(note);
-  }
-  card.appendChild(form);
-  grid.appendChild(card);
-
-  const apsEditor = createArrayEditor({
-    title: "接入点（APs）",
-    items: () => draft.aps,
-    renderItem: (ap, idx) => {
-      const w = document.createElement("div");
-      const inSsid = createInput("text", { value: ap?.ssid || "" });
-      inSsid.addEventListener("input", () => { draft.aps[idx].ssid = inSsid.value.trim(); markDirty(); });
-      const selBand = createSelect([["2g","2.4GHz"],["5g","5GHz"],["6g","6GHz"]], ap?.band || "2g");
-      selBand.addEventListener("change", () => { draft.aps[idx].band = selBand.value; markDirty(); });
-      const inChan = createInput("number", { value: ap?.channel || "" });
-      inChan.addEventListener("input", () => { draft.aps[idx].channel = Number(inChan.value || 0); markDirty(); });
-      const inPSK = createInput("password", { value: "****" });
-      inPSK.addEventListener("input", () => { draft.aps[idx].psk = inPSK.value; markDirty(); });
-      const chkAPEn = createInput("checkbox", { checked: !!ap?.enable });
-      chkAPEn.addEventListener("change", () => { draft.aps[idx].enable = chkAPEn.checked; markDirty(); });
-      const chkGuest = createInput("checkbox", { checked: !!ap?.guest });
-      chkGuest.addEventListener("change", () => { draft.aps[idx].guest = chkGuest.checked; markDirty(); });
-      const chkIsolate = createInput("checkbox", { checked: !!ap?.isolate });
-      chkIsolate.addEventListener("change", () => { draft.aps[idx].isolate = chkIsolate.checked; markDirty(); });
-      w.appendChild(createRow("SSID", inSsid));
-      w.appendChild(createRow("频段", selBand));
-      w.appendChild(createRow("信道", inChan));
-      w.appendChild(createRow("PSK（未更改留空或 ****）", inPSK));
-      w.appendChild(createRow("启用", chkAPEn));
-      w.appendChild(createRow("访客网络", chkGuest));
-      w.appendChild(createRow("隔离客户端", chkIsolate));
-      return w;
-    },
-    onAdd: () => {
-      if (typeof maxAP === "number" && draft.aps.length >= maxAP) return;
-      draft.aps.push({ ssid: "", band: "2g", channel: 0, enable: true, guest: false, isolate: false, psk: "****" });
-    },
-  });
-  grid.appendChild(apsEditor);
-
-  // 状态只读卡
-  const wifiSt = status?.wifi || {};
-  const rows = [];
-  if (wifiSt.enabled != null) rows.push(["状态", wifiSt.enabled ? "已启用" : "未启用"]);
-  if (wifiSt.aps != null) rows.push(["AP 数量（状态）", String(wifiSt.aps)]);
-  if (rows.length) grid.appendChild(renderKeyValueCard("当前状态（只读）", rows));
-
-  mountUxBar(content, {
-    onSave: async () => {
-      const res = await saveSection("wifi", draft, { andGenerate: false });
-      if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-    },
-    onSaveAndGenerate: async () => {
-      const res = await saveSection("wifi", draft, { andGenerate: true });
-      if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-      else alert("已保存并提交生成任务（不应用运行态）");
-    },
-  });
-}
-
-async function renderDNS() {
-  const content = clearMain();
-  const grid = document.createElement("div");
-  grid.className = "grid";
-  content.appendChild(grid);
-  const base = await loadConfigCached(false);
-  const draft = deepClone(base.dns || { enableDnsmasq: true, upstreams: [], domain: "" });
-  if (!Array.isArray(draft.upstreams)) draft.upstreams = [];
-
-  const card = document.createElement("div");
-  card.className = "card";
-  const form = document.createElement("div");
-  form.className = "form";
-  const chk = createInput("checkbox", { checked: !!draft.enableDnsmasq });
-  chk.addEventListener("change", () => { draft.enableDnsmasq = chk.checked; markDirty(); });
-  form.appendChild(createRow("启用 dnsmasq", chk));
-  const inDomain = createInput("text", { value: draft.domain || "" });
-  inDomain.addEventListener("input", () => { draft.domain = inDomain.value.trim(); markDirty(); });
-  form.appendChild(createRow("域名", inDomain));
-
-  const upsEditor = createArrayEditor({
-    title: "上游 DNS（upstreams）",
-    items: () => draft.upstreams,
-    renderItem: (it, idx) => {
-      const w = document.createElement("div");
-      const inp = createInput("text", { value: it || "" });
-      inp.addEventListener("input", () => { draft.upstreams[idx] = inp.value.trim(); markDirty(); });
-      w.appendChild(createRow(`上游 #${idx+1}`, inp));
-      return w;
-    },
-    onAdd: () => { draft.upstreams.push(""); },
-  });
-
-  card.appendChild(form);
-  grid.appendChild(card);
-  grid.appendChild(upsEditor);
-
-  mountUxBar(content, {
-    onSave: async () => {
-      const res = await saveSection("dns", draft, { andGenerate: false });
-      if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-    },
-    onSaveAndGenerate: async () => {
-      const res = await saveSection("dns", draft, { andGenerate: true });
-      if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-      else alert("已保存并提交生成任务（不应用运行态）");
-    },
-  });
-}
-
-async function renderFirewall() {
-  const content = clearMain();
-  const grid = document.createElement("div");
-  grid.className = "grid";
-  content.appendChild(grid);
-  const base = await loadConfigCached(false);
-  const draft = deepClone(base.firewall || { enable: true, natEnabled: true, portForwards: [], upnp: false });
-  if (!Array.isArray(draft.portForwards)) draft.portForwards = [];
-
-  const card = document.createElement("div");
-  card.className = "card";
-  const form = document.createElement("div");
-  form.className = "form";
-  const chkEnable = createInput("checkbox", { checked: !!draft.enable });
-  chkEnable.addEventListener("change", () => { draft.enable = chkEnable.checked; markDirty(); });
-  form.appendChild(createRow("启用防火墙", chkEnable));
-  const chkNAT = createInput("checkbox", { checked: !!draft.natEnabled });
-  chkNAT.addEventListener("change", () => { draft.natEnabled = chkNAT.checked; markDirty(); });
-  form.appendChild(createRow("NAT", chkNAT));
-  const chkUPnP = createInput("checkbox", { checked: !!draft.upnp });
-  chkUPnP.addEventListener("change", () => { draft.upnp = chkUPnP.checked; markDirty(); });
-  form.appendChild(createRow("UPnP", chkUPnP));
-
-  const pfEditor = createArrayEditor({
-    title: "端口转发（portForwards）",
-    items: () => draft.portForwards,
-    renderItem: (it, idx) => {
-      const w = document.createElement("div");
-      const inName = createInput("text", { value: it?.name || "" });
-      inName.addEventListener("input", () => { draft.portForwards[idx].name = inName.value.trim(); markDirty(); });
-      const inProto = createInput("text", { value: it?.proto || "tcp" });
-      inProto.addEventListener("input", () => { draft.portForwards[idx].proto = inProto.value.trim(); markDirty(); });
-      const inExt = createInput("number", { value: it?.externalPort || "" });
-      inExt.addEventListener("input", () => { draft.portForwards[idx].externalPort = Number(inExt.value || 0); markDirty(); });
-      const inIntIP = createInput("text", { value: it?.internalIP || "" });
-      inIntIP.addEventListener("input", () => { draft.portForwards[idx].internalIP = inIntIP.value.trim(); markDirty(); });
-      const inIntPort = createInput("number", { value: it?.internalPort || "" });
-      inIntPort.addEventListener("input", () => { draft.portForwards[idx].internalPort = Number(inIntPort.value || 0); markDirty(); });
-      w.appendChild(createRow("名称", inName));
-      w.appendChild(createRow("协议", inProto));
-      w.appendChild(createRow("外部端口", inExt));
-      w.appendChild(createRow("内部 IP", inIntIP));
-      w.appendChild(createRow("内部端口", inIntPort));
-      return w;
-    },
-    onAdd: () => { draft.portForwards.push({ name: "", proto: "tcp", externalPort: 0, internalIP: "", internalPort: 0 }); },
-  });
-
-  card.appendChild(form);
-  grid.appendChild(card);
-  grid.appendChild(pfEditor);
-
-  mountUxBar(content, {
-    onSave: async () => {
-      const res = await saveSection("firewall", draft, { andGenerate: false });
-      if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-    },
-    onSaveAndGenerate: async () => {
-      const res = await saveSection("firewall", draft, { andGenerate: true });
-      if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-      else alert("已保存并提交生成任务（不应用运行态）");
-    },
-  });
-}
-
-async function renderSSH() {
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-  const [base, status] = await Promise.all([
-    loadConfigCached(false),
-    fetchJson("/api/v1/status").catch(() => ({})),
-  ]);
-  const draft = deepClone(base.ssh || { enable: true, port: 22, passwordAuth: false, authorizedKeys: [] });
-  if (!Array.isArray(draft.authorizedKeys)) draft.authorizedKeys = [];
-
-  const card = document.createElement("div");
-  card.className = "card";
-  const form = document.createElement("div");
-  form.className = "form";
-  const chkEn = createInput("checkbox", { checked: !!draft.enable });
-  chkEn.addEventListener("change", () => { draft.enable = chkEn.checked; markDirty(); });
-  form.appendChild(createRow("启用 SSH", chkEn));
-  const inPort = createInput("number", { value: draft.port ?? 22, min: 1, max: 65535 });
-  inPort.addEventListener("input", () => { draft.port = Number(inPort.value || 0); markDirty(); });
-  form.appendChild(createRow("端口", inPort));
-  const chkPwd = createInput("checkbox", { checked: !!draft.passwordAuth });
-  chkPwd.addEventListener("change", () => { draft.passwordAuth = chkPwd.checked; markDirty(); });
-  form.appendChild(createRow("允许密码登录", chkPwd));
-
-  const keysEditor = createArrayEditor({
-    title: "AuthorizedKeys",
-    items: () => draft.authorizedKeys,
-    renderItem: (it, idx) => {
-      const w = document.createElement("div");
-      const ta = document.createElement("textarea");
-      ta.value = String(it || "");
-      ta.style.width = "100%";
-      ta.rows = 3;
-      ta.addEventListener("input", () => { draft.authorizedKeys[idx] = ta.value; markDirty(); });
-      w.appendChild(ta);
-      return w;
-    },
-    onAdd: () => { draft.authorizedKeys.push(""); },
-  });
-
-  card.appendChild(form);
-  grid.appendChild(card);
-  grid.appendChild(keysEditor);
-
-  const sshStat = status?.ssh || {};
-  const rows = [];
-  if (sshStat.enabled != null) rows.push(["运行状态", sshStat.enabled ? "已启用" : "未启用"]);
-  if (sshStat.port != null) rows.push(["运行端口", String(sshStat.port)]);
-  if (rows.length) grid.appendChild(renderKeyValueCard("当前状态（只读）", rows));
-
-  mountUxBar(content, {
-    onSave: async () => {
-      const res = await saveSection("ssh", draft, { andGenerate: false });
-      if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-    },
-    onSaveAndGenerate: async () => {
-      const res = await saveSection("ssh", draft, { andGenerate: true });
-      if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-      else alert("已保存并提交生成任务（不应用运行态）");
-    },
-  });
-  }
-
-  async function renderDDNS() {
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-    const base = await loadConfigCached(false);
-    const draft = deepClone(base.ddns || { provider: "", account: "", password: "****", apiToken: "****", domain: "", hostname: "" });
-    const card = document.createElement("div");
-    card.className = "card";
-    const form = document.createElement("div");
-    form.className = "form";
-    const inProv = createInput("text", { value: draft.provider || "" });
-    inProv.addEventListener("input", () => { draft.provider = inProv.value.trim(); markDirty(); });
-    form.appendChild(createRow("服务提供商", inProv));
-    const inAcc = createInput("text", { value: draft.account || "" });
-    inAcc.addEventListener("input", () => { draft.account = inAcc.value.trim(); markDirty(); });
-    form.appendChild(createRow("账号", inAcc));
-    const inPwd = createInput("password", { value: "****" });
-    inPwd.addEventListener("input", () => { draft.password = inPwd.value; markDirty(); });
-    form.appendChild(createRow("密码（未更改留空或 ****）", inPwd));
-    const inTok = createInput("password", { value: "****" });
-    inTok.addEventListener("input", () => { draft.apiToken = inTok.value; markDirty(); });
-    form.appendChild(createRow("API Token（未更改留空或 ****）", inTok));
-    const inDom = createInput("text", { value: draft.domain || "" });
-    inDom.addEventListener("input", () => { draft.domain = inDom.value.trim(); markDirty(); });
-    form.appendChild(createRow("域名", inDom));
-    const inHost = createInput("text", { value: draft.hostname || "" });
-    inHost.addEventListener("input", () => { draft.hostname = inHost.value.trim(); markDirty(); });
-    form.appendChild(createRow("主机名", inHost));
-    card.appendChild(form);
-    grid.appendChild(card);
-
-    mountUxBar(content, {
-      onSave: async () => {
-        const res = await saveSection("ddns", draft, { andGenerate: false });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-      },
-      onSaveAndGenerate: async () => {
-        const res = await saveSection("ddns", draft, { andGenerate: true });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-        else alert("已保存并提交生成任务（不应用运行态）");
-      },
-    });
-  }
-
-  async function renderQoS() {
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-    const base = await loadConfigCached(false);
-    const draft = deepClone(base.qos || { enable: false, uploadKbps: 0, downloadKbps: 0, rules: [] });
-    if (!Array.isArray(draft.rules)) draft.rules = [];
-
-    const card = document.createElement("div");
-    card.className = "card";
-    const form = document.createElement("div");
-    form.className = "form";
-    const chk = createInput("checkbox", { checked: !!draft.enable });
-    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
-    form.appendChild(createRow("启用 QoS", chk));
-    const inUp = createInput("number", { value: draft.uploadKbps || 0, min: 0 });
-    inUp.addEventListener("input", () => { draft.uploadKbps = Number(inUp.value || 0); markDirty(); });
-    form.appendChild(createRow("上行带宽（kbps）", inUp));
-    const inDown = createInput("number", { value: draft.downloadKbps || 0, min: 0 });
-    inDown.addEventListener("input", () => { draft.downloadKbps = Number(inDown.value || 0); markDirty(); });
-    form.appendChild(createRow("下行带宽（kbps）", inDown));
-    card.appendChild(form);
-    grid.appendChild(card);
-
-    const rulesEditor = createArrayEditor({
-      title: "设备规则（rules）",
-      items: () => draft.rules,
-      renderItem: (r, idx) => {
-        const w = document.createElement("div");
-        const inDev = createInput("text", { value: r?.device || r?.mac || r?.ip || "" });
-        inDev.addEventListener("input", () => { draft.rules[idx].device = inDev.value.trim(); markDirty(); });
-        const inUpK = createInput("number", { value: r?.upKbps || 0, min: 0 });
-        inUpK.addEventListener("input", () => { draft.rules[idx].upKbps = Number(inUpK.value || 0); markDirty(); });
-        const inDownK = createInput("number", { value: r?.downKbps || 0, min: 0 });
-        inDownK.addEventListener("input", () => { draft.rules[idx].downKbps = Number(inDownK.value || 0); markDirty(); });
-        const inPri = createSelect([["low","低"],["normal","普通"],["high","高"]], r?.priority || "normal");
-        inPri.addEventListener("change", () => { draft.rules[idx].priority = inPri.value; markDirty(); });
-        w.appendChild(createRow("设备（MAC/IP）", inDev));
-        w.appendChild(createRow("上行（kbps）", inUpK));
-        w.appendChild(createRow("下行（kbps）", inDownK));
-        w.appendChild(createRow("优先级", inPri));
-        return w;
-      },
-      onAdd: () => { draft.rules.push({ device: "", upKbps: 0, downKbps: 0, priority: "normal" }); },
-    });
-    grid.appendChild(rulesEditor);
-
-    mountUxBar(content, {
-      onSave: async () => {
-        const res = await saveSection("qos", draft, { andGenerate: false });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-      },
-      onSaveAndGenerate: async () => {
-        const res = await saveSection("qos", draft, { andGenerate: true });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-        else alert("已保存并提交生成任务（不应用运行态）");
-      },
-    });
-  }
-
-  async function renderParental() {
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-    const base = await loadConfigCached(false);
-    const draft = deepClone(base.parental || { enable: false, rules: [] });
-    if (!Array.isArray(draft.rules)) draft.rules = [];
-    const card = document.createElement("div");
-    card.className = "card";
-    const form = document.createElement("div");
-    form.className = "form";
-    const chk = createInput("checkbox", { checked: !!draft.enable });
-    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
-    form.appendChild(createRow("启用家长控制", chk));
-    card.appendChild(form);
-    grid.appendChild(card);
-
-    const rulesEditor = createArrayEditor({
-      title: "规则（仅占位）",
-      items: () => draft.rules,
-      renderItem: (r, idx) => {
-        const w = document.createElement("div");
-        const inName = createInput("text", { value: r?.name || "" });
-        inName.addEventListener("input", () => { draft.rules[idx].name = inName.value.trim(); markDirty(); });
-        const inDev = createInput("text", { value: r?.device || "" });
-        inDev.addEventListener("input", () => { draft.rules[idx].device = inDev.value.trim(); markDirty(); });
-        const inDays = createInput("text", { value: r?.days || "Mon-Fri" });
-        inDays.addEventListener("input", () => { draft.rules[idx].days = inDays.value.trim(); markDirty(); });
-        const inStart = createInput("text", { value: r?.start || "21:00" });
-        inStart.addEventListener("input", () => { draft.rules[idx].start = inStart.value.trim(); markDirty(); });
-        const inEnd = createInput("text", { value: r?.end || "07:00" });
-        inEnd.addEventListener("input", () => { draft.rules[idx].end = inEnd.value.trim(); markDirty(); });
-        w.appendChild(createRow("名称", inName));
-        w.appendChild(createRow("设备", inDev));
-        w.appendChild(createRow("天（示例 Mon-Fri）", inDays));
-        w.appendChild(createRow("开始时间", inStart));
-        w.appendChild(createRow("结束时间", inEnd));
-        return w;
-      },
-      onAdd: () => { draft.rules.push({ name: "", device: "", days: "Mon-Fri", start: "21:00", end: "07:00" }); },
-    });
-    grid.appendChild(rulesEditor);
-
-    mountUxBar(content, {
-      onSave: async () => {
-        const res = await saveSection("parental", draft, { andGenerate: false });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-      },
-      onSaveAndGenerate: async () => {
-        const res = await saveSection("parental", draft, { andGenerate: true });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-        else alert("已保存并提交生成任务（不应用运行态）");
-      },
-    });
-  }
-
-  async function renderIPv6() {
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-    const base = await loadConfigCached(false);
-    const draft = deepClone(base.ipv6 || { enable: false, wan: { mode: "auto", addressCidr: "" }, lan: { enable: true, prefix: "" } });
-    if (!draft.wan) draft.wan = { mode: "auto", addressCidr: "" };
-    if (!draft.lan) draft.lan = { enable: true, prefix: "" };
-    const card = document.createElement("div");
-    card.className = "card";
-    const form = document.createElement("div");
-    form.className = "form";
-    const chk = createInput("checkbox", { checked: !!draft.enable });
-    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
-    form.appendChild(createRow("启用 IPv6", chk));
-    const selWan = createSelect([["auto","自动"],["static","静态"]], draft.wan.mode || "auto");
-    selWan.addEventListener("change", () => { draft.wan.mode = selWan.value; markDirty(); refresh(); });
-    form.appendChild(createRow("WAN 模式", selWan));
-    const inWanCIDR = createInput("text", { value: draft.wan.addressCidr || "" });
-    inWanCIDR.addEventListener("input", () => { draft.wan.addressCidr = inWanCIDR.value.trim(); markDirty(); });
-    const rowWanCIDR = createRow("WAN 静态地址/CIDR", inWanCIDR);
-    form.appendChild(rowWanCIDR);
-    const chkLan = createInput("checkbox", { checked: !!draft.lan.enable });
-    chkLan.addEventListener("change", () => { draft.lan.enable = chkLan.checked; markDirty(); });
-    form.appendChild(createRow("LAN 启用 IPv6", chkLan));
-    const inPrefix = createInput("text", { value: draft.lan.prefix || "" , placeholder: "fd00::/64"});
-    inPrefix.addEventListener("input", () => { draft.lan.prefix = inPrefix.value.trim(); markDirty(); });
-    form.appendChild(createRow("LAN 前缀/RA", inPrefix));
-    card.appendChild(form);
-    grid.appendChild(card);
-    function refresh() { rowWanCIDR.style.display = (selWan.value === "static") ? "" : "none"; }
-    refresh();
-
-    mountUxBar(content, {
-      onSave: async () => {
-        const res = await saveSection("ipv6", draft, { andGenerate: false });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-      },
-      onSaveAndGenerate: async () => {
-        const res = await saveSection("ipv6", draft, { andGenerate: true });
-        if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-        else alert("已保存并提交生成任务（不应用运行态）");
-      },
-    });
-  }
-
-  async function renderSystem() {
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-  let statusData = null;
-  let healthData = null;
-  const cfg = await loadConfigCached(false);
-  try {
-    const [s, h] = await Promise.allSettled([
-      fetchJson("/api/v1/status"),
-      fetchJson("/api/v1/health"),
-    ]);
-    if (s.status === "fulfilled") statusData = s.value;
-    if (h.status === "fulfilled") healthData = h.value;
-  } catch (_) {}
-  const sys = cfg?.system || {};
-    const sysSt = statusData?.system || {};
-    const rows = [];
-    const hostname = sysSt.hostname || sys.hostname;
-    if (hostname) rows.push(["主机名", String(hostname)]);
-    if (sys.timezone) rows.push(["时区", String(sys.timezone)]);
-    if (healthData?.uptimeSecs != null) rows.push(["运行时间", `${healthData.uptimeSecs}s`]);
-    if (healthData?.version) rows.push(["版本", String(healthData.version)]);
-    if (healthData?.startedAt) rows.push(["启动时间", String(healthData.startedAt)]);
-    grid.appendChild(renderKeyValueCard("系统（只读）", rows.length ? rows : [["信息", "未提供"]]));
-
-  // 可编辑：hostname/timezone
-  const draft = deepClone(cfg.system || {});
-  const sysCard = document.createElement("div");
-  sysCard.className = "card";
-  const form = document.createElement("div");
-  form.className = "form";
-  const inHost = createInput("text", { value: draft.hostname || "" });
-  inHost.addEventListener("input", () => { draft.hostname = inHost.value.trim(); markDirty(); });
-  const inTz = createInput("text", { value: draft.timezone || "" });
-  inTz.addEventListener("input", () => { draft.timezone = inTz.value.trim(); markDirty(); });
-  form.appendChild(createRow("主机名（保存生效）", inHost));
-  form.appendChild(createRow("时区（保存生效）", inTz));
-  sysCard.appendChild(form);
-  grid.appendChild(sysCard);
-
-  // 修改密码
-  const pwdCard = document.createElement("div");
-  pwdCard.className = "card";
-  pwdCard.innerHTML = `
-    <h3>修改密码</h3>
-    <div class="form">
-      <div class="form-row">
-        <label>当前密码</label>
-        <input id="pwd-cur" type="password" autocomplete="current-password" />
-      </div>
-      <div class="form-row">
-        <label>新密码</label>
-        <input id="pwd-new" type="password" autocomplete="new-password" />
-      </div>
-      <div class="form-row">
-        <label>确认新密码</label>
-        <input id="pwd-new2" type="password" autocomplete="new-password" />
-      </div>
-      <div class="form-actions">
-        <button id="pwd-save" class="btn">修改密码</button>
-      </div>
-      <div id="pwd-msg" class="mt8 small muted"></div>
-    </div>
-  `;
-  grid.appendChild(pwdCard);
-  q("#pwd-save", pwdCard)?.addEventListener("click", async () => {
-    const cur = q("#pwd-cur", pwdCard)?.value || "";
-    const nw = q("#pwd-new", pwdCard)?.value || "";
-    const nw2 = q("#pwd-new2", pwdCard)?.value || "";
-    const msg = q("#pwd-msg", pwdCard);
-    const setMsg = (t, ok=false) => { if (msg) { msg.textContent = t; msg.style.color = ok ? "var(--accent)" : "var(--muted)"; } };
-    if (!nw || nw !== nw2) { setMsg("新密码不一致或为空"); return; }
-    try {
-      // 优先尝试 /session/password
-      const body1 = { current: cur, new: nw, currentPassword: cur, newPassword: nw };
-      let tried = false;
-      try {
-        tried = true;
-        await fetchJson("/api/v1/session/password", { method: "POST", body: body1 });
-        setMsg("密码已更新（可能需要重新登录）", true);
-        return;
-      } catch (e1) {
-        if (!(e1?.status === 404 || e1?.status === 501 || e1?.status === 405)) throw e1;
-      }
-      try {
-        await fetchJson("/api/v1/account/password", { method: "PUT", body: body1 });
-        setMsg("密码已更新（可能需要重新登录）", true);
-      } catch (e2) {
-        if (e2?.status === 404 || e2?.status === 501) {
-          setMsg("接口尚未提供");
-          return;
-        }
-        throw e2;
-      }
-    } catch (e) {
-      setMsg(`修改失败：${e?.status === 401 ? "未登录或会话已过期" : (e?.message || "未知错误")}`);
-    }
-  });
-
-  // 备份 / 恢复
-  const backupCard = document.createElement("div");
-  backupCard.className = "card";
-  backupCard.innerHTML = `
-    <h3>配置备份 / 恢复</h3>
-    <div class="form-actions">
-      <button id="backup-btn" class="btn">下载备份</button>
-    </div>
-    <div class="form mt8">
-      <div class="form-row">
-        <label>恢复备份（可能覆盖配置，谨慎操作）</label>
-        <input id="restore-file" type="file" />
-      </div>
-      <div class="form-actions">
-        <button id="restore-btn" class="btn">上传并恢复</button>
-      </div>
-    </div>
-    <div id="backup-msg" class="mt8 small muted"></div>
-  `;
-  grid.appendChild(backupCard);
-  const setBackupMsg = (t, ok=false) => { const el = q("#backup-msg", backupCard); if (el) { el.textContent = t; el.style.color = ok ? "var(--accent)" : "var(--muted)"; } };
-  q("#backup-btn", backupCard)?.addEventListener("click", async () => {
-    setBackupMsg("正在请求备份...");
-    try {
-      const tryPaths = ["/api/v1/backup", "/api/v1/system/backup"];
-      let resp = null;
-      for (const p of tryPaths) {
-        try {
-          const r = await fetchRaw(p, { method: "GET" });
-          if (r.ok) { resp = r; break; }
-          if (r.status === 404 || r.status === 501) continue;
-          throw new Error(`HTTP ${r.status}`);
-        } catch (_) {}
-      }
-      if (!resp) { setBackupMsg("接口尚未提供"); return; }
-      const blob = await resp.blob();
-      const cd = resp.headers.get("Content-Disposition") || "";
-      const m = /filename=\"?([^\";]+)\"?/i.exec(cd);
-      const name = m?.[1] || `nixos-router-backup-${Date.now()}.tar.gz`;
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setBackupMsg(`已下载：${name}`, true);
-    } catch (e) {
-      setBackupMsg(`下载失败：${e?.message || "未知错误"}`);
-    }
-  });
-  q("#restore-btn", backupCard)?.addEventListener("click", async () => {
-    const f = q("#restore-file", backupCard)?.files?.[0];
-    if (!f) { setBackupMsg("请选择备份文件"); return; }
-    const ok = confirm("将上传并恢复备份，可能覆盖当前配置。确定继续吗？");
-    if (!ok) return;
-    setBackupMsg("正在上传并恢复...");
-    try {
-      const fd = new FormData();
-      fd.append("file", f, f.name);
-      let resp = await fetchRaw("/api/v1/backup/restore", { method: "POST", body: fd });
-      if (resp.status === 404 || resp.status === 501) {
-        resp = await fetchRaw("/api/v1/system/restore", { method: "POST", body: fd });
-      }
-      if (resp.status === 404 || resp.status === 501) { setBackupMsg("接口尚未提供"); return; }
-      if (!resp.ok && resp.status !== 202) {
-        const t = await resp.text().catch(() => "");
-        throw new Error(t || `HTTP ${resp.status}`);
-      }
-      setBackupMsg("已提交恢复（可能需要稍候）", true);
-    } catch (e) {
-      setBackupMsg(`恢复失败：${e?.message || "未知错误"}`);
-    }
-  });
-    const applyNote = document.createElement("div");
-    applyNote.className = "card";
-    applyNote.innerHTML = `
-      <h3>应用配置</h3>
-      <p class="muted small">
-        生成与应用已并入顶部 Apply 条。「保存」写入配置（PUT /api/v1/config），
-        「应用配置」提交作业（POST /api/v1/apply，默认仅生成、不切换运行态）。
-      </p>
-    `;
-    grid.appendChild(applyNote);
-
-    // 最近作业
-    try {
-      const jobs = await fetchJson("/api/v1/jobs?limit=5");
-      const list = Array.isArray(jobs) ? jobs : (jobs?.jobs || []);
-      if (Array.isArray(list) && list.length) {
-        const jcard = document.createElement("div");
-        jcard.className = "card";
-        const items = list.map((j) => {
-          const kvv = [
-            ["id", j?.id ?? j?.jobId ?? "-"],
-            ["状态", j?.status || j?.state || "-"],
-            ...(j?.mode ? [["mode", j.mode]] : []),
-            ...(j?.appliedRuntime != null ? [["appliedRuntime", String(j.appliedRuntime)]] : []),
-            ...(j?.error ? [["错误", j.error]] : []),
-          ];
-          return `<div class="kv">${kvv.map(([k,v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`).join("")}</div>`;
-        }).join("<hr class=\"sep\" />");
-        jcard.innerHTML = `<h3>最近作业</h3>${items}`;
-        grid.appendChild(jcard);
-      }
-    } catch (_) {}
-
-  // 审计日志（若提供）
-  try {
-    const audit = await fetchJson("/api/v1/audit?limit=50");
-    const arr = Array.isArray(audit) ? audit : (audit?.audit || audit?.items || []);
-    if (Array.isArray(arr) && arr.length) {
-      const acard = document.createElement("div");
-      acard.className = "card";
-      const rowsA = arr.map((e) => {
-        const kv = [
-          ["ID", e?.id || e?.uuid || "-"],
-          ["时间", e?.at || e?.time || e?.ts || e?.timestamp || "-"],
-          ["用户", e?.actor || e?.user || "-"],
-          ["动作", e?.action || e?.event || "-"],
-          ["结果", e?.result || e?.status || "-"],
-          ["对象", e?.resource || e?.path || "-"],
-          ["详情", e?.detail || e?.message || "-"],
-          ["IP", e?.ip || e?.addr || "-"],
-        ];
-        return `<div class="kv">${kv.map(([k,v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`).join("")}</div>`;
-      }).join("<hr class=\"sep\" />");
-      acard.innerHTML = `<h3>审计日志</h3>${rowsA}`;
-      grid.appendChild(acard);
-    }
-  } catch (e) {
-    if (e?.status === 404 || e?.status === 501) {
-      const acard = document.createElement("div");
-      acard.className = "card";
-      acard.innerHTML = `<h3>审计日志</h3><p class="muted">接口尚未提供</p>`;
-      grid.appendChild(acard);
-    }
-  }
-
-  // 重启（若提供）
-  const reboot = document.createElement("div");
-  reboot.className = "card";
-  reboot.innerHTML = `
-    <h3>系统重启</h3>
-    <div class="form-actions">
-      <button id="reboot-btn" class="btn">发送重启命令</button>
-    </div>
-    <div id="reboot-msg" class="mt8 small muted"></div>
-  `;
-  grid.appendChild(reboot);
-  const setRebootMsg = (t, ok=false) => { const el = q("#reboot-msg", reboot); if (el) { el.textContent = t; el.style.color = ok ? "var(--accent)" : "var(--muted)"; } };
-  q("#reboot-btn", reboot)?.addEventListener("click", async () => {
-    const ok = confirm("确定要重启系统吗？这将中断网络连接。");
-    if (!ok) return;
-    setRebootMsg("正在发送重启命令...");
-    try {
-      const resp = await fetchRaw("/api/v1/system/reboot", { method: "POST" });
-      if (resp.status === 404 || resp.status === 501) {
-        setRebootMsg("接口尚未提供");
-        return;
-      }
-      if (!resp.ok && resp.status !== 202) {
-        const t = await resp.text().catch(() => "");
-        throw new Error(t || `HTTP ${resp.status}`);
-      }
-      setRebootMsg("已发送重启命令（设备可能即将重启）", true);
-    } catch (e) {
-      setRebootMsg(`发送失败：${e?.message || "未知错误"}`);
-    }
-  });
-
-    grid.appendChild(renderJSONCard("配置 JSON", { config: cfg }));
-    if (statusData) grid.appendChild(renderJSONCard("状态 JSON", statusData));
-    if (healthData) grid.appendChild(renderJSONCard("健康 JSON", healthData));
-
-    // UX bar for system save
-    mountUxBar(content, {
-      onSave: async () => {
-        const nextAll = deepClone(cfg);
-        nextAll.system = draft;
-        try {
-          const res = await putConfig(nextAll);
-          state.configCache = res?.config || nextAll;
-          clearDirty();
-          alert("已保存系统配置");
-        } catch (e) {
-          alert(`保存失败：${e?.message || "未知错误"}`);
-        }
-      },
-      onSaveAndGenerate: async () => {
-        const nextAll = deepClone(cfg);
-        nextAll.system = draft;
-        try {
-          await putConfig(nextAll);
-          state.configCache = nextAll;
-          clearDirty();
-          await fetchJson("/api/v1/apply", { method: "POST" });
-          alert("已保存并提交生成任务（不应用运行态）");
-        } catch (e) {
-          alert(`保存失败：${e?.message || "未知错误"}`);
-        }
-      },
-    });
-  }
-
-  async function renderClients() {
-  const content = clearMain();
-  const grid = document.createElement("div");
-  grid.className = "grid";
-  content.appendChild(grid);
-  try {
-    const data = await fetchJson("/api/v1/clients");
-    const list = Array.isArray(data) ? data : (data?.clients || data?.items || []);
-    const src = data?.source || "-";
-    if (!Array.isArray(list) || list.length === 0) {
-      grid.appendChild(renderKeyValueCard("客户端（只读）", [["状态", "无数据"], ["来源", String(src)]]));
-      // Fallback: staticLeases
-      const cfg = await loadConfigCached(false);
-      const leases = Array.isArray(cfg?.lan?.staticLeases) ? cfg.lan.staticLeases : [];
-      if (leases.length) {
-        const card = document.createElement("div");
-        card.className = "card";
-        const items = leases.map((c) => {
-          const rows = [
-            ["IP", c?.ip || "-"],
-            ["MAC", c?.mac || "-"],
-            ["主机名", c?.hostname || "-"],
-          ].map(([k,v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`).join("");
-          return `<div class="kv">${rows}</div>`;
-        }).join("<hr class=\"sep\" />");
-        card.innerHTML = `<h3>静态租约（来自配置）</h3>${items}`;
-        grid.appendChild(card);
-      }
-    } else {
-      const card = document.createElement("div");
-      card.className = "card";
-      const items = list.map((c, idx) => {
-        const mac = c?.mac || "";
-        const blocked = !!c?.blocked;
-        const hostname = c?.hostname || "";
-        const canEdit = state.clientsPatchAvailable !== false;
-        const rowId = `client-row-${idx}`;
-        const hnId = `client-hn-${idx}`;
-        const msgId = `client-msg-${idx}`;
-        const blkId = `client-blk-${idx}`;
-        const left = `
-          <div class="k">IP</div><div class="v">${escapeHtml(c?.ip || "-")}</div>
-          <div class="k">MAC</div><div class="v">${escapeHtml(mac || "-")}</div>
-          <div class="k">来源</div><div class="v">${escapeHtml(c?.source || src || "-")}</div>
-        `;
-        const rightReadonly = `
-          <div class="k">主机名</div><div class="v">${escapeHtml(hostname || "-")}</div>
-          <div class="k">阻止</div><div class="v">${blocked ? "是" : "否"}</div>
-        `;
-        const rightEdit = `
-          <div class="k">主机名</div>
-          <div class="v">
-            <input id="${hnId}" type="text" value="${escapeHtml(hostname)}" style="width: 220px;" />
-            <button data-mac="${escapeHtml(mac)}" data-hn-id="${hnId}" data-msg-id="${msgId}" class="btn" style="margin-left:8px;">保存</button>
-          </div>
-          <div class="k">阻止</div>
-          <div class="v">
-            <label><input id="${blkId}" type="checkbox" ${blocked ? "checked" : ""} /> 阻止此客户端</label>
-          </div>
-          <div class="k">状态</div><div class="v"><span id="${msgId}" class="small muted"></span></div>
-        `;
-        return `<div class="kv" id="${rowId}">${left}${canEdit ? rightEdit : rightReadonly}</div>`;
-      }).join("<hr class=\"sep\" />");
-      card.innerHTML = `<h3>客户端列表</h3>${items}`;
-      grid.appendChild(card);
-
-      // 绑定交互事件
-      list.forEach((c, idx) => {
-        if (state.clientsPatchAvailable === false) return;
-        const mac = c?.mac || "";
-        const hnBtn = card.querySelector(`button[data-hn-id="client-hn-${idx}"]`);
-        const hnInput = card.querySelector(`#client-hn-${idx}`);
-        const msgEl = card.querySelector(`#client-msg-${idx}`);
-        const blkInput = card.querySelector(`#client-blk-${idx}`);
-        const setMsg = (t, ok=false) => { if (msgEl) { msgEl.textContent = t; msgEl.style.color = ok ? "var(--accent)" : "var(--muted)"; } };
-        hnBtn?.addEventListener("click", async () => {
-          try {
-            const val = (hnInput?.value || "").trim();
-            await patchClient(mac, { hostname: val });
-            setMsg("已保存", true);
-            await renderClients();
-          } catch (e) {
-            if (e?.status === 404 || e?.status === 501) {
-              setMsg("接口尚未提供"); state.clientsPatchAvailable = false; await renderClients(); return;
-            }
-            setMsg(`失败：${e?.message || "未知错误"}`);
-          }
-        });
-        blkInput?.addEventListener("change", async () => {
-          try {
-            await patchClient(mac, { blocked: !!blkInput.checked });
-            setMsg("已保存", true);
-            await renderClients();
-          } catch (e) {
-            if (e?.status === 404 || e?.status === 501) {
-              setMsg("接口尚未提供"); state.clientsPatchAvailable = false; await renderClients(); return;
-            }
-            setMsg(`失败：${e?.message || "未知错误"}`);
-          }
-        });
-      });
-    }
-    grid.appendChild(renderJSONCard("客户端 JSON", data));
-  } catch (e) {
-    if (e?.status === 404) {
-      const card = document.createElement("div");
-      card.className = "card";
-      card.innerHTML = `<h3>客户端（只读）</h3><p class="muted">接口尚未提供</p>`;
-      grid.appendChild(card);
-    } else if (e?.status === 401) {
-      // 已由全局 401 处理
-    } else {
-      grid.appendChild(renderJSONCard("错误", { error: e?.message || "请求失败" }));
-    }
-  }
-  }
-
-  function getApiBase() {
-    const fromWin = typeof window.NIXOS_ROUTER_API === "string" && window.NIXOS_ROUTER_API.trim();
-    const fromQuery = getQueryParam("api");
-    // 默认使用页面同源（用户以局域网 IP 打开时，直接同源访问后端）
-    const origin = (typeof window.location?.origin === "string" && window.location.origin) || "";
-    const base = (fromQuery || fromWin || origin).replace(/\/+$/, "");
-    return base;
-  }
-
-  const apiBase = getApiBase();
-  const state = {
-    backendConnected: false,
-    loggedIn: false,
-    currentUser: null,
-    configCache: null,
-    pageDirty: false,
-    pageUx: null,
-    prevHash: null,
-    suppressHashRevert: false,
-    clientsPatchAvailable: null,
-    navItems: [],
-    coreNav: [
-      { id: "overview", label: "总览", path: "#/overview", group: "状态" },
-      { id: "wan", label: "WAN", path: "#/wan", group: "网络" },
-      { id: "lan", label: "LAN", path: "#/lan", group: "网络" },
-      { id: "clients", label: "客户端", path: "#/clients", group: "网络" },
-      { id: "dns", label: "DNS", path: "#/dns", group: "网络" },
-      { id: "wifi", label: "WiFi", path: "#/wifi", group: "网络" },
-      { id: "firewall", label: "防火墙", path: "#/firewall", group: "网络" },
-      { id: "ssh", label: "SSH", path: "#/ssh", group: "服务" },
-      { id: "plugins", label: "插件", path: "#/plugins", group: "服务" },
-      { id: "system", label: "系统", path: "#/system", group: "系统" },
-      { id: "qos", label: "QoS", path: "#/qos", group: "高级", soon: true },
-      { id: "parental", label: "家长控制", path: "#/parental", group: "高级", soon: true },
-      { id: "ddns", label: "DDNS", path: "#/ddns", group: "高级", soon: true },
-      { id: "ipv6", label: "IPv6", path: "#/ipv6", group: "高级", soon: true },
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const clone = (value) => JSON.parse(JSON.stringify(value ?? {}));
+  const apiBase = (
+    new URLSearchParams(location.search).get("api") ||
+    window.NIXOS_ROUTER_API ||
+    location.origin
+  ).replace(/\/+$/, "");
+  const pages = {
+    overview: ["总览", "状态", "查看接口、管理服务与数据采集状态。"],
+    clients: ["客户端", "状态", "查看租约或静态绑定，管理设备名称与访问策略。"],
+    wan: ["外网 WAN", "网络", "选择上网方式，并填写运营商提供的连接参数。"],
+    lan: ["内网 LAN", "网络", "设置家庭网段、网桥端口和 DHCP 地址分配。"],
+    wifi: [
+      "无线 WiFi",
+      "网络",
+      "编辑接入点配置；硬件能力与实际运行状态单独确认。",
     ],
+    dns: ["DNS", "网络", "设置本地域名及上游 DNS 服务器。"],
+    firewall: ["防火墙", "网络", "管理 NAT、端口转发与设备访问策略。"],
+    ipv6: ["IPv6", "网络", "设置外网获取方式及内网前缀分配和路由通告。"],
+    qos: [
+      "带宽管理",
+      "服务",
+      "配置总带宽和设备优先级，留意 Mbps 与 Kbps 的区别。",
+    ],
+    parental: ["家长控制", "服务", "按设备与时间段保存访问规则。"],
+    ddns: ["动态 DNS", "服务", "为动态公网地址配置域名更新服务。"],
+    ssh: ["SSH", "服务", "管理远程终端访问方式和授权公钥。"],
+    plugins: [
+      "插件管理",
+      "扩展",
+      "配置可选扩展；基础网络服务使用各自的唯一配置入口。",
+    ],
+    adblock: ["广告拦截", "扩展", "管理域名拦截规则与订阅来源。"],
+    traffic: [
+      "流量统计",
+      "扩展",
+      "设置统计保留策略；采集器尚未接入时不显示模拟图表。",
+    ],
+    mihomo: ["Mihomo", "扩展", "配置代理服务的基础参数。"],
+    vlan: ["VLAN", "扩展", "定义虚拟网络标识及关联网桥。"],
+    tailscale: ["Tailscale", "扩展", "选择控制平面并保存设备接入参数。"],
+    zerotier: ["ZeroTier", "扩展", "配置控制器与需要加入的网络。"],
+    system: ["系统", "系统", "维护设备配置、管理员账户、备份和操作记录。"],
   };
-
-  function withTimeout(promise, ms = 8000) {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("fetch timeout")), ms);
-    });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-  }
-
-  function deepClone(obj) {
-    return JSON.parse(JSON.stringify(obj ?? {}));
-  }
-
-  async function loadConfigCached(force = false) {
-    if (!state.configCache || force) {
-      const res = await fetchJson("/api/v1/config");
-      state.configCache = res?.config || res || {};
+  const pluginIds = [
+    "adblock",
+    "traffic",
+    "mihomo",
+    "vlan",
+    "tailscale",
+    "zerotier",
+  ];
+  const groups = [
+    ["状态", "overview"],
+    ["网络", "wan"],
+    ["服务", "qos"],
+    ["扩展", "plugins"],
+    ["系统", "system"],
+  ];
+  const state = {
+    loggedIn: false,
+    pageDirty: false,
+    busy: false,
+    loading: false,
+    section: null,
+    configCache: null,
+    health: null,
+    confirmedCapabilities: null,
+    pending: false,
+    epoch: 0,
+    route: "overview",
+    previousHash: "",
+    skipHash: false,
+  };
+  let fieldId = 0,
+    refreshTimer;
+  function node(tag, attrs = {}, ...children) {
+    const e = document.createElement(tag);
+    for (const [key, value] of Object.entries(attrs)) {
+      if (value == null || value === false) continue;
+      if (key === "class") e.className = value;
+      else if (key.startsWith("on")) e.addEventListener(key.slice(2), value);
+      else e.setAttribute(key, value === true ? "" : String(value));
     }
-    return state.configCache;
+    for (const child of children.flat(Infinity))
+      if (child != null)
+        e.append(
+          child instanceof Node
+            ? child
+            : document.createTextNode(String(child)),
+        );
+    return e;
   }
-
-  function syncDirtyIndicator() {
-    const hidden = !state.pageDirty;
-    q("#ux-dirty")?.classList.toggle("hidden", hidden);
-    q("#apply-dirty")?.classList.toggle("hidden", hidden);
+  const btn = (text, action, cls = "") =>
+    node(
+      "button",
+      { type: "button", class: `btn ${cls}`, onclick: action },
+      text,
+    );
+  const notice = (text, tone = "") =>
+    node("div", { class: `notice ${tone}` }, text);
+  const card = (title, ...children) =>
+    node("section", { class: "card" }, node("h3", {}, title), ...children);
+  const empty = (title, detail) =>
+    node("div", { class: "empty" }, node("strong", {}, title), detail);
+  const stack = (...children) => node("div", { class: "stack" }, ...children);
+  const link = (id, text) =>
+    node(
+      "a",
+      { href: `#/${id}`, class: "btn quiet" },
+      text || pages[id]?.[0] || id,
+    );
+  function kv(title, entries) {
+    return card(
+      title,
+      node(
+        "dl",
+        { class: "kv" },
+        entries.map(([key, value]) => [
+          node("dt", {}, key),
+          node("dd", {}, value ?? "未提供"),
+        ]),
+      ),
+    );
   }
-  function setApplyMsg(text) {
-    const el = q("#apply-msg");
-    if (el) el.textContent = text || "";
-  }
-  function setApplyBusy(busy) {
-    ["#apply-undo", "#apply-save", "#apply-run", "#nav-toggle"].forEach((sel) => {
-      const el = q(sel);
-      if (!el) return;
-      if (busy) el.setAttribute("disabled", "true");
-      else el.removeAttribute("disabled");
+  const get = (object, path) =>
+    path.split(".").reduce((v, k) => v?.[k], object);
+  function set(object, path, value) {
+    const keys = path.split(".");
+    let parent = object;
+    keys.slice(0, -1).forEach((key) => {
+      parent = parent[key] ||= {};
     });
+    parent[keys.at(-1)] = value;
   }
-  function markDirty() {
-    state.pageDirty = true;
-    syncDirtyIndicator();
-  }
-  function clearDirty() {
-    state.pageDirty = false;
-    syncDirtyIndicator();
-  }
-
-  function mountUxBar(_container, handlers) {
-    state.pageUx = handlers || null;
-  }
-
-  function setNavOpen(open) {
-    q("#top-nav")?.classList.toggle("open", !!open);
-    const btn = q("#nav-toggle");
-    if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
-  }
-
-  async function putConfig(fullConfig) {
-    // 返回后端响应；错误由调用方显示
-    return await fetchJson("/api/v1/config", { method: "PUT", body: fullConfig });
-  }
-
-  async function putPlugin(id, pluginDraft) {
-    // 优先使用每插件端点；404 时由调用方决定回退
-    const payload = {
-      enabled: !!(pluginDraft?.enable ?? pluginDraft?.enabled),
-      config: pluginDraft?.config ?? {},
-    };
-    preserveSecrets(payload);
-    return await fetchJson(`/api/v1/plugins/${encodeURIComponent(id)}`, {
-      method: "PUT",
-      body: payload,
-    });
-  }
-
-  function preserveSecrets(obj) {
-    // 将空字符串也视为“保持原值”
-    const walk = (node) => {
-      if (!node || typeof node !== "object") return;
-      for (const k of Object.keys(node)) {
-        const v = node[k];
-        if (typeof v === "string") {
-          const lk = k.toLowerCase();
-          if (lk.includes("password") || lk.includes("psk") || lk.includes("secret") || lk.includes("token")) {
-            if (v === "" || v === "****") node[k] = "****";
-          }
-        } else if (v && typeof v === "object") {
-          walk(v);
-        }
-      }
-    };
-    walk(obj);
-  }
-
-  async function saveSection(sectionKey, draft, { andGenerate = false } = {}) {
-    try {
-      const base = await loadConfigCached(false);
-      const next = deepClone(base);
-      // 支持嵌套路径：如 "plugins.ddns"
-      const parts = sectionKey.split(".");
-      let cur = next;
-      for (let i = 0; i < parts.length - 1; i++) {
-        const p = parts[i];
-        if (!cur[p] || typeof cur[p] !== "object") cur[p] = {};
-        cur = cur[p];
-      }
-      cur[parts[parts.length - 1]] = draft;
-      preserveSecrets(next);
-      const res = await putConfig(next);
-      state.configCache = res?.config || next; // 若后端返回保存后的 config，则用之
-      clearDirty();
-      if (andGenerate) {
-        const applyRes = await fetchJson("/api/v1/apply", { method: "POST" });
-        return { saved: true, apply: applyRes };
-      }
-      return { saved: true };
-    } catch (e) {
-      return { saved: false, error: e };
+  const split = (value) =>
+    value
+      .split(/[\n,，]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  function field(data, path, label, options = {}) {
+    const id = `field-${++fieldId}`,
+      type = options.type || "text";
+    const input = options.choices
+      ? node("select", { id })
+      : node(type === "textarea" ? "textarea" : "input", {
+          id,
+          type: type === "textarea" ? null : type,
+          rows: type === "textarea" ? 4 : null,
+        });
+    if (options.choices)
+      options.choices.forEach(([value, title]) =>
+        input.append(node("option", { value }, title)),
+      );
+    let value = get(data, path);
+    if (value == null && (options.default != null || options.choices)) {
+      value = options.default ?? options.choices[0][0];
+      set(data, path, value);
     }
-  }
-
-  function createRow(label, inputEl) {
-    const row = document.createElement("div");
-    row.className = "form-row";
-    const lab = document.createElement("label");
-    lab.textContent = label;
-    row.appendChild(lab);
-    row.appendChild(inputEl);
+    if (type === "checkbox") input.checked = !!value;
+    else if (options.list)
+      input.value = Array.isArray(value) ? value.join("\n") : "";
+    else input.value = value ?? options.default ?? "";
+    if (type === "password") {
+      input.value = "";
+      input.placeholder = value ? "已设置；留空保留" : "请输入密钥";
+      input.autocomplete = "new-password";
+    }
+    for (const k of [
+      "min",
+      "max",
+      "step",
+      "pattern",
+      "required",
+      "placeholder",
+      "maxlength",
+      "minlength",
+    ])
+      if (options[k] != null && options[k] !== false)
+        input.setAttribute(k, options[k]);
+    if (type === "number" && options.min == null) input.min = "0";
+    const helpText =
+      options.help ||
+      (type === "password"
+        ? "留空保留已保存的密钥；新增项目需要填写真实密钥。"
+        : "");
+    const row = node(
+      "div",
+      {
+        class: `form-row ${type === "checkbox" ? "check" : ""} ${options.full ? "full" : ""}`,
+      },
+      node("label", { for: id }, label),
+      input,
+    );
+    if (helpText) {
+      const help = node("p", { id: `${id}-help`, class: "help" }, helpText);
+      input.setAttribute("aria-describedby", help.id);
+      row.append(help);
+    }
+    input.addEventListener(
+      type === "checkbox" || options.choices ? "change" : "input",
+      () => {
+        const next =
+          type === "checkbox"
+            ? input.checked
+            : options.list
+              ? split(input.value)
+              : type === "number"
+                ? input.value === ""
+                  ? 0
+                  : Number(input.value)
+                : input.value;
+        // An empty password retains the existing secret; new credentials start empty.
+        if (type !== "password" || next !== "") set(data, path, next);
+        else if (!value) set(data, path, "");
+        else set(data, path, value);
+        dirty();
+        options.change?.(input.value);
+      },
+    );
     return row;
   }
-
-  function createInput(type = "text", opts = {}) {
-    const el = document.createElement("input");
-    el.type = type;
-    if (opts.placeholder) el.placeholder = opts.placeholder;
-    if (opts.value != null) el.value = String(opts.value);
-    if (opts.checked != null) el.checked = !!opts.checked;
-    if (opts.min != null) el.min = String(opts.min);
-    if (opts.max != null) el.max = String(opts.max);
-    return el;
+  function formCard(title, fields) {
+    return card(title, node("div", { class: "form-grid" }, fields));
   }
-
-  function createSelect(options, value) {
-    const sel = document.createElement("select");
-    for (const [val, text] of options) {
-      const opt = document.createElement("option");
-      opt.value = val;
-      opt.textContent = text;
-      if (val === value) opt.selected = true;
-      sel.appendChild(opt);
-    }
-    return sel;
-  }
-
-  function createArrayEditor({ title, items, renderItem, onAdd }) {
-    const card = document.createElement("div");
-    card.className = "card";
-    const header = document.createElement("div");
-    header.style.display = "flex";
-    header.style.justifyContent = "space-between";
-    header.style.alignItems = "center";
-    const h3 = document.createElement("h3");
-    h3.textContent = title;
-    const addBtn = document.createElement("button");
-    addBtn.className = "btn";
-    addBtn.textContent = "新增";
-    addBtn.addEventListener("click", () => {
-      onAdd?.();
-      rerender();
-      markDirty();
+  function collection(title, items, renderItem, makeItem) {
+    const body = node("div");
+    const add = btn("新增", () => {
+      items.push(makeItem());
+      draw();
+      dirty();
+      body.lastElementChild?.querySelector("input,select,textarea")?.focus();
     });
-    header.appendChild(h3);
-    header.appendChild(addBtn);
-    const body = document.createElement("div");
-    const rerender = () => {
-      body.innerHTML = "";
-      (items() || []).forEach((it, idx) => {
-        const row = document.createElement("div");
-        row.style.borderTop = "1px dashed var(--border)";
-        row.style.paddingTop = "8px";
-        const del = document.createElement("button");
-        del.className = "btn";
-        del.textContent = "删除";
-        del.style.float = "right";
-        del.addEventListener("click", () => {
-          (items()).splice(idx, 1);
-          rerender();
-          markDirty();
-        });
-        row.appendChild(del);
-        row.appendChild(renderItem(it, idx));
-        body.appendChild(row);
+    const root = node(
+      "section",
+      { class: "card" },
+      node("div", { class: "collection-head" }, node("h3", {}, title), add),
+      body,
+    );
+    function draw() {
+      body.replaceChildren();
+      if (!items.length) {
+        body.append(empty("尚未添加", `使用“新增”配置${title}。`));
+        return;
+      }
+      items.forEach((item, index) => {
+        const remove = btn(
+          "删除",
+          () => {
+            items.splice(index, 1);
+            draw();
+            dirty();
+            add.focus();
+          },
+          "quiet danger",
+        );
+        remove.setAttribute("aria-label", `删除${title}第 ${index + 1} 项`);
+        body.append(
+          node(
+            "fieldset",
+            { class: "collection-item" },
+            node("legend", {}, `${title} · ${index + 1}`),
+            node("div", { class: "item-head" }, remove),
+            node("div", { class: "form-grid" }, renderItem(item, index)),
+          ),
+        );
       });
-    };
-    rerender();
-    card.appendChild(header);
-    card.appendChild(body);
-    return card;
-  }
-
-  function onUnauthorized() {
-    state.loggedIn = false;
-    state.currentUser = null;
-    showLoginView();
-  }
-
-  function showLoginView() {
-    const layout = q("#main-view");
-    const login = q("#login-view");
-    const banner = q("#status-banner");
-    layout?.classList.add("hidden");
-    login?.classList.remove("hidden");
-    banner?.classList.add("hidden");
-    const apiEl = q("#login-api-base");
-    if (apiEl) apiEl.textContent = apiBase;
-    updateBannerApiBase();
-  }
-  function hideLoginView() {
-    const layout = q("#main-view");
-    const login = q("#login-view");
-    layout?.classList.remove("hidden");
-    login?.classList.add("hidden");
-  }
-
-  function setUserDisplay() {
-    const el = q("#user-display");
-    if (!el) return;
-    const name = state?.currentUser?.username || state?.currentUser?.name || state?.currentUser?.user || "";
-    el.textContent = name ? `已登录：${name}` : "";
-  }
-
-  async function fetchJson(path, init = {}) {
-    const url = `${apiBase}${path}`;
-    const {
-      method = "GET",
-      body,
-      headers = {},
-      ...rest
-    } = init || {};
-    const finalHeaders = {
-      "Accept": "application/json",
-      ...headers,
-    };
-    let finalBody = body;
-    if (body && typeof body === "object" && !(body instanceof FormData)) {
-      finalHeaders["Content-Type"] = "application/json";
-      finalBody = JSON.stringify(body);
     }
-    const resp = await withTimeout(fetch(url, {
-      method,
-      credentials: "include",
-      headers: finalHeaders,
-      body: finalBody,
-      ...rest,
-    }));
-    if (resp.status === 401) {
-      onUnauthorized();
-      const text401 = await resp.text().catch(() => "");
-      const err401 = new Error("unauthorized");
-      err401.status = 401;
-      err401.responseText = text401;
-      throw err401;
-    }
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      const err = new Error(`HTTP ${resp.status} ${resp.statusText} for ${path}`);
-      err.responseText = text;
-      err.status = resp.status;
-      throw err;
-    }
-    const ct = resp.headers.get("content-type") || "";
-    if (ct.includes("application/json")) {
-      return resp.json();
-    }
-    // Accept text as JSON fallback (for early stubs)
-    const t = await resp.text();
-    try { return JSON.parse(t); } catch { return { value: t }; }
+    draw();
+    return root;
   }
-
-  async function fetchRaw(path, init = {}) {
-    const url = `${apiBase}${path}`;
-    const {
-      method = "GET",
-      body,
-      headers = {},
-      ...rest
-    } = init || {};
-    const resp = await withTimeout(fetch(url, {
-      method,
-      credentials: "include",
-      headers,
-      body,
-      ...rest,
-    }));
-    if (resp.status === 401) {
-      onUnauthorized();
-      const err401 = new Error("unauthorized");
-      err401.status = 401;
-      throw err401;
-    }
-    return resp;
+  function stringList(data, path, title, label, placeholder = "") {
+    const arr = get(data, path) || [];
+    set(data, path, arr);
+    return collection(
+      title,
+      arr,
+      (_, index) =>
+        field(arr, String(index), label, { full: true, placeholder }),
+      () => "",
+    );
   }
-
-  function setBannerVisible(visible) {
-    const banner = q("#status-banner");
-    if (!banner) return;
-    banner.classList.toggle("hidden", !visible);
+  function table(headers, rows, caption) {
+    const result = node(
+      "table",
+      {},
+      node("caption", { class: "hidden" }, caption),
+      node(
+        "thead",
+        {},
+        node(
+          "tr",
+          {},
+          headers.map((h) => node("th", { scope: "col" }, h)),
+        ),
+      ),
+      node(
+        "tbody",
+        {},
+        rows.map((row) =>
+          node(
+            "tr",
+            {},
+            row.map((cell) => node("td", {}, cell)),
+          ),
+        ),
+      ),
+    );
+    return node(
+      "div",
+      { class: "table-wrap", tabindex: "0", "aria-label": caption },
+      result,
+    );
   }
-
-  function updateBannerApiBase() {
-    const el = q("#banner-api-base");
-    if (el) el.textContent = apiBase;
-    const hint = q("#sidebar-api-hint");
-    if (hint) {
-      hint.innerHTML = `API: <code>${apiBase}</code>`;
-    }
-    const loginApi = q("#login-api-base");
-    if (loginApi) loginApi.textContent = apiBase;
-  }
-
-  function toHashPath(p, fallbackId) {
-    if (!p) return `#/${fallbackId ?? ""}`;
-    if (p.startsWith("#")) return p;
-    if (p === "/") return "#/overview";
-    if (p.startsWith("/")) return `#${p}`;
-    return `#/${p}`;
-  }
-
-  function normalizeNav(items) {
-    // 平铺化导航，兼容 {nav:[{id,title,path,children:[]},...]} 或直接数组
-    const src = Array.isArray(items) ? items : (items?.nav || items?.items || []);
-    if (!Array.isArray(src)) return [];
-    const out = [];
-    const walk = (arr) => {
-      for (const it of arr) {
-        if (!it) continue;
-        if (Array.isArray(it.children) && it.children.length) {
-          walk(it.children);
-          continue;
-        }
-        const id = it.id || it.key || it.name || (typeof it.path === "string" ? it.path.replace(/^\//, "") : "") || "";
-        const label = it.title || it.label || it.name || id || "项目";
-        const path = toHashPath(it.path, id);
-        if (id) out.push({ id: String(id), label: String(label), path: String(path) });
-      }
-    };
-    walk(src);
-    return out;
-  }
-
-  function inferNavGroup(item) {
-    const id = String(item?.id || "");
-    const known = {
-      overview: "状态",
-      wan: "网络", lan: "网络", clients: "网络", dns: "网络", wifi: "网络", firewall: "网络",
-      ssh: "服务", plugins: "服务",
-      system: "系统",
-      qos: "高级", parental: "高级", ddns: "高级", ipv6: "高级",
-    };
-    if (item?.group) return item.group;
-    if (known[id]) return known[id];
-    return "服务";
-  }
-
-  function renderSectionTabs() {
-    const tabs = q("#section-tabs");
-    if (!tabs) return;
-    const hash = location.hash || "#/overview";
-    const id = (hash.replace(/^#\//, "") || "overview").split("?")[0];
-    const all = state.navItems.length ? state.navItems : state.coreNav;
-    const group = inferNavGroup(all.find((i) => i.id === id || i.path === hash) || { id });
-    const items = all.filter((item) => inferNavGroup(item) === group);
-    if (group === "状态" || items.length <= 1) {
-      tabs.classList.add("hidden");
-      tabs.innerHTML = "";
-      return;
-    }
-    tabs.classList.remove("hidden");
-    tabs.innerHTML = "";
-    for (const item of items) {
-      const a = document.createElement("a");
-      a.className = "tab-btn";
-      a.href = item.path || (`#/${item.id}`);
-      a.appendChild(document.createTextNode(item.label || item.id));
-      if (item.soon) {
-        const badge = document.createElement("span");
-        badge.className = "soon";
-        badge.textContent = "Soon";
-        a.appendChild(badge);
-      }
-      if (hash === a.getAttribute("href")) a.classList.add("active");
-      tabs.appendChild(a);
-    }
-  }
-
-  function renderNav(items) {
-    if (items && items.length) state.navItems = items;
-    renderSectionTabs();
-    setActiveLink();
-  }
-
-  function setActiveLink() {
-    const hash = location.hash || "#/overview";
-    const id = (hash.replace(/^#\//, "") || "overview").split("?")[0];
-    const all = state.navItems.length ? state.navItems : state.coreNav;
-    const group = inferNavGroup(all.find((i) => i.id === id || i.path === hash) || { id });
-    const sectionByGroup = {
-      "状态": "status",
-      "网络": "network",
-      "服务": "services",
-      "系统": "system",
-      "高级": "advanced",
-    };
-    const sec = sectionByGroup[group] || "services";
-    qc("#top-nav a").forEach((a) => {
-      a.classList.toggle("active", a.dataset.section === sec);
-    });
-    renderSectionTabs();
-    const title = routeTitle(hash);
-    const titleEl = q("#page-title");
-    if (titleEl) titleEl.textContent = title;
-  }
-
-  function routeTitle(hash) {
-    const id = (hash.replace(/^#\//, "") || "overview").split("?")[0];
-    const found = [...state.coreNav, ...state.navItems].find(i => (i.id === id) || (i.path === hash));
-    if (found?.label) return found.label;
-    const map = {
-      "overview": "总览",
-      "wan": "外网",
-      "lan": "内网",
-      "wifi": "无线",
-      "clients": "客户端",
-      "dns": "DNS",
-      "firewall": "防火墙",
-      "ssh": "SSH",
-      "system": "系统",
-      "ddns": "DDNS",
-      "qos": "QoS",
-      "parental": "家长控制",
-      "ipv6": "IPv6",
-      "plugins": "插件",
-      "adblock": "广告拦截",
-      "traffic": "流量监控",
-      "mihomo": "Mihomo",
-      "vlan": "VLAN",
-      "tailscale": "Tailscale",
-      "zerotier": "ZeroTier",
-    };
-    return map[id] || id;
-  }
-
-  async function loadNav() {
-    updateBannerApiBase();
+  async function api(
+    path,
+    { method = "GET", body, raw = false, timeout = 12000 } = {},
+  ) {
+    const controller = new AbortController(),
+      timer = setTimeout(() => controller.abort(), timeout);
     try {
-      // Try ui/nav first
-      const uiNav = await fetchJson("/api/v1/ui/nav");
-      const normalized = normalizeNav(uiNav);
-      if (normalized.length > 0) {
-        state.navItems = mergeCoreAndExternal(state.coreNav, normalized);
-        state.backendConnected = true;
-        setBannerVisible(false);
-        renderNav(state.navItems);
-        return;
+      const headers = { Accept: "application/json" };
+      if (body && !(body instanceof FormData)) {
+        headers["Content-Type"] = "application/json";
+        body = JSON.stringify(body);
       }
-      // If empty, try plugins list
-      const plugins = await fetchJson("/api/v1/plugins");
-      const list = Array.isArray(plugins) ? plugins : (plugins?.plugins || plugins?.items || []);
-      const pluginItems = (Array.isArray(list) ? list : []).map((p) => {
-        const name = (typeof p === "string") ? p : (p.name || p.id || p.key);
-        if (!name) return null;
-        return {
-          id: `plugin:${name}`,
-          label: `插件 ${name}`,
-          path: `#/plugins/${encodeURIComponent(name)}`,
-        };
-      }).filter(Boolean);
-      state.navItems = mergeCoreAndExternal(state.coreNav, pluginItems);
-      state.backendConnected = true;
-      setBannerVisible(false);
-      renderNav(state.navItems);
-    } catch (e) {
-      console.warn("Nav load failed; fallback to core nav", e);
-      state.backendConnected = false;
-      setBannerVisible(true);
-      renderNav(state.coreNav);
+      const response = await fetch(apiBase + path, {
+        method,
+        headers,
+        body,
+        credentials: "include",
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      if (response.status === 401 && path !== "/api/v1/session/password") {
+        showLogin();
+        const error = new Error("登录已过期，请重新登录");
+        error.status = 401;
+        throw error;
+      }
+      if (!response.ok) {
+        const detail = await response.text();
+        let data;
+        try {
+          data = JSON.parse(detail);
+        } catch {}
+        const error = new Error(
+          data?.message ||
+            data?.error ||
+            data?.errors?.join("；") ||
+            detail.slice(0, 500) ||
+            `请求失败（HTTP ${response.status}）`,
+        );
+        error.status = response.status;
+        throw error;
+      }
+      if (raw) return response;
+      if (response.status === 204) return {};
+      return await response.json();
+    } catch (error) {
+      if (error.name === "AbortError")
+        throw new Error(
+          "请求超时；若已提交操作，请查看作业记录确认结果后再重试。",
+        );
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
   }
-
-  function mergeCoreAndExternal(core, ext) {
-    const ids = new Set(core.map(i => i.id));
-    const merged = [...core];
-    for (const it of ext) {
-      if (!ids.has(it.id)) merged.push(it);
+  function feedback(text, tone = "") {
+    const e = $("#apply-msg");
+    e.textContent = text;
+    e.dataset.tone = tone;
+    e.classList.toggle("hidden", !text);
+  }
+  function dirty() {
+    state.pageDirty = true;
+    syncActions();
+  }
+  function syncActions() {
+    $("#apply-dirty").classList.toggle("hidden", !state.pageDirty);
+    $("#save-state").textContent = state.busy
+      ? "正在处理，请稍候"
+      : state.pageDirty
+        ? "修改尚未保存"
+        : state.pending
+          ? "已保存，尚未生成或应用"
+          : "没有未保存的修改";
+    $("#apply-save").disabled =
+      state.busy || state.loading || !state.section || !state.pageDirty || sectionReadOnly();
+    $("#apply-undo").disabled = state.busy || state.loading || !state.pageDirty;
+    $("#apply-run").disabled = state.busy || state.loading;
+    $("#page-refresh").disabled = state.busy || state.loading;
+    $("#logout-btn").disabled = state.busy;
+    const fields = $("#editor-fields");
+    if (fields) fields.disabled = state.busy || sectionReadOnly();
+    const restoreButton = $("#restore-submit");
+    if (restoreButton) restoreButton.disabled = state.busy;
+  }
+  function hostManagedSection() {
+    return !!state.section && (state.confirmedCapabilities?.hostManaged || []).includes(state.section.path);
+  }
+  function sectionReadOnly() {
+    return hostManagedSection() ||
+      (state.confirmedCapabilities === null && ["ssh", "system"].includes(state.section?.path));
+  }
+  function ownershipNotice() {
+    return state.confirmedCapabilities === null
+      ? "尚未确认部署能力，暂时只读。请刷新健康状态后再编辑 SSH 或系统设置。"
+      : "此设置由 NixOS 管理。这里仅展示保存的配置，网络应用不会修改系统主机名、时区或 SSH；请通过设备的 NixOS 配置变更。";
+  }
+  function deployment() {
+    const mode = state.health?.deployment?.mode;
+    $("#deployment-mode").textContent =
+      mode === "generate-only"
+        ? "仅生成模式"
+        : mode === "runtime"
+          ? "运行应用模式"
+          : "模式未报告";
+    $("#deployment-description").textContent =
+      mode === "generate-only"
+        ? "保存配置后可生成文件；此部署不会修改实际网络。"
+        : mode === "runtime"
+          ? "应用会修改部署环境；生成和应用结果请以作业记录为准。"
+          : "暂不能确认部署能力，请刷新连接。";
+    if (state.health?.deployment?.profile === "ipv4-single-lan") {
+      $("#deployment-description").textContent = "首版：IPv4 单内网，WAN 支持 DHCP / 静态地址，最多一个接入点，5 GHz 仅支持非 DFS 信道；不支持 PPPoE、IPv6、QoS、DDNS、家长控制、插件、UPnP 和访客网络。SSH 与系统设置由 NixOS 管理，本页应用不会修改它们。";
     }
-    return merged;
+    $("#apply-run").textContent =
+      mode === "generate-only" ? "生成配置" : "应用配置";
   }
-
-  function html(strings, ...values) {
-    return strings.reduce((acc, s, i) => acc + s + (values[i] ?? ""), "");
+  function routeInfo() {
+    const [raw, query = ""] = (
+      location.hash.replace(/^#\//, "") || "overview"
+    ).split("?");
+    const id = raw.startsWith("plugins/")
+      ? decodeURIComponent(raw.slice(8))
+      : raw;
+    return { id, tab: new URLSearchParams(query).get("tab") || "general" };
   }
-
-  function renderJSONCard(title, data) {
-    const container = document.createElement("div");
-    container.className = "card";
-    container.innerHTML = html`
-      <h3>${title}</h3>
-      <pre class="json-view">${escapeHtml(JSON.stringify(data ?? {}, null, 2))}</pre>
-    `;
-    return container;
+  function navigation(id) {
+    const info = pages[id] || [id, "扩展", "管理扩展配置。"];
+    $("#page-title").textContent = info[0];
+    $("#page-description").textContent = info[2];
+    document.title = `${info[0]} · NixOS 路由器`;
+    $("#top-nav").replaceChildren(
+      ...groups.map(([group, home]) =>
+        node(
+          "a",
+          {
+            href: `#/${home}`,
+            "aria-current": info[1] === group ? "page" : null,
+          },
+          group,
+        ),
+      ),
+    );
+    const items = Object.entries(pages).filter(([, v]) => v[1] === info[1]);
+    $("#section-tabs").replaceChildren(
+      ...items.map(([key, v]) =>
+        node(
+          "a",
+          { href: `#/${key}`, "aria-current": key === id ? "page" : null },
+          v[0],
+        ),
+      ),
+    );
+    $("#section-tabs").classList.toggle("hidden", items.length < 2);
   }
-
-  function escapeHtml(s) {
-    return String(s)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll("\"", "&quot;")
-      .replaceAll("'", "&#039;");
+  function beginEditor(cfg, path) {
+    const data = clone(get(cfg, path));
+    state.section = { path, data };
+    return data;
   }
-
-  function renderKeyValueCard(title, entries) {
-    const container = document.createElement("div");
-    container.className = "card";
-    const rows = entries
-      .filter(Boolean)
-      .map(([k, v]) => html`
-        <div class="k">${escapeHtml(k)}</div>
-        <div class="v">${escapeHtml(v ?? "-")}</div>
-      `)
-      .join("");
-    container.innerHTML = html`
-      <h3>${title}</h3>
-      <div class="kv">${rows}</div>
-    `;
-    return container;
+  function editor(...cards) {
+    return node(
+      "form",
+      {
+        id: "config-form",
+        onsubmit: (e) => {
+          e.preventDefault();
+          save();
+        },
+      },
+      node("fieldset", { id: "editor-fields" }, stack(cards)),
+    );
   }
-
-  function clearMain() {
-    state.pageUx = null;
-    const content = q("#page-content");
-    content.innerHTML = "";
-    return content;
-  }
-
-  async function renderOverview() {
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-
-    let statusData = null;
-    let configData = null;
-    let healthData = null;
-    let wifiCaps = null;
-    let clientCount = null;
-    try {
-      const [statusRes, configRes, healthRes, wifiCapsRes, clientsRes] = await Promise.allSettled([
-        fetchJson("/api/v1/status"),
-        fetchJson("/api/v1/config"),
-        fetchJson("/api/v1/health"),
-        fetchJson("/api/v1/capabilities/wifi"),
-        fetchJson("/api/v1/clients"),
-      ]);
-      if (statusRes.status === "fulfilled") statusData = statusRes.value;
-      if (configRes.status === "fulfilled") configData = configRes.value;
-      if (healthRes.status === "fulfilled") healthData = healthRes.value;
-      if (wifiCapsRes.status === "fulfilled") wifiCaps = wifiCapsRes.value;
-      if (clientsRes.status === "fulfilled") {
-        const raw = clientsRes.value;
-        const list = Array.isArray(raw) ? raw : (raw?.clients || raw?.items || []);
-        clientCount = Array.isArray(list) ? list.length : null;
-      }
-      if (statusRes.status === "fulfilled" || configRes.status === "fulfilled") {
-        state.backendConnected = true;
-        setBannerVisible(false);
-      }
-    } catch (e) {
-      // ignore; fallback to banner already set by nav loader
-    }
-
-    const summaryEntries = [];
-    const cfg = (configData && (configData.config || configData)) || null;
-    const hostname = (statusData?.system?.hostname || cfg?.system?.hostname);
-    const uptime = (healthData?.uptimeSecs != null ? `${healthData.uptimeSecs}s` : undefined);
-    const ifs = Array.isArray(statusData?.interfaces) ? statusData.interfaces : [];
-    const lan = ifs.find(i => i?.role === "lan");
-    const wan = ifs.find(i => i?.role === "wan");
-    const lanCidr = lan?.cidr || cfg?.lan?.ipv4Cidr;
-    const wanMode = wan?.mode || cfg?.wan?.mode;
-    const wifiAps = (statusData?.wifi?.aps ?? (Array.isArray(cfg?.wifi?.aps) ? cfg.wifi.aps.length : undefined));
-
-    if (hostname) summaryEntries.push(["主机名", String(hostname)]);
-    if (uptime != null) summaryEntries.push(["运行时间", String(uptime)]);
-    if (typeof wanMode === "string") summaryEntries.push(["外网模式", String(wanMode)]);
-    if (lanCidr) summaryEntries.push(["内网", String(lanCidr)]);
-    if (wifiAps != null) summaryEntries.push(["AP 数量", String(wifiAps)]);
-
-    const wanUp = wan?.up === true;
-    const wanDown = wan?.up === false;
-    const heroClass = wanUp ? "online" : (wanDown ? "offline" : "unknown");
-    const heroText = wanUp ? "已连接" : (wanDown ? "未连接" : "未知");
-    const formatRate = (bps) => {
-      if (typeof bps !== "number" || !Number.isFinite(bps)) return "—";
-      const bits = bps * 8;
-      if (bits >= 1e6) return `${(bits / 1e6).toFixed(1)} Mbps`;
-      if (bits >= 1e3) return `${Math.round(bits / 1e3)} Kbps`;
-      return `${Math.round(bits)} bps`;
-    };
-    const formatUptime = (secs) => {
-      const s = Number(secs);
-      if (!Number.isFinite(s)) return "—";
-      const d = Math.floor(s / 86400);
-      const h = Math.floor((s % 86400) / 3600);
-      const m = Math.floor((s % 3600) / 60);
-      if (d > 0) return `${d}d ${h}h`;
-      if (h > 0) return `${h}h ${m}m`;
-      return `${m}m ${Math.floor(s % 60)}s`;
-    };
-    const wanAddr = wan?.cidr || wan?.address || (wanMode ? String(wanMode).toUpperCase() : "—");
-    const dash = document.createElement("div");
-    dash.className = "dashboard";
-    dash.innerHTML = `
-      <div class="hero-card ${heroClass}">
-        <div class="hero-status">
-          <div class="hero-indicator">●</div>
-          <div class="hero-text">
-            <div class="hero-label">互联网状态</div>
-            <div class="hero-value">${escapeHtml(heroText)}</div>
-          </div>
-        </div>
-        <div class="hero-details">
-          <div class="hero-detail">
-            <span class="hero-detail-label">LAN</span>
-            <span class="hero-detail-value">${escapeHtml(lanCidr || "—")}</span>
-          </div>
-          <div class="hero-detail">
-            <span class="hero-detail-label">WAN</span>
-            <span class="hero-detail-value">${escapeHtml(String(wanAddr))}</span>
-          </div>
-          <div class="hero-detail">
-            <span class="hero-detail-label">主机</span>
-            <span class="hero-detail-value">${escapeHtml(hostname || "—")}</span>
-          </div>
-        </div>
-      </div>
-      <div class="stats-grid metrics-3col">
-        <div class="stat-card metric-card">
-          <div class="metric-icon">↓</div>
-          <div class="metric-content">
-            <div class="metric-value">${escapeHtml(formatRate(wan?.rxBps))}</div>
-            <div class="metric-label">下载</div>
-          </div>
-        </div>
-        <div class="stat-card metric-card">
-          <div class="metric-icon">↑</div>
-          <div class="metric-content">
-            <div class="metric-value">${escapeHtml(formatRate(wan?.txBps))}</div>
-            <div class="metric-label">上传</div>
-          </div>
-        </div>
-        <div class="stat-card metric-card">
-          <div class="metric-icon">◆</div>
-          <div class="metric-content">
-            <div class="metric-value">${escapeHtml(clientCount == null ? "—" : String(clientCount))}</div>
-            <div class="metric-label">设备</div>
-          </div>
-        </div>
-      </div>
-      <div class="stats-grid">
-        <div class="stat-card">
-          <div class="stat-label">运行时间</div>
-          <div class="stat-value">${escapeHtml(formatUptime(healthData?.uptimeSecs))}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">主机名</div>
-          <div class="stat-value">${escapeHtml(hostname || "—")}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">外网模式</div>
-          <div class="stat-value">${escapeHtml(wanMode || "—")}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">无线 AP</div>
-          <div class="stat-value">${escapeHtml(wifiAps == null ? "—" : String(wifiAps))}</div>
-        </div>
-      </div>
-    `;
-    content.insertBefore(dash, grid);
-
-    grid.appendChild(renderKeyValueCard("系统概览", summaryEntries.length ? summaryEntries : [["状态", state.backendConnected ? "连接正常" : "未知"]]));
-
-    // 接口列表（按 role 简要展示）
-    if (ifs.length > 0) {
-      const ifaceCard = document.createElement("div");
-      ifaceCard.className = "card";
-      const items = ifs.map((it) => {
-        const lines = [
-          ["名称", it?.name ?? "-"],
-          ["角色", it?.role ?? "-"],
-          ["状态", (it?.up === true ? "已连接" : (it?.up === false ? "未连接" : "未知"))],
-        ];
-        if (it?.role === "wan" && it?.mode) lines.push(["模式", it.mode]);
-        if (it?.role === "lan" && it?.cidr) lines.push(["CIDR", it.cidr]);
-        if (typeof it?.speedMbps === "number") {
-          const dx = (typeof it?.duplex === "string" && it.duplex) ? `（${it.duplex}）` : "";
-          lines.push(["速率", `${it.speedMbps} Mbps${dx}`]);
-        } else if (typeof it?.duplex === "string" && it.duplex) {
-          lines.push(["双工", String(it.duplex)]);
-        }
-        if (typeof it?.rxBytes === "number" || typeof it?.txBytes === "number") {
-          const rx = (it?.rxBytes != null) ? String(it.rxBytes) : "-";
-          const tx = (it?.txBytes != null) ? String(it.txBytes) : "-";
-          lines.push(["累计 RX/TX（B）", `${rx} / ${tx}`]);
-        }
-        if (typeof it?.rxBps === "number" || typeof it?.txBps === "number") {
-          const rx = (it?.rxBps != null) ? String(it.rxBps) : "-";
-          const tx = (it?.txBps != null) ? String(it.txBps) : "-";
-          lines.push(["速率 RX/TX（B/s，估算）", `${rx} / ${tx}`]);
-        }
-        const rows = lines.map(([k, v]) => html`<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div>`).join("");
-        return html`<div class="kv iface">${rows}</div>`;
-      }).join("<hr class=\"sep\" />");
-      ifaceCard.innerHTML = html`
-        <h3>接口</h3>
-        <div class="iface-list">${items}</div>
-      `;
-      grid.appendChild(ifaceCard);
-    }
-
-    // WiFi 能力摘要
-    if (wifiCaps) {
-      const capsEntries = [];
-      if (wifiCaps.maxAP != null) capsEntries.push(["最大 AP 数", String(wifiCaps.maxAP)]);
-      if (Array.isArray(wifiCaps.bands)) capsEntries.push(["支持频段", wifiCaps.bands.join(", ") || "-"]);
-      if (wifiCaps.driver) capsEntries.push(["驱动", String(wifiCaps.driver)]);
-      grid.appendChild(renderKeyValueCard("WiFi 能力", capsEntries.length ? capsEntries : [["信息", "未提供"]]));
-    }
-
-    // 守护进程/插件状态
-    const units = Array.isArray(statusData?.units) ? statusData.units : [];
-    const unitsSrc = (statusData?.sources && statusData.sources.units) || "-";
-    const unitStateBadge = (st) => {
-      const s = String(st || "").toLowerCase();
-      const color = (s === "active") ? "var(--accent)" :
-                    (s === "failed") ? "var(--error)" :
-                    (s === "inactive" ? "var(--muted)" : "var(--warning)");
-      return `<span style="color:${color}; font-weight:500;">${escapeHtml(s || "-")}</span>`;
-    };
-    const knownOrder = ["dnsmasq","hostapd","nftables","mihomo","tailscaled","headscale","zerotier-one"];
-    if (units.length > 0) {
-      const byId = {};
-      units.forEach(u => { if (u?.id) byId[u.id] = u; });
-      const ordered = [];
-      knownOrder.forEach(id => { if (byId[id]) ordered.push(byId[id]); });
-      units.forEach(u => { if (!knownOrder.includes(u?.id)) ordered.push(u); });
-      const items = (ordered.length ? ordered : units).map((u) => {
-        const id = u?.id || "-";
-        const unit = u?.unit || "-";
-        const st = unitStateBadge(u?.state);
-        const rows = [
-          ["ID", id],
-          ["Unit", unit],
-          ["状态", st],
-        ].map(([k,v]) => `<div class="k">${escapeHtml(k)}</div><div class="v">${typeof v === "string" ? v : v}</div>`).join("");
-        return `<div class="kv">${rows}</div>`;
-      }).join("<hr class=\"sep\" />");
-      const card = document.createElement("div");
-      card.className = "card";
-      card.innerHTML = `<h3>守护进程/插件状态</h3><div class="small muted">来源：${escapeHtml(unitsSrc)}</div>${items}`;
-      grid.appendChild(card);
-    } else {
-      const card = document.createElement("div");
-      card.className = "card";
-      card.innerHTML = `<h3>守护进程/插件状态</h3><p class="muted">无数据</p><div class="small muted">来源：${escapeHtml(unitsSrc)}</div>`;
-      grid.appendChild(card);
-    }
-
-    if (statusData) {
-      grid.appendChild(renderJSONCard("状态 JSON", statusData));
-    } else {
-      grid.appendChild(renderJSONCard("状态 JSON（无数据）", { error: "无法加载 /api/v1/status" }));
-    }
-    if (configData) {
-      grid.appendChild(renderJSONCard("配置 JSON", configData));
-    } else {
-      grid.appendChild(renderJSONCard("配置 JSON（无数据）", { error: "无法加载 /api/v1/config" }));
-    }
-  }
-
-async function renderWAN() {
-  const content = clearMain();
-  const grid = document.createElement("div");
-  grid.className = "grid";
-  content.appendChild(grid);
-  const [base, status] = await Promise.all([
-    loadConfigCached(false),
-    fetchJson("/api/v1/status").catch(() => ({})),
-  ]);
-  const ifs = Array.isArray(status?.interfaces) ? status.interfaces : [];
-  const wanIf = ifs.find(i => i?.role === "wan") || {};
-  const draft = deepClone(base.wan || { mode: "dhcp" });
-  if (!draft.static) draft.static = {};
-  if (!draft.pppoe) draft.pppoe = {};
-
-  const card = document.createElement("div");
-  card.className = "card";
-  const form = document.createElement("div");
-  form.className = "form";
-  const selMode = createSelect([["dhcp","DHCP"],["static","静态"],["pppoe","PPPoE"]], draft.mode || "dhcp");
-  selMode.addEventListener("change", () => { draft.mode = selMode.value; refreshVisibility(); markDirty(); });
-  form.appendChild(createRow("模式", selMode));
-
-  const inIface = createInput("text", { value: draft.interface || "" });
-  inIface.addEventListener("input", () => { draft.interface = inIface.value.trim(); markDirty(); });
-  form.appendChild(createRow("接口名", inIface));
-
-  // static fields
-  const inAddr = createInput("text", { value: draft.static.addressCidr || "", placeholder: "203.0.113.10/24" });
-  inAddr.addEventListener("input", () => { draft.static.addressCidr = inAddr.value.trim(); markDirty(); });
-  const inGw = createInput("text", { value: draft.static.gateway || "" });
-  inGw.addEventListener("input", () => { draft.static.gateway = inGw.value.trim(); markDirty(); });
-  const inDns = createInput("text", { value: Array.isArray(draft.static.dns) ? draft.static.dns.join(", ") : "" , placeholder: "1.1.1.1,8.8.8.8" });
-  inDns.addEventListener("input", () => {
-    draft.static.dns = inDns.value.split(",").map(s => s.trim()).filter(Boolean);
-    markDirty();
-  });
-  const rowStaticAddr = createRow("静态地址/CIDR", inAddr);
-  const rowStaticGw = createRow("静态网关", inGw);
-  const rowStaticDns = createRow("静态 DNS（逗号分隔）", inDns);
-
-  // pppoe fields
-  const inUser = createInput("text", { value: draft.pppoe.username || "" });
-  inUser.addEventListener("input", () => { draft.pppoe.username = inUser.value.trim(); markDirty(); });
-  const inPwd = createInput("password", { value: "****" });
-  inPwd.addEventListener("input", () => { draft.pppoe.password = inPwd.value; markDirty(); });
-  const rowPPPoEUser = createRow("PPPoE 用户名", inUser);
-  const rowPPPoEPwd = createRow("PPPoE 密码（未更改留空或 ****）", inPwd);
-
-  form.appendChild(rowStaticAddr);
-  form.appendChild(rowStaticGw);
-  form.appendChild(rowStaticDns);
-  form.appendChild(rowPPPoEUser);
-  form.appendChild(rowPPPoEPwd);
-
-  // Status summary
-  const summary = [];
-  if (wanIf.name) summary.push(["当前接口", wanIf.name]);
-  if (wanIf.mode) summary.push(["当前模式", wanIf.mode]);
-  if (wanIf.up != null) summary.push(["链路", wanIf.up ? "已连接" : "未连接"]);
-  card.appendChild(form);
-  grid.appendChild(card);
-  if (summary.length) grid.appendChild(renderKeyValueCard("当前状态（只读）", summary));
-
-  // UX bar
-  mountUxBar(content, {
-    onSave: async () => {
-      const res = await saveSection("wan", draft, { andGenerate: false });
-      if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-    },
-    onSaveAndGenerate: async () => {
-      const res = await saveSection("wan", draft, { andGenerate: true });
-      if (!res.saved) {
-        alert(`保存失败：${res.error?.message || "未知错误"}`);
-      } else {
-        alert("已保存并提交生成任务（不应用运行态）");
-      }
-    },
-  });
-
-  function refreshVisibility() {
-    const isStatic = (selMode.value === "static");
-    const isPPPoE = (selMode.value === "pppoe");
-    rowStaticAddr.style.display = isStatic ? "" : "none";
-    rowStaticGw.style.display = isStatic ? "" : "none";
-    rowStaticDns.style.display = isStatic ? "" : "none";
-    rowPPPoEUser.style.display = isPPPoE ? "" : "none";
-    rowPPPoEPwd.style.display = isPPPoE ? "" : "none";
-  }
-  refreshVisibility();
-}
-
-async function renderLAN() {
-  const content = clearMain();
-  const grid = document.createElement("div");
-  grid.className = "grid";
-  content.appendChild(grid);
-  const [base, status] = await Promise.all([
-    loadConfigCached(false),
-    fetchJson("/api/v1/status").catch(() => ({})),
-  ]);
-  const lanIf = (Array.isArray(status?.interfaces) ? status.interfaces : []).find(i => i?.role === "lan") || {};
-  const draft = deepClone(base.lan || { bridgeName: "br-lan", ipv4Cidr: "", dhcp: { enable: true } });
-  if (!draft.dhcp) draft.dhcp = { enable: true };
-  if (!Array.isArray(draft.ports)) draft.ports = [];
-  if (!Array.isArray(draft.staticLeases)) draft.staticLeases = [];
-
-  const card = document.createElement("div");
-  card.className = "card";
-  const form = document.createElement("div");
-  form.className = "form";
-
-  const inBridge = createInput("text", { value: draft.bridgeName || "" });
-  inBridge.addEventListener("input", () => { draft.bridgeName = inBridge.value.trim(); markDirty(); });
-  form.appendChild(createRow("桥（Bridge）", inBridge));
-
-  const inCIDR = createInput("text", { value: draft.ipv4Cidr || "", placeholder: "192.168.1.1/24" });
-  inCIDR.addEventListener("input", () => { draft.ipv4Cidr = inCIDR.value.trim(); markDirty(); });
-  form.appendChild(createRow("IPv4 CIDR", inCIDR));
-
-  // ports[]
-  const portsEditor = createArrayEditor({
-    title: "端口（ports）",
-    items: () => draft.ports,
-    renderItem: (it, idx) => {
-      const wrap = document.createElement("div");
-      const inp = createInput("text", { value: it || "" });
-      inp.addEventListener("input", () => { draft.ports[idx] = inp.value.trim(); markDirty(); });
-      wrap.appendChild(createRow(`端口 #${idx+1}`, inp));
-      return wrap;
-    },
-    onAdd: () => { draft.ports.push(""); },
-  });
-
-  // DHCP
-  const chkDHCP = createInput("checkbox", { checked: !!draft.dhcp.enable });
-  chkDHCP.addEventListener("change", () => { draft.dhcp.enable = chkDHCP.checked; markDirty(); });
-  form.appendChild(createRow("启用 DHCP", chkDHCP));
-  const inStart = createInput("text", { value: draft.dhcp.rangeStart || "" });
-  inStart.addEventListener("input", () => { draft.dhcp.rangeStart = inStart.value.trim(); markDirty(); });
-  const inEnd = createInput("text", { value: draft.dhcp.rangeEnd || "" });
-  inEnd.addEventListener("input", () => { draft.dhcp.rangeEnd = inEnd.value.trim(); markDirty(); });
-  const inLease = createInput("number", { value: draft.dhcp.leaseMins ?? 1440, min: 1 });
-  inLease.addEventListener("input", () => { draft.dhcp.leaseMins = Number(inLease.value || 0); markDirty(); });
-  form.appendChild(createRow("DHCP 起始", inStart));
-  form.appendChild(createRow("DHCP 结束", inEnd));
-  form.appendChild(createRow("租约（分钟）", inLease));
-
-  // staticLeases[]
-  const leasesEditor = createArrayEditor({
-    title: "静态租约（staticLeases）",
-    items: () => draft.staticLeases,
-    renderItem: (it, idx) => {
-      const w = document.createElement("div");
-      const inIP = createInput("text", { value: it?.ip || "" });
-      inIP.addEventListener("input", () => { draft.staticLeases[idx].ip = inIP.value.trim(); markDirty(); });
-      const inMAC = createInput("text", { value: it?.mac || "" });
-      inMAC.addEventListener("input", () => { draft.staticLeases[idx].mac = inMAC.value.trim(); markDirty(); });
-      const inHost = createInput("text", { value: it?.hostname || "" });
-      inHost.addEventListener("input", () => { draft.staticLeases[idx].hostname = inHost.value.trim(); markDirty(); });
-      w.appendChild(createRow("IP", inIP));
-      w.appendChild(createRow("MAC", inMAC));
-      w.appendChild(createRow("主机名", inHost));
-      return w;
-    },
-    onAdd: () => { draft.staticLeases.push({ ip: "", mac: "", hostname: "" }); },
-  });
-
-  card.appendChild(form);
-  grid.appendChild(card);
-  grid.appendChild(portsEditor);
-  grid.appendChild(leasesEditor);
-
-  // 状态只读
-  const rows = [];
-  if (lanIf.up != null) rows.push(["链路", lanIf.up ? "已连接" : "未连接"]);
-  if (rows.length) grid.appendChild(renderKeyValueCard("当前状态（只读）", rows));
-
-  mountUxBar(content, {
-    onSave: async () => {
-      const res = await saveSection("lan", draft, { andGenerate: false });
-      if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-    },
-    onSaveAndGenerate: async () => {
-      const res = await saveSection("lan", draft, { andGenerate: true });
-      if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`);
-      else alert("已保存并提交生成任务（不应用运行态）");
-    },
-  });
-}
-  function renderPlaceholder(id) {
-    const content = clearMain();
-    const wrap = document.createElement("div");
-    wrap.className = "card";
-    const map = {
-      "wan": "外网",
-      "lan": "内网",
-      "wifi": "无线",
-      "clients": "客户端",
-      "dns": "DNS",
-      "firewall": "防火墙",
-      "ssh": "SSH",
-      "system": "系统",
-      "plugins": "插件",
-    };
-    const title = map[id] || id;
-    wrap.innerHTML = html`
-      <h3>${title}（占位）</h3>
-      <p class="muted">本里程碑为只读壳，后续提供编辑与应用配置。</p>
-    `;
-    content.appendChild(wrap);
-  }
-
-  const routes = {
-    "overview": renderOverview,
-    "wan": () => renderWAN(),
-    "lan": () => renderLAN(),
-    "wifi": () => renderWiFi(),
-    "clients": () => renderClients(),
-    "dns": () => renderDNS(),
-    "firewall": () => renderFirewall(),
-    "ssh": () => renderSSH(),
-    "system": () => renderSystem(),
-    "plugins": () => renderPlugins(),
-    "ddns": () => renderDDNS(),
-    "qos": () => renderQoS(),
-    "parental": () => renderParental(),
-    "ipv6": () => renderIPv6(),
-    // Plugin-specific top-level routes
-    "adblock": () => renderPluginAdblock(),
-    "traffic": () => renderPluginTraffic(),
-    "mihomo": () => renderPluginMihomo(),
-    "vlan": () => renderPluginVlan(),
-    "tailscale": () => renderPluginTailscale(),
-    "zerotier": () => renderPluginZerotier(),
-  };
-
-  function currentRoute() {
-    return (location.hash.replace(/^#\//, "") || "overview").split("?")[0];
-  }
-
-  async function renderRoute() {
-    if (!state.loggedIn) {
-      // 登录视图下不渲染主壳内容
-      return;
-    }
-    setActiveLink();
-    const id = currentRoute();
-    // Support generic plugin route: #/plugins/<name>
-    if (id.startsWith("plugins/")) {
-      const name = id.split("/")[1] || "";
-      await renderPluginGeneric(name);
-      return;
-    }
-    const fn = routes[id] || (() => renderPlaceholder(id));
-    await fn();
-  }
-
-  function initEvents() {
-  state.prevHash = location.hash || "#/overview";
-  window.addEventListener("beforeunload", (e) => {
-    if (state.pageDirty) {
-      e.preventDefault();
-      e.returnValue = "";
-    }
-  });
-  window.addEventListener("hashchange", (e) => {
-    if (state.pageDirty && !state.suppressHashRevert) {
-      const ok = confirm("有未保存的更改，确定离开本页吗？");
-      if (!ok) {
-        state.suppressHashRevert = true;
-        location.hash = state.prevHash;
-        setTimeout(() => { state.suppressHashRevert = false; }, 0);
-        return;
-      }
-      clearDirty();
-    }
-    state.prevHash = location.hash || "#/overview";
-    renderRoute();
-  });
-    const onNavClick = (e) => {
-      const a = e.target.closest("a");
-      if (!a) return;
-      setNavOpen(false);
-      setTimeout(setActiveLink, 0);
-    };
-    q("#top-nav")?.addEventListener("click", onNavClick);
-    q("#section-tabs")?.addEventListener("click", onNavClick);
-    q("#nav-toggle")?.addEventListener("click", () => {
-      const open = !q("#top-nav")?.classList.contains("open");
-      setNavOpen(open);
-    });
-    q("#apply-undo")?.addEventListener("click", async () => {
-      if (!state.pageDirty) {
-        setApplyMsg("没有可撤销的更改");
-        return;
-      }
-      clearDirty();
-      state.configCache = null;
-      setApplyMsg("已撤销未保存的更改");
-      await renderRoute();
-    });
-    q("#apply-save")?.addEventListener("click", async () => {
-      const fn = state.pageUx?.onSave;
-      if (!fn) {
-        setApplyMsg("当前页面没有可保存的更改");
-        return;
-      }
-      setApplyBusy(true);
-      try {
-        await fn();
-        if (!state.pageDirty) setApplyMsg("已保存");
-      } finally {
-        setApplyBusy(false);
-      }
-    });
-    q("#apply-run")?.addEventListener("click", async () => {
-      setApplyBusy(true);
-      setApplyMsg("正在应用配置…");
-      try {
-        if (state.pageDirty && state.pageUx?.onSave) {
-          await state.pageUx.onSave();
-          if (state.pageDirty) {
-            setApplyMsg("保存未完成，已取消应用");
-            return;
-          }
-        }
-        const res = await fetchJson("/api/v1/apply", { method: "POST" });
-        const jobId = res?.jobId || res?.id;
-        const mode = res?.mode || "generate-only";
-        setApplyMsg(jobId ? `已提交 ${mode} 作业 ${jobId}` : `已提交应用（${mode}）`);
-      } catch (e) {
-        setApplyMsg(`应用失败：${e?.status === 401 ? "未登录或会话已过期" : (e?.message || "未知错误")}`);
-      } finally {
-        setApplyBusy(false);
-      }
-    });
-    const retry = q("#retry-btn");
-    retry?.addEventListener("click", async () => {
-      await loadNav();
-      await renderRoute();
-    });
-    const form = q("#login-form");
-    form?.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const u = q("#login-username")?.value?.trim() || "";
-      const p = q("#login-password")?.value || "";
-      const errEl = q("#login-error");
-      errEl?.classList.add("hidden");
-      errEl.textContent = "";
-      const btn = q("#login-submit");
-      btn?.setAttribute("disabled", "true");
-      try {
-        await fetchJson("/api/v1/session", {
-          method: "POST",
-          body: { username: u, password: p },
-        });
-        // 登录成功后，重新检查会话并进入主壳
-        await checkSession();
-        if (state.loggedIn) {
-          hideLoginView();
-          await afterLoginEnter();
-        }
-      } catch (e) {
-        const msg = (e?.status === 401) ? "用户名或密码错误" : `登录失败：${e?.message || "未知错误"}`;
-        if (errEl) {
-          errEl.textContent = msg;
-          errEl.classList.remove("hidden");
-        } else {
-          alert(msg);
-        }
-      } finally {
-        btn?.removeAttribute("disabled");
-      }
-    });
-    const logout = q("#logout-btn");
-    logout?.addEventListener("click", async () => {
-      try {
-        await fetchJson("/api/v1/session", { method: "DELETE" });
-      } catch (_) {
-        // ignore
-      }
-      onUnauthorized();
-    });
-    // Expose a tiny API for debugging
-    window.app = {
-      retryConnect: async () => { await loadNav(); await renderRoute(); },
-      get apiBase() { return apiBase; },
-      get state() { return state; },
-      async logout() { await fetchJson("/api/v1/session", { method: "DELETE" }).catch(() => {}); onUnauthorized(); },
-    };
-  }
-
-  async function checkSession() {
-    try {
-      const s = await fetchJson("/api/v1/session");
-      state.loggedIn = true;
-      state.currentUser = s?.user || s || null;
-      hideLoginView();
-      setUserDisplay();
-      return true;
-    } catch (e) {
-      if (e?.status === 401) {
-        onUnauthorized();
-        return false;
-      }
-      // If endpoint not ready yet, treat as unauthorized to gate content until merged
-      onUnauthorized();
+  async function save() {
+    if (state.busy) return false;
+    if (!state.section) return true;
+    if (sectionReadOnly()) {
+      feedback(ownershipNotice(), "error");
       return false;
     }
+    if (!$("#config-form")?.reportValidity()) {
+      feedback("保存失败：请检查标出的表单字段。", "error");
+      return false;
+    }
+    const section = state.section,
+      candidate = clone(section.data);
+    state.busy = true;
+    syncActions();
+    try {
+      const latest = await api("/api/v1/config");
+      const cfg = clone(latest.config || latest);
+      set(cfg, section.path, candidate);
+      await api("/api/v1/config", { method: "PUT", body: cfg });
+      state.configCache = clone(cfg);
+      state.pageDirty = false;
+      state.pending = true;
+      feedback("配置已保存，尚未生成或应用。", "good");
+      return true;
+    } catch (e) {
+      feedback(`保存失败：${e.message}`, "error");
+      return false;
+    } finally {
+      state.busy = false;
+      syncActions();
+    }
   }
-
-  async function afterLoginEnter() {
-    setUserDisplay();
-    await loadNav();
-    if (!location.hash) location.hash = "#/overview";
+  function resultMessage(result) {
+    const notes = [
+      ...(Array.isArray(result.warnings) ? result.warnings : []),
+      ...(Array.isArray(result.notes) ? result.notes : []),
+    ].join("；");
+    if (result.error || result.status === "failed")
+      return `应用失败：${result.message || result.error || "未知错误"}${notes ? "；" + notes : ""}`;
+    if (result.appliedRuntime === true)
+      return `${result.mode === "managed-runtime" ? "网络配置应用完成（SSH 与系统设置仍由 NixOS 管理）" : "运行配置应用完成"}${notes ? "；提示：" + notes : ""}`;
+    if (result.mode === "generate-only" && result.appliedRuntime === false)
+      return `配置生成完成，未应用运行态${notes ? "；提示：" + notes : ""}`;
+    return "作业已提交，尚未确认完成；请查看系统中的作业记录。";
+  }
+  async function apply() {
+    if (state.busy) return;
+    if (state.pageDirty && !(await save())) {
+      feedback(
+        `保存未完成，已取消应用。${$("#apply-msg").textContent || "请检查表单字段。"}`,
+        "error",
+      );
+      return;
+    }
+    state.busy = true;
+    syncActions();
+    feedback("正在处理已保存的配置…");
+    try {
+      let result = await api("/api/v1/apply", {
+        method: "POST",
+        timeout: 60000,
+      });
+      if (result.status === "queued" || result.status === "running") {
+        sessionStorage.setItem("router-apply-job", result.jobId);
+        for (let attempt = 0; attempt < 30; attempt++) {
+          await new Promise((r) => setTimeout(r, 1000));
+          const job = await api(
+            `/api/v1/jobs/${encodeURIComponent(result.jobId)}`,
+          );
+          const item = job.job || job;
+          if (item.status === "failed" || item.status === "success") {
+            let payload = {};
+            try {
+              payload = JSON.parse(item.payload || "{}");
+            } catch {}
+            result = {
+              ...result,
+              ...item,
+              ...payload,
+              appliedRuntime:
+                item.status === "success" && payload.mode === "generate-only"
+                  ? false
+                  : (payload.appliedRuntime ?? result.appliedRuntime),
+            };
+            break;
+          }
+        }
+      }
+      const failed = !!result.error || result.status === "failed";
+      feedback(
+        resultMessage(result),
+        failed
+          ? "error"
+          : result.appliedRuntime === true ||
+              (result.mode === "generate-only" &&
+                result.appliedRuntime === false)
+            ? "good"
+            : "",
+      );
+      if (failed) sessionStorage.removeItem("router-apply-job");
+      if (
+        !failed &&
+        (result.appliedRuntime === true ||
+          (result.mode === "generate-only" && result.appliedRuntime === false))
+      ) {
+        state.pending = false;
+        sessionStorage.removeItem("router-apply-job");
+      }
+    } catch (e) {
+      feedback(`应用失败：${e.message}`, "error");
+    } finally {
+      state.busy = false;
+      syncActions();
+    }
+  }
+  const unavailable = (text) =>
+    notice(text || "当前环境未提供运行数据；以下为配置值，不代表设备已生效。");
+  function interfaceStatus(status, role) {
+    const item = status?.interfaces?.find((v) => v.role === role);
+    return kv("运行信息", [
+      ["接口", item?.name || "未提供"],
+      [
+        "链路",
+        item?.source === "sysfs" && typeof item.up === "boolean"
+          ? item.up
+            ? "已连接"
+            : "未连接"
+          : "未采集",
+      ],
+      [
+        "数据说明",
+        item?.source === "sysfs"
+          ? "来自系统接口；链路连接不等于互联网可达。"
+          : "接口未被采集，名称来自配置。",
+      ],
+    ]);
+  }
+  function wifiCapabilitiesNotice() {
+    const caps = state.wifiCaps;
+    if (!caps?.available || caps.source !== "iw") {
+      return unavailable(`无线硬件能力未确认；不会把预览值当作硬件检测结果。${caps?.reason ? "检测说明：" + caps.reason : "请检查设备和 iw 工具后刷新。"}`);
+    }
+    const usable = (caps.channels || []).filter((c) => !c.disabled && !c.noIR).length;
+    return notice(`来源：iw · 接口 ${caps.interface} · ${caps.phy}。硬件报告频段：${(caps.bands || []).join("、")}；AP 模式：${caps.apSupported ? "支持" : "不支持"}；当前未标记禁用或禁止发射的信道：${usable} 个。管理配置最多 ${caps.managedMaxAP} 个接入点（不是硬件上限）。首版 5 GHz 仅支持 36/40/44/48/149/153/157/161/165 非 DFS 信道；仍需确认监管域、驱动和实际关联结果。`);
+  }
+  function coreEditor(id, cfg, status) {
+    const d = beginEditor(cfg, id),
+      fields = (...defs) => defs.map((args) => field(d, ...args));
+    if (id === "wan") {
+      d.static ||= {};
+      d.pppoe ||= {};
+      const staticFields = node(
+        "div",
+        { class: "form-grid" },
+        fields(
+          [
+            "static.addressCidr",
+            "静态地址 / CIDR",
+            { placeholder: "203.0.113.10/24", required: true },
+          ],
+          ["static.gateway", "网关"],
+          [
+            "static.dns",
+            "DNS 服务器",
+            {
+              type: "textarea",
+              list: true,
+              help: "每行或逗号分隔一个 IP 地址。",
+              full: true,
+            },
+          ],
+        ),
+      );
+      const pppFields = node(
+        "div",
+        { class: "form-grid" },
+        fields(
+          ["pppoe.username", "PPPoE 用户名", { required: true }],
+          [
+            "pppoe.password",
+            "PPPoE 密码",
+            { type: "password", required: !d.pppoe.password },
+          ],
+        ),
+      );
+      const refresh = () => {
+        for (const [group, mode] of [
+          [staticFields, "static"],
+          [pppFields, "pppoe"],
+        ]) {
+          group.hidden = d.mode !== mode;
+          group
+            .querySelectorAll("input,textarea")
+            .forEach((e) => (e.disabled = d.mode !== mode));
+        }
+      };
+      const main = formCard(
+        "连接设置",
+        fields(
+          [
+            "mode",
+            "上网方式",
+            {
+              choices: [
+                ["dhcp", "自动获取（DHCP）"],
+                ["static", "静态地址"],
+                ["pppoe", "宽带拨号（PPPoE）"],
+              ],
+              change: refresh,
+            },
+          ],
+          [
+            "interface",
+            "外网接口",
+            { placeholder: "例如 eth0", help: "填写目标路由器实际网口名称。" },
+          ],
+        ),
+      );
+      const details = card("连接参数", staticFields, pppFields);
+      const refreshAll = () => {
+        refresh();
+        details.hidden = d.mode === "dhcp";
+      };
+      main.querySelector("select").addEventListener("change", refreshAll);
+      refreshAll();
+      return editor(main, details, interfaceStatus(status, "wan"));
+    }
+    if (id === "lan") {
+      d.dhcp ||= {};
+      d.ports ||= [];
+      d.staticLeases ||= [];
+      return editor(
+        notice(
+          "更改内网地址并应用后，需使用新地址重新连接。本页面不会自动回退旧地址。",
+          "warning",
+        ),
+        formCard(
+          "内网与地址分配",
+          fields(
+            ["bridgeName", "网桥名称", { required: true }],
+            [
+              "ipv4Cidr",
+              "路由器地址 / CIDR",
+              { required: true, placeholder: "192.168.1.1/24" },
+            ],
+            ["dhcp.enable", "启用 DHCP", { type: "checkbox" }],
+            ["dhcp.leaseMins", "租约时间（分钟）", { type: "number", min: 1 }],
+            ["dhcp.rangeStart", "地址池起始地址"],
+            ["dhcp.rangeEnd", "地址池结束地址"],
+          ),
+        ),
+        stringList(d, "ports", "网桥端口", "物理接口", "例如 eth1"),
+        collection(
+          "静态租约",
+          d.staticLeases,
+          (item) => [
+            field(item, "hostname", "设备名称"),
+            field(item, "ip", "IP 地址", { required: true }),
+            field(item, "mac", "MAC 地址", { required: true }),
+            field(item, "comment", "备注"),
+          ],
+          () => ({ hostname: "", ip: "", mac: "", comment: "" }),
+        ),
+        interfaceStatus(status, "lan"),
+      );
+    }
+    if (id === "dns")
+      return editor(
+        formCard(
+          "DNS 设置",
+          fields(
+            ["enableDnsmasq", "启用本地 DNS 服务", { type: "checkbox" }],
+            ["domain", "本地域名", { placeholder: "lan" }],
+          ),
+        ),
+        stringList(d, "upstreams", "上游 DNS", "服务器 IP", "1.1.1.1"),
+      );
+    if (id === "wifi") {
+      d.aps ||= [];
+      const originalNames = new WeakMap(d.aps.map((ap) => [ap, ap.ssid]));
+      return editor(
+        wifiCapabilitiesNotice(),
+        formCard(
+          "无线设置",
+          fields(
+            ["enable", "启用 WiFi", { type: "checkbox" }],
+            ["bridgeToLan", "桥接到内网", { type: "checkbox" }],
+          ),
+        ),
+        collection(
+          "接入点",
+          d.aps,
+          (ap) => {
+            const originalSSID = originalNames.get(ap);
+            const password = field(ap, "psk", "无线密码", {
+              type: "password",
+              required:
+                !ap.psk || (ap.psk === "****" && ap.ssid !== originalSSID),
+              minlength: 8,
+              help: "留空保留当前密码；修改无线名称后需要重新输入密码。",
+            });
+            return [
+              field(ap, "ssid", "无线名称（SSID）", {
+                required: true,
+                change: () => {
+                  password.querySelector("input").required =
+                    !ap.psk || (ap.psk === "****" && ap.ssid !== originalSSID);
+                },
+              }),
+              field(ap, "band", "频段", {
+                choices: [
+                  ["2g", "2.4 GHz"],
+                  ["5g", "5 GHz"],
+                  ["6g", "6 GHz"],
+                ],
+              }),
+              field(ap, "channel", "信道", {
+                type: "number",
+                help: "0 表示自动；实际支持能力取决于无线设备。",
+              }),
+              password,
+              field(ap, "enable", "启用此接入点", { type: "checkbox" }),
+              field(ap, "guest", "访客网络", {
+                type: "checkbox",
+                help: "配置标记不等于已验证访客隔离。",
+              }),
+              field(ap, "isolate", "隔离无线客户端", { type: "checkbox" }),
+            ];
+          },
+          () => ({
+            ssid: "",
+            band: "2g",
+            channel: 0,
+            psk: "",
+            enable: true,
+            guest: false,
+            isolate: false,
+          }),
+        ),
+      );
+    }
+    if (id === "firewall") {
+      d.portForwards ||= [];
+      return editor(
+        formCard(
+          "访问策略",
+          fields(
+            ["enable", "启用防火墙", { type: "checkbox" }],
+            ["natEnabled", "启用 NAT", { type: "checkbox" }],
+            [
+              "upnpEnable",
+              "启用 UPnP",
+              {
+                type: "checkbox",
+                help: "需在目标环境部署 UPnP 服务；保存开关不代表服务已启动。",
+              },
+            ],
+          ),
+        ),
+        collection(
+          "端口转发",
+          d.portForwards,
+          (p) => [
+            field(p, "description", "规则说明"),
+            field(p, "protocol", "协议", {
+              choices: [
+                ["tcp", "TCP"],
+                ["udp", "UDP"],
+              ],
+            }),
+            field(p, "externalPort", "外部端口", {
+              type: "number",
+              min: 1,
+              max: 65535,
+              required: true,
+            }),
+            field(p, "externalPortEnd", "外部结束端口", {
+              type: "number",
+              max: 65535,
+              help: "0 表示单个端口。",
+            }),
+            field(p, "destIp", "目标 IP", { required: true }),
+            field(p, "destPort", "目标端口", {
+              type: "number",
+              min: 1,
+              max: 65535,
+              required: true,
+            }),
+          ],
+          () => ({
+            description: "",
+            protocol: "tcp",
+            externalPort: 0,
+            externalPortEnd: 0,
+            destIp: "",
+            destPort: 0,
+          }),
+        ),
+        stringList(d, "blockedMacs", "阻止的设备", "MAC 地址"),
+      );
+    }
+    if (id === "ssh")
+      return editor(
+        formCard(
+          "SSH 访问",
+          fields(
+            ["enable", "启用 SSH", { type: "checkbox" }],
+            ["port", "监听端口", { type: "number", min: 1, max: 65535 }],
+            ["passwordAuth", "允许密码登录", { type: "checkbox" }],
+          ),
+        ),
+        stringList(
+          d,
+          "authorizedKeys",
+          "授权公钥",
+          "SSH 公钥",
+          "ssh-ed25519 …",
+        ),
+        unavailable(
+          "此处展示 SSH 配置。实际监听端口与认证策略需在目标设备上验证。",
+        ),
+      );
+    if (id === "qos") {
+      d.devicePolicy ||= [];
+      return editor(
+        notice(
+          "总带宽使用 Mbps，设备限速使用 Kbps。实际限速需要目标设备启用流量控制。",
+        ),
+        formCard(
+          "总带宽",
+          fields(
+            ["enable", "启用带宽管理", { type: "checkbox" }],
+            ["upMbps", "上行带宽（Mbps）", { type: "number" }],
+            ["downMbps", "下行带宽（Mbps）", { type: "number" }],
+          ),
+        ),
+        collection(
+          "设备策略",
+          d.devicePolicy,
+          (p) => [
+            field(p, "mac", "MAC 地址"),
+            field(p, "ip", "IP 地址", { help: "MAC 和 IP 至少填写一个。" }),
+            field(p, "priority", "优先级", {
+              choices: [
+                ["low", "低"],
+                ["normal", "普通"],
+                ["high", "高"],
+              ],
+            }),
+            field(p, "limitKbps", "限速（Kbps）", {
+              type: "number",
+              help: "0 表示不设置设备限速。",
+            }),
+          ],
+          () => ({ mac: "", ip: "", priority: "normal", limitKbps: 0 }),
+        ),
+      );
+    }
+    if (id === "parental") {
+      d.rules ||= [];
+      return editor(
+        notice(
+          "当前可保存规则，定时执行引擎尚未完成。不会将保存成功显示为已限制设备上网。",
+        ),
+        formCard(
+          "家长控制",
+          fields(["enable", "启用家长控制", { type: "checkbox" }]),
+        ),
+        collection(
+          "访问规则",
+          d.rules,
+          (p) => [
+            field(p, "group", "分组名称"),
+            field(p, "action", "动作", {
+              choices: [
+                ["block", "禁止访问"],
+                ["allow", "允许访问"],
+              ],
+            }),
+            field(p, "targetMacs", "设备 MAC 地址", {
+              type: "textarea",
+              list: true,
+              help: "每行一个设备地址。",
+            }),
+            field(p, "schedule", "生效时间段", {
+              placeholder: "Mon-Fri 22:00-07:00",
+              help: "保留完整时间规则；实际执行仍需定时引擎支持。",
+            }),
+          ],
+          () => ({ group: "", action: "block", targetMacs: [], schedule: "" }),
+        ),
+      );
+    }
+    if (id === "ipv6")
+      return editor(
+        notice(
+          "保存 IPv6 意图；地址获取、前缀分配及实际转发仍需目标设备支持。",
+        ),
+        formCard(
+          "IPv6 设置",
+          fields(
+            ["enable", "启用 IPv6", { type: "checkbox" }],
+            [
+              "wanMode",
+              "外网获取方式",
+              {
+                choices: [
+                  ["disabled", "禁用"],
+                  ["dhcpv6", "DHCPv6"],
+                  ["slaac", "SLAAC"],
+                  ["pppoe6", "PPPoE IPv6"],
+                ],
+              },
+            ],
+            [
+              "lanPrefixDelegation",
+              "为内网分配前缀（PD）",
+              { type: "checkbox" },
+            ],
+            [
+              "lanRouterAdvertisement",
+              "向内网发送路由通告（RA）",
+              { type: "checkbox" },
+            ],
+          ),
+        ),
+      );
+    if (id === "ddns") {
+      const providerFields = node("div");
+      const specs = {
+        cloudflare: [
+          ["apiToken", "API Token", "password"],
+          ["zone", "Zone"],
+          ["record", "记录名称"],
+        ],
+        duckdns: [
+          ["token", "Token", "password"],
+          ["domain", "域名"],
+        ],
+        aliyun: [
+          ["accessKey", "Access Key", "password"],
+          ["secretKey", "Secret Key", "password"],
+          ["domain", "域名"],
+          ["record", "记录名称"],
+        ],
+        custom: [
+          ["url", "更新 URL", "url"],
+          ["token", "Token", "password"],
+        ],
+      };
+      const draw = () => {
+        const p = d.provider || "cloudflare";
+        d[p] ||= {};
+        providerFields.replaceChildren(
+          formCard(
+            "服务商参数",
+            specs[p].map(([key, label, type]) =>
+              field(d[p], key, label, {
+                type: type || "text",
+                required:
+                  d.enable &&
+                  (type !== "password" || !d[p][key]) &&
+                  !(p === "custom" && key === "token"),
+              }),
+            ),
+          ),
+        );
+      };
+      if (!specs[d.provider]) d.provider = "cloudflare";
+      const basic = formCard(
+        "动态 DNS",
+        fields(
+          ["enable", "启用动态 DNS", { type: "checkbox", change: draw }],
+          [
+            "provider",
+            "服务提供商",
+            {
+              choices: [
+                ["cloudflare", "Cloudflare"],
+                ["duckdns", "DuckDNS"],
+                ["aliyun", "阿里云"],
+                ["custom", "自定义 URL"],
+              ],
+              change: draw,
+            },
+          ],
+        ),
+      );
+      draw();
+      return editor(
+        notice(
+          "提供商配置可保存；周期更新服务尚未完成，请勿将保存结果当作 DNS 记录已更新。",
+        ),
+        basic,
+        providerFields,
+      );
+    }
+    return editor(
+      formCard(
+        "基本配置",
+        fields(
+          ["hostname", "主机名", { required: true }],
+          [
+            "timezone",
+            "时区",
+            {
+              placeholder: "Asia/Shanghai",
+              help: "保存后仍需应用；此值不证明目标系统时区已改变。",
+            },
+          ],
+        ),
+      ),
+    );
+  }
+  function pluginsEditor(cfg) {
+    const d = beginEditor(cfg, "plugins");
+    const ids = [
+      ...pluginIds,
+      ...Object.keys(d).filter((id) => !pluginIds.includes(id) && !pages[id]),
+    ];
+    return editor(
+      notice(
+        "开关表示配置意图；插件是否安装、启动及正常工作，需要在运行环境确认。",
+      ),
+      node(
+        "div",
+        { class: "grid" },
+        ids.map((id) => {
+          d[id] ||= { enable: false, config: {} };
+          return card(
+            pages[id]?.[0] || id,
+            field(d[id], "enable", `启用 ${pages[id]?.[0] || id}`, {
+              type: "checkbox",
+            }),
+            node(
+              "p",
+              { class: "help" },
+              pages[id]?.[2] || "自定义扩展；已有配置会保留。",
+            ),
+            link(`plugins/${encodeURIComponent(id)}`, "配置详情"),
+          );
+        }),
+      ),
+      card(
+        "基础服务",
+        node("p", {}, "带宽管理、家长控制、IPv6 与动态 DNS 使用独立配置入口。"),
+        node(
+          "div",
+          { class: "toolbar" },
+          ["qos", "parental", "ipv6", "ddns"].map((id) => link(id)),
+        ),
+      ),
+    );
+  }
+  function pluginEditor(id, cfg) {
+    const d = beginEditor(cfg, `plugins.${id}`);
+    d.config ||= {};
+    const c = d.config,
+      fields = (...defs) => defs.map((args) => field(c, ...args));
+    const parts = [
+      notice(
+        "此页编辑插件配置；保存或生成文件不证明插件已经安装、接入或生效。",
+      ),
+      formCard("插件开关", [
+        field(d, "enable", `启用 ${pages[id]?.[0] || id}`, {
+          type: "checkbox",
+        }),
+      ]),
+    ];
+    if (id === "adblock")
+      parts.push(
+        stringList(
+          c,
+          "lists",
+          "规则订阅",
+          "订阅 URL",
+          "https://example.com/hosts",
+        ),
+        stringList(c, "entries", "自定义规则", "域名或规则"),
+      );
+    else if (id === "traffic")
+      parts.push(
+        unavailable("流量采集器尚未接入，因此不展示模拟曲线或虚构流量。"),
+        formCard(
+          "保留策略",
+          fields([
+            "retentionDays",
+            "保留天数",
+            { type: "number", min: 1, default: 7 },
+          ]),
+        ),
+      );
+    else if (id === "mihomo")
+      parts.push(
+        formCard(
+          "代理配置",
+          fields(
+            ["profile", "配置文件 / Profile"],
+            [
+              "mode",
+              "工作模式",
+              {
+                choices: [
+                  ["rule", "规则"],
+                  ["global", "全局"],
+                  ["direct", "直连"],
+                ],
+              },
+            ],
+            [
+              "dns.port",
+              "DNS 监听端口",
+              { type: "number", min: 1, max: 65535, default: 1053 },
+            ],
+            ["tun.enable", "启用 TUN", { type: "checkbox" }],
+          ),
+        ),
+      );
+    else if (id === "vlan") {
+      c.vlans ||= [];
+      parts.push(
+        unavailable("当前仅生成 VLAN 定义说明，尚未创建实际 VLAN 接口。"),
+        collection(
+          "VLAN 定义",
+          c.vlans,
+          (v) => [
+            field(v, "vid", "VLAN ID", {
+              type: "number",
+              min: 1,
+              max: 4094,
+              required: true,
+            }),
+            field(v, "name", "接口名称", { placeholder: "vlan10" }),
+            field(v, "bridge", "关联网桥", { placeholder: "br-lan" }),
+          ],
+          () => ({ vid: 10, name: "", bridge: "" }),
+        ),
+      );
+    } else if (id === "tailscale")
+      parts.push(
+        formCard(
+          "接入配置",
+          fields(
+            [
+              "controlPlane",
+              "控制平面",
+              {
+                choices: [
+                  ["official", "Tailscale 官方"],
+                  ["headscale", "Headscale"],
+                ],
+              },
+            ],
+            [
+              "loginServer",
+              "登录服务器",
+              {
+                type: "url",
+                placeholder: "https://headscale.example.com",
+                help: "使用 Headscale 时填写其完整地址。",
+              },
+            ],
+            ["authKey", "认证密钥", { type: "password" }],
+          ),
+        ),
+      );
+    else if (id === "zerotier")
+      parts.push(
+        formCard(
+          "控制器",
+          fields(
+            [
+              "controlPlane",
+              "控制平面",
+              {
+                choices: [
+                  ["public", "公共控制器"],
+                  ["private", "私有控制器"],
+                ],
+              },
+            ],
+            ["controllerUrl", "控制器 URL", { type: "url" }],
+            ["apiToken", "API Token", { type: "password" }],
+          ),
+        ),
+        stringList(c, "networks", "加入网络", "网络 ID"),
+      );
+    else {
+      const input = node("textarea", { id: "plugin-advanced", rows: 12 });
+      // References belong to secrets, not array positions. Reordering a JSON
+      // array must not move a different item's credential into that position.
+      const secretRefs = new Map();
+      input.value = JSON.stringify(
+        c,
+        (key, value) => {
+          if (
+            /password|passwd|psk|secret|token|authkey|privatekey|accesskey|apikey/i.test(
+              key,
+            ) &&
+            value
+          ) {
+            const ref = `__保留密钥_${secretRefs.size + 1 + "_" + Math.random().toString(36).slice(2)}__`;
+            secretRefs.set(ref, value);
+            return ref;
+          }
+          return value;
+        },
+        2,
+      );
+      input.addEventListener("input", () => {
+        dirty();
+        try {
+          const value = JSON.parse(input.value, (_, item) =>
+            typeof item === "string" && secretRefs.has(item)
+              ? clone(secretRefs.get(item))
+              : item,
+          );
+          if (!value || Array.isArray(value) || typeof value !== "object")
+            throw new Error("参数必须是 JSON 对象");
+          d.config = value;
+          input.setCustomValidity("");
+        } catch (e) {
+          input.setCustomValidity(`参数格式错误：${e.message}`);
+        }
+      });
+      parts.push(
+        card(
+          "扩展参数",
+          notice(
+            "此扩展尚无专用表单，请按插件定义编辑 JSON 对象。保留密钥标记会还原对应密钥，移动数组项时请保留该项标记。",
+          ),
+          node(
+            "div",
+            { class: "form-row" },
+            node("label", { for: input.id }, "高级配置（JSON）"),
+            input,
+          ),
+        ),
+      );
+    }
+    return editor(parts);
+  }
+  function overview(cfg, status, clients) {
+    const items = clients?.clients || [],
+      measured = ["leases", "mixed"].includes(clients?.source);
+    const metric = (label, value, detail) =>
+      node(
+        "section",
+        { class: "card metric" },
+        node("div", { class: "metric-label" }, label),
+        node("div", { class: "metric-value" }, value),
+        node("p", { class: "help" }, detail),
+      );
+    const unitNames = {
+      active: "运行中",
+      inactive: "未运行",
+      failed: "失败",
+      missing: "未获取 / 不可用",
+      unknown: "未采集",
+    };
+    const services = card(
+      "服务运行状态",
+      status?.sources?.units === "systemctl"
+        ? table(
+            ["服务", "状态"],
+            (status.units || []).map((u) => [
+              u.unit,
+              unitNames[u.state] || "未采集",
+            ]),
+            "服务运行状态",
+          )
+        : empty("未采集服务状态", "当前部署没有提供系统服务查询结果。"),
+    );
+    const interfaces = (status?.interfaces || []).map((i) => [
+      i.role === "wan" ? "外网 WAN" : "内网 LAN",
+      i.name || "未提供",
+      i.source === "sysfs" && typeof i.up === "boolean"
+        ? i.up
+          ? "已连接"
+          : "未连接"
+        : "未采集",
+      i.source === "sysfs" ? "系统接口" : "配置值",
+    ]);
+    return node(
+      "div",
+      { class: "dashboard stack" },
+      node(
+        "div",
+        { class: "metrics" },
+        metric(
+          "管理服务",
+          state.health ? "可访问" : "不可用",
+          "仅表示管理 API 可访问",
+        ),
+        metric(
+          "客户端租约",
+          measured ? String(items.length) : "未采集",
+          measured ? "租约数量不等于当前在线数量" : "未接入有效租约数据",
+        ),
+        metric(
+          "已配置接入点",
+          String((cfg.wifi?.aps || []).length),
+          "配置数量，不是硬件检测结果",
+        ),
+        metric(
+          "配置主机名",
+          cfg.system?.hostname || "未设置",
+          "保存值，不代表已应用到主机",
+        ),
+      ),
+      node(
+        "div",
+        { class: "grid" },
+        card(
+          "网络接口",
+          interfaces.length
+            ? table(
+                ["用途", "接口", "链路状态", "来源"],
+                interfaces,
+                "网络接口状态",
+              )
+            : empty("运行信息不可用", "请检查管理服务连接。"),
+          node("div", { class: "toolbar" }, link("wan"), link("lan")),
+        ),
+        kv("家庭网络配置", [
+          ["内网网段", cfg.lan?.ipv4Cidr || "未设置"],
+          [
+            "地址分配",
+            cfg.lan?.dhcp?.enable ? "已配置启用 DHCP" : "未配置 DHCP",
+          ],
+          ["上网方式", cfg.wan?.mode || "未设置"],
+          ["无线配置", cfg.wifi?.enable ? "已配置启用" : "已配置关闭"],
+        ]),
+      ),
+      services,
+      card(
+        "数据与生效说明",
+        notice(
+          "接口链路连接不代表互联网可达。无线硬件、实时流量和设备在线状态尚未完整采集；这里不会使用模拟数据填充。",
+        ),
+        node(
+          "div",
+          { class: "toolbar" },
+          link("clients", "查看设备记录"),
+          link("system?tab=activity", "查看作业记录"),
+        ),
+      ),
+    );
+  }
+  function clientsPage(data) {
+    const items = data?.clients || [];
+    const query = node("input", {
+        id: "client-search",
+        type: "search",
+        placeholder: "名称、IP 或 MAC",
+      }),
+      body = node("div");
+    function draw() {
+      const q = query.value.toLowerCase();
+      const rows = items.filter((c) =>
+        [c.hostname, c.ip, c.mac].some((v) =>
+          String(v || "")
+            .toLowerCase()
+            .includes(q),
+        ),
+      );
+      body.replaceChildren(
+        rows.length
+          ? table(
+              ["名称", "IP 地址", "MAC 地址", "来源", "访问策略", "操作"],
+              rows.map((c) => [
+                c.hostname || "未命名",
+                c.ip || "—",
+                c.mac || "—",
+                c.source === "static" ? "静态绑定" : "DHCP 租约",
+                c.blockedSource === "last-good" && c.blockedRuntimeKnown
+                  ? (c.blocked ? "已应用阻止" : "未应用阻止")
+                  : c.blockedRuntimeKnown === false
+                    ? "尚未确认运行阻断状态（仅有配置）"
+                    : (c.blocked ? "已配置阻止" : "未配置阻止"),
+                c.mac ? btn("编辑", () => editClient(c), "quiet") : "—",
+              ]),
+              "客户端记录",
+            )
+          : empty(
+              q ? "没有匹配的设备" : "没有设备记录",
+              "静态绑定或 DHCP 租约不等于设备当前在线。",
+            ),
+      );
+    }
+    query.addEventListener("input", draw);
+    draw();
+    return stack(
+      notice(
+        !data
+          ? "客户端数据获取失败，请刷新重试。"
+          : data.source === "stub"
+            ? "当前没有实时租约采集；列表仅可能包含静态绑定配置。"
+            : "列表来自 DHCP 租约；租约有效不代表设备当前在线。",
+      ),
+      card(
+        "设备记录",
+        node(
+          "div",
+          { class: "form-row" },
+          node("label", { for: query.id }, "搜索设备"),
+          query,
+        ),
+        body,
+      ),
+    );
+  }
+  function editClient(client) {
+    const d = { hostname: client.hostname || "", blocked: !!(client.draftBlocked ?? client.blocked) };
+    // This dialog owns its draft independently of the page configuration editor.
+    const name = node("input", { id: "client-name", value: d.hostname }),
+      blocked = node("input", { id: "client-blocked", type: "checkbox" });
+    blocked.checked = d.blocked;
+    const message = notice("修改访问策略后需要生成或应用配置。");
+    const dialog = node("dialog", { "aria-labelledby": "client-dialog-title" }),
+      close = () => {
+        dialog.close();
+        dialog.remove();
+      };
+    const submit = btn(
+      "保存设备",
+      async () => {
+        submit.disabled = true;
+        state.busy = true;
+        syncActions();
+        try {
+          await api(`/api/v1/clients/${encodeURIComponent(client.mac)}`, {
+            method: "PATCH",
+            body: { hostname: name.value, blocked: blocked.checked },
+          });
+          state.pending = true;
+          close();
+          await renderRoute();
+          feedback("设备配置已保存，尚未生成或应用。", "good");
+        } catch (e) {
+          message.textContent = e.message;
+          message.classList.add("error");
+        } finally {
+          submit.disabled = false;
+          state.busy = false;
+          syncActions();
+        }
+      },
+      "primary",
+    );
+    dialog.append(
+      node("h3", { id: "client-dialog-title" }, "编辑设备"),
+      node("p", {}, client.mac),
+      node(
+        "div",
+        { class: "form-row" },
+        node("label", { for: name.id }, "设备名称"),
+        name,
+      ),
+      node(
+        "div",
+        { class: "form-row check" },
+        node("label", { for: blocked.id }, "阻止访问"),
+        blocked,
+      ),
+      message,
+      node("div", { class: "toolbar" }, btn("取消", close), submit),
+    );
+    dialog.addEventListener("close", () => dialog.remove());
+    document.body.append(dialog);
+    dialog.showModal();
+  }
+  function diagnostic(title, value) {
+    return node(
+      "details",
+      { class: "diagnostic" },
+      node("summary", {}, title),
+      node("pre", {}, JSON.stringify(value, null, 2)),
+    );
+  }
+  function redact(value) {
+    if (Array.isArray(value)) return value.map(redact);
+    if (value && typeof value === "object")
+      return Object.fromEntries(
+        Object.entries(value).map(([k, v]) => [
+          k,
+          /password|passwd|psk|secret|token|authkey|privatekey|accesskey|apikey/i.test(
+            k,
+          )
+            ? v
+              ? "已设置"
+              : "未设置"
+            : redact(v),
+        ]),
+      );
+    return value;
+  }
+  function systemPage(cfg, status, tab, activity) {
+    const tabs = [
+      ["general", "基本设置"],
+      ["account", "账户与备份"],
+      ["activity", "操作记录"],
+      ["diagnostics", "诊断"],
+    ];
+    if (!tabs.some(([key]) => key === tab)) tab = "general";
+    const nav = node(
+      "nav",
+      { class: "system-tabs", "aria-label": "系统功能" },
+      tabs.map(([key, title]) =>
+        node(
+          "a",
+          {
+            href: `#/system?tab=${key}`,
+            "aria-current": tab === key ? "page" : null,
+          },
+          title,
+        ),
+      ),
+    );
+    if (tab === "general") return stack(nav, coreEditor("system", cfg, status));
+    if (tab === "account") return stack(nav, accountPage());
+    if (tab === "diagnostics")
+      return stack(
+        nav,
+        notice(
+          "诊断信息默认折叠。配置中的密钥字段已遮盖；分享前仍请检查地址、设备标识等信息。",
+        ),
+        card(
+          "诊断信息",
+          diagnostic("管理服务健康状态", state.health || { error: "未获取" }),
+          diagnostic("运行状态与来源", status || { error: "未获取" }),
+          diagnostic("配置诊断（密钥已遮盖）", redact(cfg)),
+        ),
+      );
+    const jobs = activity?.jobs,
+      audit = activity?.audit;
+    const search = node("input", {
+        type: "search",
+        id: "activity-search",
+        placeholder: "作业、状态、操作者或动作",
+      }),
+      lists = node("div", { class: "stack" });
+    const date = (v) => (v ? new Date(v).toLocaleString() : "—");
+    const draw = () => {
+      const q = search.value.toLowerCase(),
+        match = (row) =>
+          Object.values(row).some((v) =>
+            String(v ?? "")
+              .toLowerCase()
+              .includes(q),
+          );
+      const j = (jobs?.jobs || []).filter(match),
+        a = (audit?.audit || []).filter(match);
+      const jobResult = (v) => {
+        let payload = {};
+        try {
+          payload = JSON.parse(v.payload || "{}");
+        } catch {}
+        return node(
+          "details",
+          {},
+          node(
+            "summary",
+            {},
+            v.error
+              ? "查看失败原因"
+              : v.status === "success"
+                ? payload.mode === "generate-only"
+                  ? "仅生成完成"
+                  : "查看执行结果"
+                : "查看作业",
+          ),
+          node("p", {}, v.error || "作业状态：" + v.status),
+          diagnostic("作业详情", redact(v)),
+        );
+      };
+      lists.replaceChildren(
+        card(
+          "最近 20 条配置作业",
+          !jobs
+            ? notice("作业获取失败，请刷新重试。", "error")
+            : j.length
+              ? table(
+                  ["时间", "作业", "状态", "结果"],
+                  j.map((v) => [
+                    date(v.createdAt),
+                    `${v.kind || "作业"} · ${v.id}`,
+                    v.status,
+                    jobResult(v),
+                  ]),
+                  "配置作业",
+                )
+              : empty("没有匹配的作业", "生成或应用后可在这里查看执行记录。"),
+        ),
+        card(
+          "最近 50 条操作审计",
+          !audit || audit.source === "stub"
+            ? notice("审计获取失败，请刷新重试。", "error")
+            : a.length
+              ? table(
+                  ["时间", "操作者", "动作", "详情"],
+                  a.map((v) => [date(v.at), v.actor, v.action, v.detail]),
+                  "操作审计",
+                )
+              : empty("没有匹配的记录", "这里展示服务器记录的操作。"),
+        ),
+      );
+    };
+    search.addEventListener("input", draw);
+    draw();
+    return stack(
+      nav,
+      node(
+        "div",
+        { class: "form-row" },
+        node("label", { for: search.id }, "搜索操作记录"),
+        search,
+      ),
+      lists,
+    );
+  }
+  function accountPage() {
+    const current = node("input", {
+      id: "password-current",
+      type: "password",
+      autocomplete: "current-password",
+      required: true,
+    });
+    const next = node("input", {
+      id: "password-next",
+      type: "password",
+      autocomplete: "new-password",
+      required: true,
+      minlength: 8,
+    });
+    const again = node("input", {
+      id: "password-again",
+      type: "password",
+      autocomplete: "new-password",
+      required: true,
+      minlength: 8,
+    });
+    const passwordMessage = notice("新密码至少 8 位。"),
+      passwordForm = node("form");
+    const passwordButton = node(
+      "button",
+      { type: "submit", class: "btn primary" },
+      "修改密码",
+    );
+    passwordForm.append(
+      node(
+        "div",
+        { class: "form-grid" },
+        [
+          [current, "当前密码"],
+          [next, "新密码"],
+          [again, "再次输入新密码"],
+        ].map(([input, label]) =>
+          node(
+            "div",
+            { class: "form-row" },
+            node("label", { for: input.id }, label),
+            input,
+          ),
+        ),
+      ),
+      passwordMessage,
+      passwordButton,
+    );
+    passwordForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (next.value !== again.value) {
+        passwordMessage.textContent = "两次输入的新密码不一致。";
+        return;
+      }
+      passwordButton.disabled = true;
+      try {
+        await api("/api/v1/session/password", {
+          method: "POST",
+          body: { currentPassword: current.value, newPassword: next.value },
+        });
+        passwordForm.reset();
+        passwordMessage.textContent = "密码已修改，其他登录会话已失效。";
+      } catch (e) {
+        passwordMessage.textContent = e.message;
+      } finally {
+        passwordButton.disabled = false;
+      }
+    });
+    const backupMessage = notice(
+      "备份包含配置和密钥，请保存在可信位置。恢复只保存配置，之后需生成或应用。",
+    );
+    const download = btn("下载配置备份", async () => {
+      download.disabled = true;
+      try {
+        const response = await api("/api/v1/backup", { raw: true });
+        const blob = await response.blob(),
+          url = URL.createObjectURL(blob),
+          a = node("a", {
+            href: url,
+            download: `router-backup-${new Date().toISOString().slice(0, 10)}.json`,
+          });
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (e) {
+        backupMessage.textContent = e.message;
+      } finally {
+        download.disabled = false;
+      }
+    });
+    const file = node("input", {
+      id: "restore-file",
+      type: "file",
+      accept: ".json,application/json",
+    });
+    const restore = btn("恢复所选备份", async () => {
+      if (state.busy) return;
+      if (!file.files.length) {
+        backupMessage.textContent = "请先选择备份文件。";
+        return;
+      }
+      if (
+        !confirm("恢复会覆盖当前保存的配置，但不会立即应用到网络。是否继续？")
+      )
+        return;
+      restore.disabled = true;
+      state.busy = true;
+      syncActions();
+      try {
+        const form = new FormData();
+        form.append("file", file.files[0]);
+        await api("/api/v1/backup/restore", { method: "POST", body: form });
+        state.configCache = null;
+        state.pending = true;
+        file.value = "";
+        backupMessage.textContent = "备份已恢复，尚未生成或应用。";
+        syncActions();
+      } catch (e) {
+        backupMessage.textContent = `恢复失败：${e.message}`;
+      } finally {
+        restore.disabled = false;
+        state.busy = false;
+        syncActions();
+      }
+    });
+    restore.id = "restore-submit";
+    const reboot = btn(
+      "重启设备",
+      async () => {
+        if (
+          !state.health?.deployment?.rebootAllowed ||
+          !confirm("确认重启当前部署设备？连接将暂时中断。")
+        )
+          return;
+        reboot.disabled = true;
+        try {
+          await api("/api/v1/system/reboot", { method: "POST" });
+          feedback("重启请求已提交，等待设备重新连接。");
+        } catch (e) {
+          feedback(e.message, "error");
+        } finally {
+          reboot.disabled = !state.health?.deployment?.rebootAllowed;
+        }
+      },
+      "danger",
+    );
+    reboot.disabled = !state.health?.deployment?.rebootAllowed;
+    return stack(
+      card("管理员密码", passwordForm),
+      card(
+        "配置备份与恢复",
+        backupMessage,
+        download,
+        node(
+          "div",
+          { class: "form-row" },
+          node("label", { for: file.id }, "选择配置备份"),
+          file,
+        ),
+        restore,
+      ),
+      card(
+        "设备维护",
+        node(
+          "p",
+          { class: "help" },
+          reboot.disabled
+            ? "此部署未开放设备重启能力。"
+            : "重启会中断当前连接。",
+        ),
+        reboot,
+      ),
+    );
+  }
+  async function renderRoute() {
+    clearTimeout(refreshTimer);
+    if (!state.loggedIn) return;
+    const epoch = ++state.epoch;
+    state.loading = true;
+    state.section = null;
+    state.pageDirty = false;
+    syncActions();
+    let route;
+    try {
+      route = routeInfo();
+    } catch {
+      route = { id: "overview", tab: "general" };
+    }
+    const { id, tab } = route;
+    state.route = id;
+    navigation(id);
+    const target = $("#page-content");
+    target.setAttribute("aria-busy", "true");
+    target.replaceChildren(notice("正在加载…"));
+    $("#status-banner").classList.add("hidden");
+    const optional = (promise) =>
+      promise.catch((e) => {
+        if (e.status === 401) throw e;
+        return null;
+      });
+    try {
+      const needsStatus = ["overview", "wan", "lan", "system"].includes(id);
+      const [response, health, status, clients, jobs, audit, wifiCaps] =
+        await Promise.all([
+          api("/api/v1/config"),
+          optional(api("/api/v1/health")),
+          needsStatus ? optional(api("/api/v1/status")) : null,
+          ["overview", "clients"].includes(id)
+            ? optional(api("/api/v1/clients"))
+            : null,
+          id === "system" && tab === "activity"
+            ? optional(api("/api/v1/jobs"))
+            : null,
+          id === "system" && tab === "activity"
+            ? optional(api("/api/v1/audit"))
+            : null,
+          id === "wifi" ? optional(api("/api/v1/capabilities/wifi")) : null,
+        ]);
+      if (epoch !== state.epoch || !state.loggedIn) return;
+      const cfg = response.config || response;
+      state.configCache = clone(cfg);
+      state.health = health;
+      // A failed optional health request must not remove confirmed ownership.
+      if (health?.deployment?.mode)
+        state.confirmedCapabilities = clone(health.capabilities || {});
+      state.wifiCaps = wifiCaps;
+      deployment();
+      let content;
+      if (id === "overview") content = overview(cfg, status, clients);
+      else if (id === "clients") content = clientsPage(clients);
+      else if (id === "plugins") content = pluginsEditor(cfg);
+      else if (id === "system")
+        content = systemPage(cfg, status, tab, { jobs, audit });
+      else if (
+        pluginIds.includes(id) ||
+        (!pages[id] && Object.hasOwn(cfg.plugins || {}, id))
+      )
+        content = pluginEditor(id, cfg);
+      else if (pages[id]) content = coreEditor(id, cfg, status);
+      else content = card("页面不存在", link("overview", "返回总览"));
+      if (sectionReadOnly()) {
+        content = stack(notice(ownershipNotice()), content);
+      } else if ((state.confirmedCapabilities?.unsupported || []).includes(id) || (state.confirmedCapabilities?.managedNetwork && pluginIds.includes(id))) {
+        content = stack(notice("当前网络版本不支持应用此功能。保存草稿不代表生效；启用后提交应用将被拒绝。"), content);
+      }
+      target.replaceChildren(content);
+      target.dataset.route = id;
+      state.previousHash = location.hash;
+      if (health?.startupWarning) {
+        $("#status-banner").textContent = `启动时发现保存的草稿异常，已使用上次成功配置提供管理服务；磁盘上的异常草稿未覆盖。必须修复并保存配置后才能应用。启动诊断：${health.startupWarning}`;
+        $("#status-banner").classList.remove("hidden");
+      } else if (!health) {
+        $("#status-banner").textContent =
+          "管理服务健康状态暂时无法获取；配置读取已完成。";
+        $("#status-banner").classList.remove("hidden");
+      }
+    } catch (e) {
+      if (epoch !== state.epoch) return;
+      state.section = null;
+      target.replaceChildren(
+        card(
+          "页面加载失败",
+          notice(e.message, "error"),
+          btn("重新加载", renderRoute),
+        ),
+      );
+    } finally {
+      if (epoch === state.epoch) {
+        state.loading = false;
+        target.setAttribute("aria-busy", "false");
+        syncActions();
+      }
+    }
+    if (epoch === state.epoch && id === "overview") scheduleOverviewRefresh(epoch);
+  }
+  function scheduleOverviewRefresh(epoch) {
+    refreshTimer = setTimeout(() => {
+      if (epoch !== state.epoch || !state.loggedIn || state.route !== "overview") return;
+      if (
+        document.visibilityState === "visible" &&
+        !state.busy &&
+        !document.querySelector("dialog[open]")
+      ) {
+        renderRoute();
+      } else {
+        // Pausing a tick must not stop future polling after visibility or work changes.
+        scheduleOverviewRefresh(epoch);
+      }
+    }, 15000);
+  }
+  function showLogin() {
+    clearTimeout(refreshTimer);
+    state.epoch++;
+    state.loggedIn = false;
+    state.pageDirty = false;
+    state.section = null;
+    state.loading = false;
+    $("#main-view").classList.add("hidden");
+    $("#login-view").classList.remove("hidden");
+    $("#page-content").replaceChildren();
+    document.querySelectorAll("dialog").forEach((d) => {
+      d.close();
+      d.remove();
+    });
+    $("#login-username").focus();
+  }
+  async function loggedIn(session) {
+    state.loggedIn = true;
+    $("#login-view").classList.add("hidden");
+    $("#main-view").classList.remove("hidden");
+    $("#user-display").textContent =
+      session.username || session.user || "admin";
     await renderRoute();
+    const job = sessionStorage.getItem("router-apply-job");
+    if (job) feedback(`上次作业 ${job} 尚未确认完成，请在系统操作记录中核查。`);
   }
-
-  async function boot() {
-    initEvents();
-    updateBannerApiBase();
-    const ok = await checkSession();
-    if (ok) {
-      await afterLoginEnter();
-    } else {
-      showLoginView();
-    }
+  function discard() {
+    return !state.pageDirty || confirm("当前修改尚未保存，是否放弃修改？");
   }
-
-  // Plugin specific pages (typed where reasonable; otherwise fallback to generic)
-  async function renderPluginAdblock() {
-    return renderPluginGeneric("adblock");
+  function closeNav() {
+    $("#top-nav").classList.remove("open");
+    $("#nav-toggle").setAttribute("aria-expanded", "false");
   }
-  async function renderPluginTraffic() {
-    return renderPluginGeneric("traffic");
-  }
-  async function renderPluginMihomo() {
-    return renderPluginGeneric("mihomo");
-  }
-  async function renderPluginVlan() {
-    const cfg = await loadConfigCached(false);
-    const plug = deepClone((cfg.plugins || {})["vlan"] || null);
-    if (!plug || !plug.config) return renderPluginGeneric("vlan");
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-    const draft = plug;
-    if (!Array.isArray(draft.config.vlans)) draft.config.vlans = [];
-    const card = document.createElement("div");
-    card.className = "card";
-    const form = document.createElement("div");
-    form.className = "form";
-    const chk = createInput("checkbox", { checked: !!draft.enable });
-    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
-    form.appendChild(createRow("启用插件", chk));
-    card.appendChild(form);
-    grid.appendChild(card);
-    const vlEditor = createArrayEditor({
-      title: "VLAN 列表",
-      items: () => draft.config.vlans,
-      renderItem: (v, idx) => {
-        const w = document.createElement("div");
-        const inId = createInput("number", { value: v?.id || 0, min: 1, max: 4094 });
-        inId.addEventListener("input", () => { draft.config.vlans[idx].id = Number(inId.value || 0); markDirty(); });
-        const inIface = createInput("text", { value: v?.iface || "" });
-        inIface.addEventListener("input", () => { draft.config.vlans[idx].iface = inIface.value.trim(); markDirty(); });
-        const inCIDR = createInput("text", { value: v?.cidr || "" });
-        inCIDR.addEventListener("input", () => { draft.config.vlans[idx].cidr = inCIDR.value.trim(); markDirty(); });
-        w.appendChild(createRow("VLAN ID", inId));
-        w.appendChild(createRow("接口", inIface));
-        w.appendChild(createRow("子网 CIDR", inCIDR));
-        return w;
-      },
-      onAdd: () => { draft.config.vlans.push({ id: 10, iface: "", cidr: "" }); },
+  function boot() {
+    $(".skip-link").addEventListener("click", (e) => {
+      e.preventDefault();
+      $("#page-title").focus();
     });
-    grid.appendChild(vlEditor);
-    mountUxBar(content, {
-      onSave: async () => {
-        try {
-          await putPlugin("vlan", draft);
-          alert("已保存");
-        } catch (e) {
-          if (e?.status === 404) {
-            const res = await saveSection("plugins.vlan", draft, { andGenerate: false });
-            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存");
-          } else {
-            alert(`保存失败：${e?.message || "未知错误"}`);
-          }
-        }
-      },
-      onSaveAndGenerate: async () => {
-        try {
-          await putPlugin("vlan", draft);
-          await fetchJson("/api/v1/apply", { method: "POST" });
-          alert("已保存并提交生成任务（不应用运行态）");
-        } catch (e) {
-          if (e?.status === 404) {
-            const res = await saveSection("plugins.vlan", draft, { andGenerate: true });
-            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存并提交生成任务（不应用运行态）");
-          } else {
-            alert(`保存失败：${e?.message || "未知错误"}`);
-          }
-        }
-      },
+    new ResizeObserver((entries) => {
+      document.documentElement.style.setProperty(
+        "--actionbar-height",
+        `${entries[0].target.getBoundingClientRect().height}px`,
+      );
+    }).observe($(".actionbar"));
+    $("#login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const button = $("#login-submit");
+      button.disabled = true;
+      $("#login-error").textContent = "";
+      $("#login-error").classList.add("hidden");
+      try {
+        const session = await api("/api/v1/session", {
+          method: "POST",
+          body: {
+            username: $("#login-username").value,
+            password: $("#login-password").value,
+          },
+        });
+        $("#login-password").value = "";
+        await loggedIn(session);
+      } catch (e) {
+        $("#login-error").classList.remove("hidden");
+        $("#login-error").textContent =
+          e.status === 401 ? "用户名或密码不正确。" : e.message;
+      } finally {
+        button.disabled = false;
+      }
     });
+    $("#logout-btn").addEventListener("click", async () => {
+      if (!discard()) return;
+      try {
+        await api("/api/v1/session", { method: "DELETE" });
+        feedback("");
+        showLogin();
+      } catch (e) {
+        feedback(e.message, "error");
+      }
+    });
+    $("#apply-save").addEventListener("click", () => {
+      if (!state.busy) save();
+    });
+    $("#apply-run").addEventListener("click", apply);
+    $("#apply-undo").addEventListener("click", () => {
+      if (discard()) renderRoute();
+    });
+    $("#page-refresh").addEventListener("click", () => {
+      if (discard()) renderRoute();
+    });
+    $("#nav-toggle").addEventListener("click", () => {
+      const open = $("#top-nav").classList.toggle("open");
+      $("#nav-toggle").setAttribute("aria-expanded", String(open));
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeNav();
+    });
+    window.addEventListener("hashchange", () => {
+      if (state.skipHash) {
+        state.skipHash = false;
+        return;
+      }
+      if (state.busy || !discard()) {
+        state.skipHash = true;
+        location.hash = state.previousHash;
+        return;
+      }
+      closeNav();
+      renderRoute();
+    });
+    window.addEventListener("beforeunload", (e) => {
+      if (state.pageDirty || state.busy) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    });
+    api("/api/v1/session")
+      .then(loggedIn)
+      .catch((e) => {
+        showLogin();
+        if (e.status !== 401) {
+          $("#login-error").textContent = e.message;
+          $("#login-error").classList.remove("hidden");
+        }
+      });
   }
-  async function renderPluginTailscale() {
-    const cfg = await loadConfigCached(false);
-    const plug = deepClone((cfg.plugins || {})["tailscale"] || null);
-    if (!plug || !plug.config) return renderPluginGeneric("tailscale");
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-    const draft = plug;
-    const card = document.createElement("div");
-    card.className = "card";
-    const form = document.createElement("div");
-    form.className = "form";
-    const chk = createInput("checkbox", { checked: !!draft.enable });
-    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
-    form.appendChild(createRow("启用插件", chk));
-    const selMode = createSelect([["official","官方"],["selfhost","自建"],["headscale","Headscale"]], draft.config.mode || "official");
-    selMode.addEventListener("change", () => { draft.config.mode = selMode.value; markDirty(); refreshT(); });
-    form.appendChild(createRow("模式", selMode));
-    const inLogin = createInput("text", { value: draft.config.loginServer || "" , placeholder: "https://login.tailscale.com"});
-    inLogin.addEventListener("input", () => { draft.config.loginServer = inLogin.value.trim(); markDirty(); });
-    const rowLogin = createRow("登录服务器", inLogin);
-    const inHS = createInput("text", { value: draft.config.headscaleUrl || "" , placeholder: "https://headscale.example.com"});
-    inHS.addEventListener("input", () => { draft.config.headscaleUrl = inHS.value.trim(); markDirty(); });
-    const rowHS = createRow("Headscale URL", inHS);
-    const inKey = createInput("password", { value: "****" });
-    inKey.addEventListener("input", () => { draft.config.authKey = inKey.value; markDirty(); });
-    const rowKey = createRow("AuthKey（未更改留空或 ****）", inKey);
-    form.appendChild(rowLogin);
-    form.appendChild(rowHS);
-    form.appendChild(rowKey);
-    card.appendChild(form);
-    grid.appendChild(card);
-    function refreshT() {
-      const m = selMode.value;
-      rowLogin.style.display = (m === "official" || m === "selfhost") ? "" : "none";
-      rowHS.style.display = (m === "headscale") ? "" : "none";
-    }
-    refreshT();
-    mountUxBar(content, {
-      onSave: async () => {
-        try {
-          await putPlugin("tailscale", draft);
-          alert("已保存");
-        } catch (e) {
-          if (e?.status === 404) {
-            const res = await saveSection("plugins.tailscale", draft, { andGenerate: false });
-            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存");
-          } else {
-            alert(`保存失败：${e?.message || "未知错误"}`);
-          }
-        }
-      },
-      onSaveAndGenerate: async () => {
-        try {
-          await putPlugin("tailscale", draft);
-          await fetchJson("/api/v1/apply", { method: "POST" });
-          alert("已保存并提交生成任务（不应用运行态）");
-        } catch (e) {
-          if (e?.status === 404) {
-            const res = await saveSection("plugins.tailscale", draft, { andGenerate: true });
-            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存并提交生成任务（不应用运行态）");
-          } else {
-            alert(`保存失败：${e?.message || "未知错误"}`);
-          }
-        }
-      },
-    });
-  }
-  async function renderPluginZerotier() {
-    const cfg = await loadConfigCached(false);
-    const plug = deepClone((cfg.plugins || {})["zerotier"] || null);
-    if (!plug || !plug.config) return renderPluginGeneric("zerotier");
-    const content = clearMain();
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    content.appendChild(grid);
-    const draft = plug;
-    if (!Array.isArray(draft.config.networks)) draft.config.networks = [];
-    const card = document.createElement("div");
-    card.className = "card";
-    const form = document.createElement("div");
-    form.className = "form";
-    const chk = createInput("checkbox", { checked: !!draft.enable });
-    chk.addEventListener("change", () => { draft.enable = chk.checked; markDirty(); });
-    form.appendChild(createRow("启用插件", chk));
-    const selCP = createSelect([["public","公共"],["private","私有"]], draft.config.controlPlane || "public");
-    selCP.addEventListener("change", () => { draft.config.controlPlane = selCP.value; markDirty(); refreshZ(); });
-    form.appendChild(createRow("控制平面", selCP));
-    const inCtrl = createInput("text", { value: draft.config.controllerUrl || "" });
-    inCtrl.addEventListener("input", () => { draft.config.controllerUrl = inCtrl.value.trim(); markDirty(); });
-    const rowCtrl = createRow("控制器 URL", inCtrl);
-    const inTok = createInput("password", { value: "****" });
-    inTok.addEventListener("input", () => { draft.config.apiToken = inTok.value; markDirty(); });
-    const rowTok = createRow("API Token（未更改留空或 ****）", inTok);
-    form.appendChild(rowCtrl);
-    form.appendChild(rowTok);
-    card.appendChild(form);
-    grid.appendChild(card);
-    const nets = createArrayEditor({
-      title: "加入网络（networks）",
-      items: () => draft.config.networks,
-      renderItem: (n, idx) => {
-        const w = document.createElement("div");
-        const inId = createInput("text", { value: n?.id || "" , placeholder: "16位网络ID"});
-        inId.addEventListener("input", () => { draft.config.networks[idx].id = inId.value.trim(); markDirty(); });
-        w.appendChild(createRow("网络 ID", inId));
-        return w;
-      },
-      onAdd: () => { draft.config.networks.push({ id: "" }); },
-    });
-    grid.appendChild(nets);
-    function refreshZ() {
-      const isPriv = selCP.value === "private";
-      rowCtrl.style.display = isPriv ? "" : "none";
-      rowTok.style.display = isPriv ? "" : "none";
-    }
-    refreshZ();
-    mountUxBar(content, {
-      onSave: async () => {
-        try {
-          await putPlugin("zerotier", draft);
-          alert("已保存");
-        } catch (e) {
-          if (e?.status === 404) {
-            const res = await saveSection("plugins.zerotier", draft, { andGenerate: false });
-            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存");
-          } else {
-            alert(`保存失败：${e?.message || "未知错误"}`);
-          }
-        }
-      },
-      onSaveAndGenerate: async () => {
-        try {
-          await putPlugin("zerotier", draft);
-          await fetchJson("/api/v1/apply", { method: "POST" });
-          alert("已保存并提交生成任务（不应用运行态）");
-        } catch (e) {
-          if (e?.status === 404) {
-            const res = await saveSection("plugins.zerotier", draft, { andGenerate: true });
-            if (!res.saved) alert(`保存失败：${res.error?.message || "未知错误"}`); else alert("已保存并提交生成任务（不应用运行态）");
-          } else {
-            alert(`保存失败：${e?.message || "未知错误"}`);
-          }
-        }
-      },
-    });
-  }
-
-  // Start
-  document.addEventListener("DOMContentLoaded", boot, { once: true });
-})(); 
-
+  window.app = { state, apiBase };
+  if (document.readyState === "loading")
+    document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();

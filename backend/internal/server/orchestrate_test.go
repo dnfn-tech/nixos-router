@@ -35,7 +35,10 @@ func (f *fakeRunner) Run(name string, args ...string) error {
 	return nil
 }
 func (f *fakeRunner) Output(name string, args ...string) (string, error) {
-	// Not used in these tests
+	// Runtime ownership preflight sees no other active network manager.
+	if name == "systemctl" && len(args) == 4 && args[0] == "show" && args[1] == "--property=ActiveState" {
+		return "inactive", nil
+	}
 	return "", nil
 }
 

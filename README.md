@@ -16,6 +16,8 @@ inputs.nixos-router.url = "github:dnfn-tech/nixos-router";
 - 存储选型（JSON + SQLite）：`docs/storage-choice.md`
 - 实现现状：`docs/implementation-status.md`
 - 测试（NixOS VM 多节点）：`docs/testing.md`
+- IPv4 单 LAN 候选范围与验证结果：[gw 软件验收报告](docs/gw-readiness.md)
+- 用户审核后才执行的实体测试：[gw 硬件验收方案](docs/gw-hardware-acceptance.md)
 
 ## Development (Backend + WebUI)
 
