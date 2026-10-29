@@ -1145,3 +1145,40 @@ test("overview polling resumes after hidden or busy ticks and stops on navigatio
     await context.close();
   }
 });
+
+for (const persistent of [false, true]) {
+  test(`apply polling survives ${persistent ? "persistent" : "transient"} disconnect without resubmitting`, async () => {
+    const { page, context } = await pageAt("plugins");
+    try {
+      let posts = 0, reads = 0;
+      await page.route("**/api/v1/apply", route => {
+        posts++;
+        return route.fulfill({ json: { jobId: "disconnect-test", status: "running" } });
+      });
+      await page.route("**/api/v1/jobs/disconnect-test", route => {
+        reads++;
+        if (persistent || reads === 1) return route.abort("connectionfailed");
+        return route.fulfill({ json: { status: "success", payload: JSON.stringify({ mode: "managed-runtime", appliedRuntime: true }) } });
+      });
+      // Accelerate only the poll delay, leaving request timeout behavior intact.
+      await page.evaluate(() => {
+        const timeout = window.setTimeout;
+        window.setTimeout = (fn, ms, ...args) => timeout(fn, ms === 1000 ? 10 : ms, ...args);
+      });
+      await waitAction(page, "#apply-run");
+      assert.equal(posts, 1);
+      assert.ok(reads > 1 && reads <= 30, `bounded retries: ${reads}`);
+      const message = await page.locator("#apply-msg").innerText();
+      const job = await page.evaluate(() => sessionStorage.getItem("router-apply-job"));
+      if (persistent) {
+        assert.match(message, /尚未确认.*disconnect-test/);
+        assert.match(message, /重新连接/);
+        assert.doesNotMatch(message, /应用失败/);
+        assert.equal(job, "disconnect-test");
+      } else {
+        assert.match(message, /网络配置应用完成/);
+        assert.equal(job, null);
+      }
+    } finally { await context.close(); }
+  });
+}

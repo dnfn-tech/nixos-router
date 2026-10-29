@@ -328,12 +328,14 @@ func atomicFile(path string, b []byte) error {
 func (m *Manager) prepare(ctx context.Context, c config.Config) (string, error) {
 	// Refuse competing generic managers at startup as well as later applies.
 	for _, unit := range []string{"NetworkManager.service", "systemd-networkd.service", "dhcpcd.service", "connman.service", "ConnMan.service"} {
-		out, e := m.run(ctx, "systemctl", "is-active", unit)
-		if strings.TrimSpace(out) == "active" || strings.TrimSpace(out) == "activating" {
-			return "", fmt.Errorf("conflicting network manager %s", unit)
+		// show reports absent units as inactive without a nonzero exit status.
+		// Query errors and transitional states cannot establish exclusive ownership.
+		out, e := m.run(ctx, "systemctl", "show", "--property=ActiveState", "--value", unit)
+		if e != nil {
+			return "", fmt.Errorf("cannot establish network ownership for %s: %w", unit, e)
 		}
-		if e != nil && ctx.Err() != nil {
-			return "", e
+		if strings.TrimSpace(out) != "inactive" {
+			return "", fmt.Errorf("network manager must be inactive: %s (%q)", unit, strings.TrimSpace(out))
 		}
 	}
 	// Inspect ownership before touching any interface. Errors are not absence.

@@ -31,6 +31,9 @@ func (r *recorder) Run(ctx context.Context, name string, args ...string) (string
 		r.failed = true
 		return "", errors.New("injected failure")
 	}
+	if name == "systemctl" && len(args) > 0 && args[0] == "show" {
+		return "inactive\n", nil
+	}
 	if name == "hostapd_cli" {
 		return "state=ENABLED\n", nil
 	}
@@ -172,7 +175,7 @@ func (r *replyRunner) Run(ctx context.Context, n string, a ...string) (string, e
 	if n == "ip" && len(a) > 1 && a[0] == "-j" && r.links != "" {
 		return r.links, e
 	}
-	if n == "systemctl" && len(a) > 1 && a[0] == "is-active" && a[1] == r.active {
+	if n == "systemctl" && len(a) > 1 && a[0] == "show" && a[len(a)-1] == r.active {
 		return "active\n", nil
 	}
 	return out, e
@@ -776,5 +779,53 @@ func TestPreflightFailureDeletesItsSecretCandidate(t *testing.T) {
 	}
 	if n := generationCount(t, m); n != 0 {
 		t.Fatalf("failed preflight retained %d candidate dirs", n)
+	}
+}
+
+type ownershipRunner struct {
+	recorder
+	state string
+	err   error
+}
+
+func (r *ownershipRunner) Run(ctx context.Context, n string, a ...string) (string, error) {
+	if n == "systemctl" && len(a) > 0 && a[0] == "show" {
+		r.calls = append(r.calls, n+" "+strings.Join(a, " "))
+		return r.state, r.err
+	}
+	return r.recorder.Run(ctx, n, a...)
+}
+func TestOwnershipQueryFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name, state string
+		err         error
+	}{
+		{"bus", "Failed to connect to bus", errors.New("bus unavailable")},
+		{"command timeout", "", context.DeadlineExceeded},
+		{"inactive with error", "inactive", errors.New("query failed")},
+		{"empty", "", nil}, {"unknown", "unknown", nil},
+		{"deactivating", "deactivating", nil}, {"failed", "failed", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, c := fixture(t)
+			r := &ownershipRunner{state: tc.state, err: tc.err}
+			m.opts.Runner = r
+			result, err := m.Apply(context.Background(), c)
+			if err == nil || result.Stage != "preflight" {
+				t.Fatalf("accepted uncertain ownership: %+v %v", result, err)
+			}
+			for _, call := range r.calls {
+				if !strings.HasPrefix(call, "systemctl show ") {
+					t.Fatalf("command after failed ownership: %s", call)
+				}
+			}
+		})
+	}
+}
+func TestOwnershipInactivePermitsApply(t *testing.T) {
+	m, _, c := fixture(t)
+	m.opts.Runner = &ownershipRunner{state: "inactive\n"}
+	if _, err := m.Apply(context.Background(), c); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -532,7 +532,7 @@
       return `${result.mode === "managed-runtime" ? "网络配置应用完成（SSH 与系统设置仍由 NixOS 管理）" : "运行配置应用完成"}${notes ? "；提示：" + notes : ""}`;
     if (result.mode === "generate-only" && result.appliedRuntime === false)
       return `配置生成完成，未应用运行态${notes ? "；提示：" + notes : ""}`;
-    return "作业已提交，尚未确认完成；请查看系统中的作业记录。";
+    return `作业尚未确认完成（${result.jobId || "编号未提供"}）；如 LAN 地址已改变，请连接到新地址；恢复网络后重新连接并在系统操作记录中核查。`;
   }
   async function apply() {
     if (state.busy) return;
@@ -546,18 +546,33 @@
     state.busy = true;
     syncActions();
     feedback("正在处理已保存的配置…");
+    let submittedJob = null;
     try {
       let result = await api("/api/v1/apply", {
         method: "POST",
         timeout: 60000,
       });
       if (result.status === "queued" || result.status === "running") {
-        sessionStorage.setItem("router-apply-job", result.jobId);
+        submittedJob = result.jobId;
+        sessionStorage.setItem("router-apply-job", submittedJob);
         for (let attempt = 0; attempt < 30; attempt++) {
           await new Promise((r) => setTimeout(r, 1000));
-          const job = await api(
-            `/api/v1/jobs/${encodeURIComponent(result.jobId)}`,
-          );
+          let job;
+          try {
+            job = await api(
+              `/api/v1/jobs/${encodeURIComponent(submittedJob)}`,
+              { timeout: 5000 },
+            );
+          } catch (e) {
+            if (
+              e instanceof TypeError || e.name === "AbortError" ||
+              [502, 503, 504].includes(e.status)
+            ) {
+              feedback(`连接暂时中断，正在重新查询作业 ${submittedJob}…`);
+              continue;
+            }
+            throw e;
+          }
           const item = job.job || job;
           if (item.status === "failed" || item.status === "success") {
             let payload = {};
@@ -598,7 +613,12 @@
         sessionStorage.removeItem("router-apply-job");
       }
     } catch (e) {
-      feedback(`应用失败：${e.message}`, "error");
+      feedback(
+        submittedJob
+          ? `${resultMessage({ jobId: submittedJob })}（查询中断：${e.message}）`
+          : `应用失败：${e.message}`,
+        submittedJob ? "" : "error",
+      );
     } finally {
       state.busy = false;
       syncActions();
