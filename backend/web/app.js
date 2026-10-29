@@ -361,10 +361,14 @@
       if (response.status === 204) return {};
       return await response.json();
     } catch (error) {
-      if (error.name === "AbortError")
-        throw new Error(
+      if (error.name === "AbortError") {
+        const timeoutError = new Error(
           "请求超时；若已提交操作，请查看作业记录确认结果后再重试。",
+          { cause: error },
         );
+        timeoutError.name = "AbortError";
+        throw timeoutError;
+      }
       throw error;
     } finally {
       clearTimeout(timer);

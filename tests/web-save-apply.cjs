@@ -1182,3 +1182,50 @@ for (const persistent of [false, true]) {
     } finally { await context.close(); }
   });
 }
+
+for (const persistent of [false, true]) {
+  test(`apply polling retries real AbortController ${persistent ? "persistent" : "transient"} timeouts`, async () => {
+    const { page, context } = await pageAt("plugins");
+    try {
+      let posts = 0, reads = 0;
+      await page.route("**/api/v1/apply", route => {
+        posts++;
+        return route.fulfill({ json: { jobId: "timeout-test", status: "running" } });
+      });
+      await page.route("**/api/v1/jobs/timeout-test", route => {
+        reads++;
+        // Leave the real browser fetch pending until api() aborts its signal.
+        // Do not synthesize an AbortError or abort the route ourselves.
+        if (persistent || reads === 1) return;
+        return route.fulfill({ json: { status: "success", payload: JSON.stringify({ mode: "managed-runtime", appliedRuntime: true }) } });
+      });
+      await page.evaluate(() => {
+        const timeout = window.setTimeout;
+        window.setTimeout = (fn, ms, ...args) => timeout(fn, ms === 1000 ? 10 : ms === 5000 ? 100 : ms, ...args);
+        const nativeFetch = window.fetch;
+        window.jobTimeoutAborts = 0;
+        window.fetch = (url, options) => {
+          if (String(url).includes("/api/v1/jobs/timeout-test")) {
+            options.signal.addEventListener("abort", () => window.jobTimeoutAborts++, { once: true });
+          }
+          return nativeFetch(url, options);
+        };
+      });
+      await waitAction(page, "#apply-run");
+      assert.equal(posts, 1, "polling must never resubmit Apply");
+      assert.equal(reads, persistent ? 30 : 2);
+      assert.equal(await page.evaluate(() => window.jobTimeoutAborts), persistent ? 30 : 1);
+      const message = await page.locator("#apply-msg").innerText();
+      const job = await page.evaluate(() => sessionStorage.getItem("router-apply-job"));
+      if (persistent) {
+        assert.match(message, /尚未确认.*timeout-test/);
+        assert.match(message, /重新连接/);
+        assert.doesNotMatch(message, /应用失败/);
+        assert.equal(job, "timeout-test");
+      } else {
+        assert.match(message, /网络配置应用完成/);
+        assert.equal(job, null);
+      }
+    } finally { await context.close(); }
+  });
+}
