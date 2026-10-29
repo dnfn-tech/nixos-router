@@ -66,3 +66,41 @@ func TestPutConfigPreservesSecrets(t *testing.T) {
 	}
 }
 
+func TestPutConfigPreservesPluginSecrets(t *testing.T) {
+	srv, _, cookies, cleanup := setupApplyEnv(t, true)
+	defer cleanup()
+	srv.cfg.Plugins = map[string]config.PluginConfig{"mihomo": {Enable: true, Config: map[string]interface{}{
+		"controllerUrl": "https://controller.example", "authKey": "original-auth-key", "apiToken": "original-token", "nested": map[string]interface{}{"password": "original-password"},
+	}}}
+	incoming := config.DefaultConfig()
+	incoming.Plugins = map[string]config.PluginConfig{"mihomo": {Enable: false, Config: map[string]interface{}{
+		"controllerUrl": "", "authKey": "", "apiToken": "****", "nested": map[string]interface{}{"password": ""}, "newToken": "replacement-token", "newSecret": "",
+	}}}
+	body, err := json.Marshal(incoming)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/config", bytes.NewReader(body))
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", w.Code, w.Body.String())
+	}
+	saved, err := config.LoadFromFile(srv.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := saved.Plugins["mihomo"]
+	if pc.Config["newSecret"] != "" {
+		t.Fatal("new blank secret must remain a string")
+	}
+	if pc.Config["controllerUrl"] != "" || pc.Config["authKey"] != "original-auth-key" {
+		t.Fatal("non-secret clearing or auth key preservation failed")
+	}
+	if pc.Enable || pc.Config["apiToken"] != "original-token" || pc.Config["nested"].(map[string]interface{})["password"] != "original-password" || pc.Config["newToken"] != "replacement-token" {
+		t.Fatal("plugin secret preservation or edited settings lost")
+	}
+}

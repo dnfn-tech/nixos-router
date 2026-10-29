@@ -13,6 +13,7 @@ let
     };
 in
 {
+  imports = [ ./managed.nix ];
   options.services.nixos-router.backend = {
     enable = lib.mkEnableOption "nixos-router Go 后端 API (只读)";
 
@@ -108,6 +109,18 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # Runtime routerd is the network manager; never stop a competing manager
+    # implicitly. Preview/generate-only installations may coexist with it.
+    assertions = lib.optionals cfg.applyReload (map (manager: {
+      assertion = !manager.enabled;
+      message = "nixos-router runtime apply is mutually exclusive with ${manager.name}; disable that manager explicitly or set applyReload = false for preview.";
+    }) [
+      { name = "NetworkManager"; enabled = config.networking.networkmanager.enable; }
+      { name = "systemd-networkd"; enabled = config.systemd.network.enable; }
+      { name = "dhcpcd"; enabled = config.networking.dhcpcd.enable; }
+      { name = "ConnMan"; enabled = config.services.connman.enable; }
+    ]);
+
     systemd.services.nixos-router-backend = {
       description = "NixOS Router Backend API";
       wantedBy = [ "multi-user.target" ];

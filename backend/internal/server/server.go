@@ -1,22 +1,24 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/netip"
-	"path/filepath"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 	"sync"
-	"net/url"
+	"time"
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/db"
@@ -31,40 +33,50 @@ const (
 )
 
 type Server struct {
-	cfg         config.Config
-	cfgPath     string
-	stateDir    string
-	db          *db.DB
-	devMode     bool
-	startedAt   time.Time
-	version     string
-	allowedCORS string // when set (dev) send Access-Control-Allow-Origin
-	embeddedFS  fs.FS   // compiled-in assets
-	webDir      string  // when set, serve from local dir (dev override)
-	requireAuth bool
-	loginFails map[string][]time.Time
-	applyReload bool
+	startupWarning   string
+	managedRuntime   ManagedRuntime
+	wifiInterface    string
+	cfg              config.Config
+	cfgPath          string
+	stateDir         string
+	db               *db.DB
+	devMode          bool
+	startedAt        time.Time
+	version          string
+	allowedCORS      string // when set (dev) send Access-Control-Allow-Origin
+	embeddedFS       fs.FS  // compiled-in assets
+	webDir           string // when set, serve from local dir (dev override)
+	requireAuth      bool
+	loginFails       map[string][]time.Time
+	applyReload      bool
 	consumeGenerated bool
 	privilegedApply  bool
-	applyMu     sync.Mutex
-	runner      CommandRunner
+	applyMu          sync.Mutex
+	cfgMu            sync.RWMutex
+	samplesMu        sync.Mutex
+	loginMu          sync.Mutex
+	runner           CommandRunner
 	// Live status helpers
-	sysClassNet string // base dir for /sys/class/net (overridable by env)
+	sysClassNet string               // base dir for /sys/class/net (overridable by env)
 	ifPrev      map[string]ifacePrev // in-memory last counters sample
 	// Traffic control apply (default off)
 	applyTrafficControl bool
 }
 
 type Options struct {
-	Config     config.Config
-	ConfigPath string
-	StateDir   string
-	DB         *db.DB
-	DevMode    bool
-	Version    string
-	WebFS      fs.FS
-	WebDir     string
-	ApplyReload bool
+	StartupWarning string
+	WiFiInterface  string // Trusted managed radio; never selected from request input.
+
+	ManagedRuntime ManagedRuntime
+	Config         config.Config
+	ConfigPath     string
+	StateDir       string
+	DB             *db.DB
+	DevMode        bool
+	Version        string
+	WebFS          fs.FS
+	WebDir         string
+	ApplyReload    bool
 	// ApplyTrafficControl: when true with ApplyReload and PrivilegedApply, run generated qos.sh.
 	// Defaults to false for safety.
 	ApplyTrafficControl bool
@@ -83,12 +95,21 @@ type CommandRunner interface {
 	Output(name string, args ...string) (string, error)
 }
 
-type defaultRunner struct{}
+type defaultRunner struct{ timeout time.Duration }
 
 func (defaultRunner) LookPath(name string) error { _, err := exec.LookPath(name); return err }
-func (defaultRunner) Run(name string, args ...string) error { return execRun(name, args...) }
-func (defaultRunner) Output(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+func (d defaultRunner) Run(name string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), d.deadline())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = time.Second
+	return cmd.Run()
+}
+func (d defaultRunner) Output(name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), d.deadline())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = time.Second
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
 }
@@ -101,22 +122,25 @@ type ifacePrev struct {
 
 func New(opts Options) *Server {
 	s := &Server{
-		cfg:       opts.Config,
-		cfgPath:   opts.ConfigPath,
-		stateDir:  opts.StateDir,
-		db:        opts.DB,
-		devMode:   opts.DevMode,
-		startedAt: time.Now(),
-		version:    opts.Version,
-		embeddedFS: opts.WebFS,
-		webDir:     strings.TrimSpace(opts.WebDir),
-		requireAuth: !opts.DevMode,
-		loginFails:  make(map[string][]time.Time),
-		applyReload: opts.ApplyReload,
-		consumeGenerated: opts.ConsumeGenerated,
-		privilegedApply:  opts.PrivilegedApply,
-		runner:      defaultRunner{},
-		ifPrev:      make(map[string]ifacePrev),
+		managedRuntime:      opts.ManagedRuntime,
+		startupWarning:      opts.StartupWarning,
+		wifiInterface:       opts.WiFiInterface,
+		cfg:                 opts.Config,
+		cfgPath:             opts.ConfigPath,
+		stateDir:            opts.StateDir,
+		db:                  opts.DB,
+		devMode:             opts.DevMode,
+		startedAt:           time.Now(),
+		version:             opts.Version,
+		embeddedFS:          opts.WebFS,
+		webDir:              strings.TrimSpace(opts.WebDir),
+		requireAuth:         !opts.DevMode,
+		loginFails:          make(map[string][]time.Time),
+		applyReload:         opts.ApplyReload,
+		consumeGenerated:    opts.ConsumeGenerated,
+		privilegedApply:     opts.PrivilegedApply,
+		runner:              defaultRunner{},
+		ifPrev:              make(map[string]ifacePrev),
 		applyTrafficControl: opts.ApplyTrafficControl,
 	}
 	if s.devMode {
@@ -217,14 +241,7 @@ func (s *Server) wrapCSRF(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		host := r.Host
-		// basic same-origin check
-		if strings.Contains(origin, host) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		// Also allow when Sec-Fetch-Site indicates same-origin
-		if r.Header.Get("Sec-Fetch-Site") == "same-origin" {
+		if sameOrigin(origin, r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -301,6 +318,8 @@ func (s *Server) readIfaceSysfs(name string) (map[string]interface{}, bool) {
 	if okTx {
 		out["txBytes"] = tx
 	}
+	s.samplesMu.Lock()
+	defer s.samplesMu.Unlock()
 	ifPrev, okPrev := s.ifPrev[name]
 	if okPrev && (okRx || okTx) {
 		dt := now.Sub(ifPrev.ts).Seconds()
@@ -428,6 +447,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"uptimeSecs": int(time.Since(s.startedAt).Seconds()),
 		"dev":        s.devMode,
 	}
+	mode := "generate-only"
+	if s.applyReload {
+		mode = "runtime"
+	}
+	resp["deployment"] = map[string]interface{}{
+		"mode":          mode,
+		"runtimeApply":  s.applyReload,
+		"rebootAllowed": !s.devMode && os.Getenv("NIXOS_ROUTER_ALLOW_REBOOT") == "1",
+	}
+
+	if s.managedRuntime != nil {
+		resp["deployment"] = map[string]interface{}{"mode": "runtime", "runtimeApply": true, "rebootAllowed": !s.devMode && os.Getenv("NIXOS_ROUTER_ALLOW_REBOOT") == "1", "profile": "ipv4-single-lan"}
+		resp["startupWarning"] = s.startupWarning
+		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "wanModes": []string{"dhcp", "static"}, "singleLAN": true, "singleAP": true, "unsupported": []string{"pppoe", "ipv6", "qos", "ddns", "parental", "plugins", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -441,9 +475,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				redact = false
 			}
 		}
-		cfg := s.cfg
+		cfg := s.configSnapshot()
 		if redact {
-			cfg = s.cfg.RedactedCopy()
+			cfg = cfg.RedactedCopy()
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"path":   s.cfgPath,
@@ -468,6 +502,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		s.cfgMu.Lock()
+		defer s.cfgMu.Unlock()
 		// Preserve secrets if placeholders or empty are provided
 		newCfg = s.mergeSecrets(s.cfg, newCfg)
 		if err := newCfg.Validate(); err != nil {
@@ -499,8 +535,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	cfg, appliedKnown := s.runtimeConfig()
+	if !appliedKnown {
+		cfg = s.configSnapshot()
+	}
 	// Stubbed status derived from config
-	lanCIDR := s.cfg.LAN.IPv4CIDR
+	lanCIDR := cfg.LAN.IPv4CIDR
 	clientCount := 0
 	if ls := s.readDnsmasqLeases(); len(ls) > 0 {
 		clientCount = len(ls)
@@ -508,11 +548,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Interfaces: best-effort live via sysfs + config roles
 	var interfaces []map[string]interface{}
 	// WAN
-	wanIf := s.cfg.WAN.Interface
+	wanIf := cfg.WAN.Interface
 	if strings.TrimSpace(wanIf) == "" {
 		wanIf = "wan0"
 	}
-	wanItem := map[string]interface{}{"name": wanIf, "role": "wan", "mode": s.cfg.WAN.Mode}
+	wanItem := map[string]interface{}{"name": wanIf, "role": "wan", "mode": cfg.WAN.Mode}
 	if live, ok := s.readIfaceSysfs(wanIf); ok {
 		for k, v := range live {
 			wanItem[k] = v
@@ -520,7 +560,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	interfaces = append(interfaces, wanItem)
 	// LAN (bridge)
-	lanIf := s.cfg.LAN.BridgeName
+	lanIf := cfg.LAN.BridgeName
 	if strings.TrimSpace(lanIf) == "" {
 		lanIf = "br-lan"
 	}
@@ -586,34 +626,34 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]interface{}{
 		"system": map[string]interface{}{
-			"hostname": s.cfg.System.Hostname,
-			"timezone": s.cfg.System.Timezone,
+			"hostname": cfg.System.Hostname,
+			"timezone": cfg.System.Timezone,
 		},
 		"interfaces": interfaces,
 		"wan": map[string]interface{}{
-			"iface": s.cfg.WAN.Interface,
-			"mode":  s.cfg.WAN.Mode,
-			"static": s.cfg.WAN.Static,
+			"iface":  cfg.WAN.Interface,
+			"mode":   cfg.WAN.Mode,
+			"static": cfg.WAN.Static,
 			"pppoeUser": func() string {
-				if s.cfg.WAN.PPPoE != nil {
-					return s.cfg.WAN.PPPoE.Username
+				if cfg.WAN.PPPoE != nil {
+					return cfg.WAN.PPPoE.Username
 				}
 				return ""
 			}(),
 		},
 		"lan": map[string]interface{}{
-			"bridge": s.cfg.LAN.BridgeName,
+			"bridge": cfg.LAN.BridgeName,
 			"cidr":   lanCIDR,
-			"dhcp":   s.cfg.LAN.DHCP,
-			"ports":  s.cfg.LAN.Ports,
+			"dhcp":   cfg.LAN.DHCP,
+			"ports":  cfg.LAN.Ports,
 		},
 		"wifi": map[string]interface{}{
-			"enabled": s.cfg.WiFi.Enable,
-			"aps":     len(s.cfg.WiFi.APs),
+			"enabled":     cfg.WiFi.Enable,
+			"aps":         len(cfg.WiFi.APs),
 			"clientCount": clientCount,
 			"guestCount": func() int {
 				c := 0
-				for _, ap := range s.cfg.WiFi.APs {
+				for _, ap := range cfg.WiFi.APs {
 					if ap.Guest {
 						c++
 					}
@@ -623,24 +663,27 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"source": "stub",
 		},
 		"firewall": map[string]interface{}{
-			"enabled": s.cfg.Firewall.Enable,
-			"nat":     s.cfg.Firewall.NATEnabled,
-			"portForwards": s.cfg.Firewall.PortForwards,
+			"enabled":      cfg.Firewall.Enable,
+			"nat":          cfg.Firewall.NATEnabled,
+			"portForwards": cfg.Firewall.PortForwards,
 		},
 		"ssh": map[string]interface{}{
-			"enabled": s.cfg.SSH.Enable,
-			"port":    s.cfg.SSH.Port,
-			"passwordAuth": s.cfg.SSH.PasswordAuth,
+			"enabled":      cfg.SSH.Enable,
+			"port":         cfg.SSH.Port,
+			"passwordAuth": cfg.SSH.PasswordAuth,
 		},
 		"ddns": map[string]interface{}{
-			"enabled":  s.cfg.DDNS.Enable,
-			"provider": s.cfg.DDNS.Provider,
+			"enabled":  cfg.DDNS.Enable,
+			"provider": cfg.DDNS.Provider,
 		},
-		"units": units,
+		"units":   units,
 		"sources": srcs,
 	}
 	if lastApply != nil {
 		resp["lastApply"] = lastApply
+	}
+	if s.managedRuntime != nil {
+		resp["managedAppliedKnown"] = appliedKnown
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -648,6 +691,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // collectUnitStatuses queries known core/plugin units through systemctl (when present).
 // Returns list and a source marker: "systemctl" or "stub".
 func (s *Server) collectUnitStatuses() ([]map[string]string, string) {
+	cfg := s.configSnapshot()
 	known := []struct {
 		id   string
 		unit string
@@ -665,10 +709,13 @@ func (s *Server) collectUnitStatuses() ([]map[string]string, string) {
 		struct{ id, unit string }{"zerotier-one", "zerotier-one.service"},
 	)
 	// headscale only when relevant (tailscale controlPlane=headscale)
-	if pc, ok := s.cfg.Plugins["tailscale"]; ok {
+	if pc, ok := cfg.Plugins["tailscale"]; ok {
 		if cp, _ := pc.Config["controlPlane"].(string); strings.EqualFold(cp, "headscale") {
 			known = append(known, struct{ id, unit string }{"headscale", "headscale.service"})
 		}
+	}
+	if s.managedRuntime != nil {
+		known = []struct{ id, unit string }{{"dnsmasq", "nixos-router-dnsmasq.service"}, {"hostapd", "nixos-router-hostapd.service"}, {"wan", "nixos-router-wan.service"}}
 	}
 	// If systemctl is absent, return stub states
 	if err := s.runner.LookPath("systemctl"); err != nil {
@@ -683,34 +730,24 @@ func (s *Server) collectUnitStatuses() ([]map[string]string, string) {
 		return out, "stub"
 	}
 	// Query is-active for each unit
-	mapState := func(stdout string, err error) string {
-		if err != nil {
-			// When unit missing, many systemd return codes set stderr; treat as missing
-			// Prefer to classify as "missing" instead of "inactive" for clarity
-			low := strings.ToLower(stdout)
-			if strings.Contains(low, "not-found") || strings.Contains(low, "not found") {
-				return "missing"
-			}
+	mapState := func(stdout string, _ error) string {
+		// is-active uses nonzero exit codes for ordinary inactive/failed states.
+		// An empty response or transport failure is not evidence of a missing unit.
+		state := strings.ToLower(strings.TrimSpace(stdout))
+		switch state {
+		case "active", "inactive", "failed":
+			return state
+		case "not-found", "not found":
 			return "missing"
-		}
-		s := strings.ToLower(strings.TrimSpace(stdout))
-		switch s {
-		case "active":
-			return "active"
-		case "inactive":
-			return "inactive"
-		case "failed":
-			return "failed"
 		default:
-			// activating/deactivating/unknown etc.
 			return "unknown"
 		}
 	}
+
 	out := make([]map[string]string, 0, len(known))
 	for _, k := range known {
 		stdout, err := s.runner.Output("systemctl", "is-active", k.unit)
 		state := mapState(stdout, err)
-		// Special-case: when systemctl is present but unit truly not found, err likely non-nil and stdout empty.
 		out = append(out, map[string]string{
 			"id":    k.id,
 			"unit":  k.unit,
@@ -721,6 +758,7 @@ func (s *Server) collectUnitStatuses() ([]map[string]string, string) {
 }
 
 func (s *Server) handleUINav(w http.ResponseWriter, r *http.Request) {
+	cfg := s.configSnapshot()
 	nav := []map[string]interface{}{
 		{"id": "dashboard", "title": "Dashboard", "path": "/"},
 		{"id": "network", "title": "Network", "children": []map[string]string{
@@ -737,7 +775,7 @@ func (s *Server) handleUINav(w http.ResponseWriter, r *http.Request) {
 		{"id": "system", "title": "System", "path": "/system"},
 	}
 	// Enabled plugins appended
-	for name, p := range s.cfg.Plugins {
+	for name, p := range cfg.Plugins {
 		if p.Enable {
 			nav = append(nav, map[string]interface{}{
 				"id":    "plugin:" + name,
@@ -751,6 +789,7 @@ func (s *Server) handleUINav(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
+		cfg := s.configSnapshot()
 		builtins := []struct {
 			id    string
 			title string
@@ -771,7 +810,7 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 		list := []map[string]interface{}{}
 		seen := map[string]bool{}
 		for _, b := range builtins {
-			p := s.cfg.Plugins[b.id]
+			p := cfg.Plugins[b.id]
 			item := map[string]interface{}{
 				"id":      b.id,
 				"title":   b.title,
@@ -788,7 +827,7 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 			seen[b.id] = true
 		}
 		// Include any extra plugin entries not in builtins
-		for name, p := range s.cfg.Plugins {
+		for name, p := range cfg.Plugins {
 			if seen[name] {
 				continue
 			}
@@ -823,7 +862,10 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		cur := s.cfg.Plugins[id]
+		s.cfgMu.Lock()
+		defer s.cfgMu.Unlock()
+		cfg := cloneConfig(s.cfg)
+		cur := cfg.Plugins[id]
 		// Merge config with secret-preserve
 		if body.Config != nil {
 			cur.Config = mergePreserveSecretsMap(cur.Config, body.Config)
@@ -831,15 +873,16 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 		if body.Enabled != nil {
 			cur.Enable = *body.Enabled
 		}
-		if s.cfg.Plugins == nil {
-			s.cfg.Plugins = map[string]config.PluginConfig{}
+		if cfg.Plugins == nil {
+			cfg.Plugins = map[string]config.PluginConfig{}
 		}
-		s.cfg.Plugins[id] = cur
+		cfg.Plugins[id] = cur
 		// persist
-		if err := config.SaveToFile(s.cfgPath, s.cfg); err != nil {
+		if err := config.SaveToFile(s.cfgPath, cfg); err != nil {
 			http.Error(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
+		s.cfg = cfg
 		s.db.AddAudit("plugins", "update", fmt.Sprintf("%s enabled=%v", id, cur.Enable))
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"ok":     true,
@@ -851,19 +894,23 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
+	cfg := s.configSnapshot()
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Prefer a known leases file; else stub from static leases; else empty
 	type Client struct {
-		IP       string `json:"ip"`
-		MAC      string `json:"mac,omitempty"`
-		Hostname string `json:"hostname,omitempty"`
-		Source   string `json:"source"`
-		Expires  string `json:"expires,omitempty"`
-		LastSeen string `json:"lastSeen,omitempty"`
-		Blocked  bool   `json:"blocked"`
+		IP                  string `json:"ip"`
+		MAC                 string `json:"mac,omitempty"`
+		Hostname            string `json:"hostname,omitempty"`
+		Source              string `json:"source"`
+		Expires             string `json:"expires,omitempty"`
+		LastSeen            string `json:"lastSeen,omitempty"`
+		Blocked             bool   `json:"blocked"`
+		DraftBlocked        *bool  `json:"draftBlocked,omitempty"`
+		BlockedSource       string `json:"blockedSource,omitempty"`
+		BlockedRuntimeKnown *bool  `json:"blockedRuntimeKnown,omitempty"`
 	}
 	var clients []Client
 	source := "stub"
@@ -873,7 +920,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		// index static leases for hostnames
 		mac2host := map[string]string{}
 		ip2host := map[string]string{}
-		for _, sl := range s.cfg.LAN.StaticLeases {
+		for _, sl := range cfg.LAN.StaticLeases {
 			if sl.MAC != "" && sl.Hostname != "" {
 				mac2host[strings.ToLower(sl.MAC)] = sl.Hostname
 			}
@@ -901,13 +948,26 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 			}
 			clients = append(clients, Client{
 				IP: L.IP, MAC: L.MAC, Hostname: h, Source: source, Expires: expires, LastSeen: expires,
-				Blocked: s.isMacBlocked(L.MAC),
+				Blocked: isMacBlocked(cfg, L.MAC),
 			})
 		}
 	} else {
 		// From static leases fallback
-		for _, sl := range s.cfg.LAN.StaticLeases {
-			clients = append(clients, Client{IP: sl.IP, MAC: sl.MAC, Hostname: sl.Hostname, Source: "static", Blocked: s.isMacBlocked(sl.MAC)})
+		for _, sl := range cfg.LAN.StaticLeases {
+			clients = append(clients, Client{IP: sl.IP, MAC: sl.MAC, Hostname: sl.Hostname, Source: "static", Blocked: isMacBlocked(cfg, sl.MAC)})
+		}
+	}
+	if s.managedRuntime != nil {
+		applied, known := s.runtimeConfig()
+		for i := range clients {
+			draft := clients[i].Blocked
+			clients[i].DraftBlocked = &draft
+			clients[i].BlockedRuntimeKnown = &known
+			clients[i].BlockedSource = "config"
+			if known {
+				clients[i].Blocked = isMacBlocked(applied, clients[i].MAC)
+				clients[i].BlockedSource = "last-good"
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"clients": clients, "source": source})
@@ -938,12 +998,15 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	cfg := cloneConfig(s.cfg)
 	// update static lease hostname
 	found := false
-	for i := range s.cfg.LAN.StaticLeases {
-		if strings.ToLower(s.cfg.LAN.StaticLeases[i].MAC) == mac {
+	for i := range cfg.LAN.StaticLeases {
+		if strings.ToLower(cfg.LAN.StaticLeases[i].MAC) == mac {
 			if body.Hostname != nil {
-				s.cfg.LAN.StaticLeases[i].Hostname = *body.Hostname
+				cfg.LAN.StaticLeases[i].Hostname = *body.Hostname
 			}
 			found = true
 			break
@@ -955,39 +1018,48 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 		if body.Hostname != nil {
 			sl.Hostname = *body.Hostname
 		}
-		s.cfg.LAN.StaticLeases = append(s.cfg.LAN.StaticLeases, sl)
+		cfg.LAN.StaticLeases = append(cfg.LAN.StaticLeases, sl)
 	}
 	// update blocked list
 	if body.Blocked != nil {
 		if *body.Blocked {
-			if !s.isMacBlocked(mac) {
-				s.cfg.Firewall.BlockedMACs = append(s.cfg.Firewall.BlockedMACs, strings.ToUpper(mac))
+			if !isMacBlocked(cfg, mac) {
+				cfg.Firewall.BlockedMACs = append(cfg.Firewall.BlockedMACs, strings.ToUpper(mac))
 			}
 		} else {
 			// remove if present
-			out := s.cfg.Firewall.BlockedMACs[:0]
-			for _, m := range s.cfg.Firewall.BlockedMACs {
+			out := cfg.Firewall.BlockedMACs[:0]
+			for _, m := range cfg.Firewall.BlockedMACs {
 				if strings.ToLower(m) != mac {
 					out = append(out, m)
 				}
 			}
-			s.cfg.Firewall.BlockedMACs = out
+			cfg.Firewall.BlockedMACs = out
 		}
 	}
 	// persist
-	if err := s.cfg.Validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": []string{err.Error()}})
 		return
 	}
-	if err := config.SaveToFile(s.cfgPath, s.cfg); err != nil {
+	if err := config.SaveToFile(s.cfgPath, cfg); err != nil {
 		http.Error(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
+	s.cfg = cfg
 	s.db.AddAudit("clients", "patch", mac)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
 }
 
 func (s *Server) handleWifiCaps(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	if s.managedRuntime != nil {
+		s.handleManagedWifiCaps(w, r)
+		return
+	}
 	maxAP := 2
 	if v := os.Getenv("NIXOS_ROUTER_WIFI_MAX_APS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -998,6 +1070,7 @@ func (s *Server) handleWifiCaps(w http.ResponseWriter, r *http.Request) {
 		"maxAP":  maxAP,
 		"bands":  []string{"2g", "5g", "6g"},
 		"driver": "stub",
+		"source": "stub", "available": false, "reason": "Preview values are not hardware detection",
 	})
 }
 
@@ -1137,6 +1210,16 @@ func (s *Server) mergeSecrets(oldCfg config.Config, in config.Config) config.Con
 			}
 		}
 	}
+	if in.Plugins != nil {
+		out.Plugins = make(map[string]config.PluginConfig, len(in.Plugins))
+		for id, plugin := range in.Plugins {
+			if old, ok := oldCfg.Plugins[id]; ok {
+				plugin.Config = mergePreserveSecretsMap(old.Config, plugin.Config)
+			}
+			out.Plugins[id] = plugin
+		}
+	}
+
 	return out
 }
 
@@ -1163,8 +1246,14 @@ func mergePreserveSecretsMap(old, in map[string]interface{}) map[string]interfac
 		ov, okOld := old[k]
 		nv, okNew := in[k]
 		if okNew {
-			// If redacted string, keep old
-			if sv, ok := nv.(string); ok && isRedactedOrEmpty(sv) {
+			// Only secret fields use empty/redacted as "keep"; ordinary
+			// strings (e.g. controllerUrl) must remain explicitly clearable.
+			key := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(k))
+			secret := false
+			for _, marker := range []string{"password", "passwd", "psk", "secret", "token", "authkey", "privatekey", "accesskey", "apikey"} {
+				secret = secret || strings.Contains(key, marker)
+			}
+			if sv, ok := nv.(string); ok && okOld && secret && isRedactedOrEmpty(sv) {
 				out[k] = ov
 				continue
 			}
@@ -1399,7 +1488,9 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Always return JSON bundle of config for v1
+	s.cfgMu.RLock()
 	cfg, err := config.LoadFromFile(s.cfgPath)
+	s.cfgMu.RUnlock()
 	if err != nil {
 		http.Error(w, "failed to load config", http.StatusInternalServerError)
 		return
@@ -1408,9 +1499,9 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"kind":   "nixos-router-backup",
-		"format": "config+json",
-		"config": cfg, // include secrets
+		"kind":      "nixos-router-backup",
+		"format":    "config+json",
+		"config":    cfg, // include secrets
 		"createdAt": time.Now().UTC().Format(time.RFC3339),
 	})
 }
@@ -1436,7 +1527,9 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 		defer file.Close()
 		data, _ := io.ReadAll(file)
-		var wrapper struct{ Config *config.Config `json:"config"` }
+		var wrapper struct {
+			Config *config.Config `json:"config"`
+		}
 		if json.Unmarshal(data, &wrapper) == nil && wrapper.Config != nil {
 			newCfg = *wrapper.Config
 		} else if json.Unmarshal(data, &newCfg) != nil {
@@ -1446,7 +1539,9 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// JSON body: either {config:{...}} or raw config object
 		body, _ := io.ReadAll(r.Body)
-		var wrapper struct{ Config *config.Config `json:"config"` }
+		var wrapper struct {
+			Config *config.Config `json:"config"`
+		}
 		if json.Unmarshal(body, &wrapper) == nil && wrapper.Config != nil {
 			newCfg = *wrapper.Config
 		} else if json.Unmarshal(body, &newCfg) != nil {
@@ -1454,17 +1549,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
 	// Secret-aware merge to preserve placeholders if present
 	newCfg = s.mergeSecrets(s.cfg, newCfg)
-	// Also merge plugin configs preserving redacted
-	if newCfg.Plugins != nil {
-		for pid, pc := range newCfg.Plugins {
-			if old, ok := s.cfg.Plugins[pid]; ok {
-				pc.Config = mergePreserveSecretsMap(old.Config, pc.Config)
-				newCfg.Plugins[pid] = pc
-			}
-		}
-	}
 	if err = newCfg.Validate(); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": []string{err.Error()}})
 		return
@@ -1533,8 +1621,15 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.managedRuntime != nil {
+		s.handleManagedApply(w, r)
+		return
+	}
 	// ensure serial apply
-	s.applyMu.Lock()
+	if !s.applyMu.TryLock() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "apply_busy"})
+		return
+	}
 	defer s.applyMu.Unlock()
 	user, _, ok := s.getSession(r)
 	if !ok && s.requireAuth {
@@ -1542,7 +1637,9 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Load current saved config.json for apply
+	s.cfgMu.RLock()
 	cfg, err := config.LoadFromFile(s.cfgPath)
+	s.cfgMu.RUnlock()
 	if err != nil {
 		// create failed job
 		jid := newSessionID()
@@ -1560,6 +1657,17 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.CreateJob(jid, "apply", fmt.Sprintf(`{"mode":"%s"}`, jobMode)); err != nil {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
+	}
+	if s.applyReload {
+		if code, err := s.checkNetworkManagers(); err != nil {
+			_ = s.db.UpdateJobStatus(jid, "failed", err.Error())
+			s.db.AddAudit(user, "apply", code+": "+err.Error())
+			writeJSON(w, http.StatusConflict, map[string]interface{}{
+				"jobId": jid, "mode": jobMode, "appliedRuntime": false,
+				"error": code, "message": err.Error(), "stage": "preflight",
+			})
+			return
+		}
 	}
 	genDir := filepath.Join(s.stateDir, "generated")
 	if err := os.MkdirAll(genDir, 0o755); err != nil {
@@ -1780,11 +1888,11 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 		qosNotes += "# example (ingress): tc qdisc replace dev <lan-bridge> handle ffff: ingress\n"
 		_ = os.WriteFile(filepath.Join(dir, "qos.conf.fragment"), []byte(qosNotes), 0o644)
 		if cfg.QoS.Enable && (cfg.QoS.UpMbps > 0 || cfg.QoS.DownMbps > 0) {
-			wan := s.cfg.WAN.Interface
+			wan := cfg.WAN.Interface
 			if strings.TrimSpace(wan) == "" {
 				wan = "wan0"
 			}
-			lan := s.cfg.LAN.BridgeName
+			lan := cfg.LAN.BridgeName
 			if strings.TrimSpace(lan) == "" {
 				lan = "br-lan"
 			}
@@ -2043,9 +2151,9 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 }
 
 type dnsmasqLease struct {
-	Expires time.Time
-	MAC     string
-	IP      string
+	Expires  time.Time
+	MAC      string
+	IP       string
 	Hostname string
 	ClientID string
 }
@@ -2108,12 +2216,12 @@ func parseDnsmasqLeasesFile(path string) []dnsmasqLease {
 	return out
 }
 
-func (s *Server) isMacBlocked(mac string) bool {
+func isMacBlocked(cfg config.Config, mac string) bool {
 	if mac == "" {
 		return false
 	}
 	m := strings.ToLower(mac)
-	for _, b := range s.cfg.Firewall.BlockedMACs {
+	for _, b := range cfg.Firewall.BlockedMACs {
 		if strings.ToLower(b) == m {
 			return true
 		}
@@ -2237,12 +2345,18 @@ func newSessionID() string {
 }
 
 func execCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	return cmd.Start()
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = time.Second
+	return cmd.Run()
 }
 
 func execRun(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = time.Second
 	return cmd.Run()
 }
 
@@ -2290,9 +2404,9 @@ func (s *Server) orchestratePlugins(cfg config.Config) []string {
 		return append(notes, "systemctl not found, skipped plugin orchestration")
 	}
 	type plug struct {
-		name  string
-		units []string
-		enabled bool
+		name           string
+		units          []string
+		enabled        bool
 		extraHeadscale bool
 	}
 	var planned []plug
@@ -2347,7 +2461,10 @@ func (s *Server) orchestratePlugins(cfg config.Config) []string {
 	return notes
 }
 func (s *Server) clientKey(r *http.Request) string {
-	host, _, _ := strings.Cut(r.RemoteAddr, ":")
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
 	if addr, err := netip.ParseAddr(host); err == nil {
 		return addr.String()
 	}
@@ -2355,6 +2472,8 @@ func (s *Server) clientKey(r *http.Request) string {
 }
 
 func (s *Server) checkLoginAllowance(r *http.Request) bool {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
 	now := time.Now()
 	key := s.clientKey(r)
 	wins, ok := s.loginFails[key]
@@ -2372,13 +2491,164 @@ func (s *Server) checkLoginAllowance(r *http.Request) bool {
 }
 
 func (s *Server) onLoginFail(r *http.Request, user string) {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
 	key := s.clientKey(r)
 	s.loginFails[key] = append(s.loginFails[key], time.Now())
 	s.db.AddAudit(user, "login", "failed")
 }
 
 func (s *Server) resetLoginFail(r *http.Request) {
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
 	key := s.clientKey(r)
 	delete(s.loginFails, key)
 }
 
+// Published configs are immutable: writers clone before editing nested maps or slices.
+func (s *Server) configSnapshot() config.Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
+}
+func cloneConfig(cfg config.Config) config.Config {
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		panic("config must be JSON serializable: " + err.Error())
+	}
+	var out config.Config
+	if err := json.Unmarshal(data, &out); err != nil {
+		panic(err)
+	}
+	return out
+}
+
+const commandTimeout = 15 * time.Second
+
+// The scheme comes from this connection, never untrusted proxy headers.
+func sameOrigin(origin string, r *http.Request) bool {
+	if strings.ContainsAny(origin, "?#") {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return false
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if u.Scheme != scheme {
+		return false
+	}
+	target, err := url.Parse(scheme + "://" + r.Host)
+	if err != nil || u.Hostname() == "" || !strings.EqualFold(u.Hostname(), target.Hostname()) {
+		return false
+	}
+	port := func(v *url.URL) string {
+		if v.Port() != "" {
+			return v.Port()
+		}
+		if v.Scheme == "https" {
+			return "443"
+		}
+		return "80"
+	}
+	return port(u) == port(target)
+}
+
+func (d defaultRunner) deadline() time.Duration {
+	if d.timeout > 0 {
+		return d.timeout
+	}
+	return commandTimeout
+}
+
+// Probe only the configured radio. A failed probe must never fall back to preview claims.
+func (s *Server) handleManagedWifiCaps(w http.ResponseWriter, r *http.Request) {
+	unknown := func(reason string) {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"source": "unavailable", "available": false, "reason": reason, "interface": s.wifiInterface,
+			"maxAP": 0, "managedMaxAP": 1, "bands": []string{}, "driver": "unknown",
+		})
+	}
+	if s.wifiInterface == "" {
+		unknown("No managed WiFi interface configured")
+		return
+	}
+	if err := s.runner.LookPath("iw"); err != nil {
+		unknown("iw is unavailable")
+		return
+	}
+	info, err := s.runner.Output("iw", "dev", s.wifiInterface, "info")
+	if err != nil {
+		unknown("Cannot query configured WiFi interface")
+		return
+	}
+	phy := ""
+	for _, line := range strings.Split(info, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "wiphy" {
+			if n, e := strconv.Atoi(fields[1]); e == nil && n >= 0 {
+				phy = "phy" + strconv.Itoa(n)
+			}
+		}
+	}
+	if phy == "" {
+		unknown("iw did not identify a PHY for the configured interface")
+		return
+	}
+	info, err = s.runner.Output("iw", "phy", phy, "info")
+	if err != nil {
+		unknown("Cannot query configured PHY capabilities")
+		return
+	}
+	bands := []string{}
+	channels := []map[string]interface{}{}
+	ap := false
+	for _, line := range strings.Split(info, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "* AP" {
+			ap = true
+		}
+		var frequency, channel int
+		if n, _ := fmt.Sscanf(line, "* %d MHz [%d]", &frequency, &channel); n != 2 {
+			continue
+		}
+		band := ""
+		switch {
+		case frequency >= 2400 && frequency < 2500:
+			band = "2g"
+		case frequency >= 4900 && frequency < 5925:
+			band = "5g"
+		case frequency >= 5925 && frequency <= 7125:
+			band = "6g"
+		}
+		if band == "" {
+			continue
+		}
+		found := false
+		for _, v := range bands {
+			if v == band {
+				found = true
+			}
+		}
+		if !found {
+			bands = append(bands, band)
+		}
+		channels = append(channels, map[string]interface{}{"band": band, "channel": channel, "frequencyMHz": frequency, "disabled": strings.Contains(line, "disabled"), "noIR": strings.Contains(line, "no IR")})
+	}
+	if !strings.Contains(info, "Wiphy "+phy) || len(channels) == 0 {
+		unknown("iw returned no usable capability description")
+		return
+	}
+	maxAP := 0
+	if ap {
+		maxAP = 1
+	}
+	driver := "unknown"
+	if link, err := os.Readlink(filepath.Join(s.sysClassNet, s.wifiInterface, "device", "driver")); err == nil {
+		driver = filepath.Base(link)
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"source": "iw", "available": true, "interface": s.wifiInterface, "phy": phy, "driver": driver, "apSupported": ap, "maxAP": maxAP, "managedMaxAP": 1, "bands": bands, "channels": channels, "note": "maxAP is the managed profile limit, not a measured hardware maximum; regulatory and driver restrictions still apply"})
+}

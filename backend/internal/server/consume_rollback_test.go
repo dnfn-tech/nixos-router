@@ -33,6 +33,9 @@ func (f *fakeRunnerConsume) Run(name string, args ...string) error {
 	return nil
 }
 func (f *fakeRunnerConsume) Output(name string, args ...string) (string, error) {
+	if name == "systemctl" && len(args) == 4 && args[0] == "show" && args[1] == "--property=ActiveState" {
+		return "inactive", nil
+	}
 	return "", nil
 }
 

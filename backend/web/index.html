@@ -3,69 +3,108 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
     <title>NixOS 路由器 · 管理面板</title>
     <link rel="stylesheet" href="./styles.css" />
     <script src="./app.js" defer></script>
   </head>
   <body>
+    <a class="skip-link" href="#page-title">跳转到主要内容</a>
     <div id="app">
-      <div id="status-banner" class="banner hidden" role="status" aria-live="polite">
-        <span>后端未连接</span>
-        <span class="banner-sep">·</span>
-        <span>使用内置导航</span>
-        <span class="banner-sep">·</span>
-        <span>API 基址：<code id="banner-api-base">—</code></span>
-        <button id="retry-btn" class="btn-link" type="button">重试连接</button>
-      </div>
-
-      <div id="login-view" class="view login-view hidden">
+      <div id="login-view" class="login-view hidden">
         <div class="login-card">
-          <h1>NIXOS</h1>
-          <p class="login-sub">路由器管理</p>
-          <form id="login-form" class="login-form" novalidate>
-            <input id="login-username" name="username" type="text" autocomplete="username" placeholder="用户名" required />
-            <input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="密码" required />
-            <button id="login-submit" type="submit">登录</button>
-            <div id="login-error" class="error hidden" role="alert" aria-live="assertive"></div>
-            <div class="muted small mt8">API：<code id="login-api-base"></code></div>
+          <div class="brand">◆ NIXOS <span>ROUTER</span></div>
+          <h1>管理你的网络</h1>
+          <p class="muted">登录路由器管理面板</p>
+          <form id="login-form">
+            <label for="login-username">用户名</label
+            ><input id="login-username" autocomplete="username" required />
+            <label for="login-password">密码</label
+            ><input
+              id="login-password"
+              type="password"
+              autocomplete="current-password"
+              required
+            />
+            <button id="login-submit" class="btn primary" type="submit">
+              登录
+            </button>
+            <div
+              id="login-error"
+              class="notice error hidden"
+              role="alert"
+            ></div>
           </form>
+          <p class="small muted">使用设备管理员账户登录</p>
         </div>
       </div>
-
-      <div id="main-view" class="view">
+      <div id="main-view" class="hidden">
         <header class="header">
-          <button id="nav-toggle" class="menu-toggle" type="button" aria-controls="top-nav" aria-expanded="false" aria-label="打开导航">
-            <span></span><span></span><span></span>
+          <a class="brand" href="#/overview" aria-label="NixOS 路由器总览"
+            >◆ NIXOS <span>ROUTER</span></a
+          >
+          <button
+            id="nav-toggle"
+            class="btn menu-toggle"
+            type="button"
+            aria-controls="top-nav"
+            aria-expanded="false"
+            aria-label="打开导航"
+          >
+            菜单
           </button>
-          <div class="logo">
-            <span class="logo-mark">◆</span>
-            <span>NIXOS</span>
-          </div>
-          <nav id="top-nav" class="nav" aria-label="主导航">
-            <a href="#/overview" data-section="status">总览</a>
-            <a href="#/wan" data-section="network">网络</a>
-            <a href="#/ssh" data-section="services">服务</a>
-            <a href="#/system" data-section="system">系统</a>
-            <a href="#/qos" data-section="advanced">高级 <span class="soon">Soon</span></a>
-          </nav>
-          <div class="header-actions">
-            <span id="apply-dirty" class="dirty-indicator hidden">未保存</span>
-            <span id="apply-msg" class="apply-msg" role="status" aria-live="polite"></span>
-            <button id="apply-undo" class="action-btn" type="button">撤销</button>
-            <button id="apply-save" class="action-btn" type="button">保存</button>
-            <button id="apply-run" class="action-btn" type="button">应用</button>
-            <span id="user-display" class="user-display"></span>
-            <button id="logout-btn" class="logout-btn" type="button">退出</button>
+          <nav id="top-nav" aria-label="主导航"></nav>
+          <div class="account">
+            <span id="user-display"></span
+            ><button id="logout-btn" class="btn quiet">退出</button>
           </div>
         </header>
         <main class="content">
-          <nav id="section-tabs" class="tabs hidden" aria-label="分区"></nav>
-          <h2 id="page-title">总览</h2>
-          <section id="page-content" class="page-content"></section>
-          <p id="sidebar-api-hint" class="api-hint"></p>
+          <nav id="section-tabs" class="tabs" aria-label="分区"></nav>
+          <div class="page-heading">
+            <div>
+              <h1 id="page-title" tabindex="-1">总览</h1>
+              <p id="page-description" class="muted"></p>
+            </div>
+            <button id="page-refresh" class="btn quiet">刷新</button>
+          </div>
+          <div class="deployment">
+            <span id="deployment-mode" class="badge">正在连接</span
+            ><span id="deployment-description"></span>
+          </div>
+          <div
+            id="status-banner"
+            class="notice error hidden"
+            role="alert"
+          ></div>
+          <section
+            id="page-content"
+            aria-label="页面内容"
+            aria-busy="false"
+          ></section>
         </main>
+        <footer class="actionbar" aria-label="配置操作">
+          <div class="actionbar-inner">
+            <div class="save-state">
+              <span id="apply-dirty" class="badge warning hidden">未保存</span
+              ><span id="save-state">配置已加载</span>
+            </div>
+            <div class="actions">
+              <button id="apply-undo" class="btn quiet" disabled>
+                撤销修改</button
+              ><button id="apply-save" class="btn" disabled>保存</button
+              ><button id="apply-run" class="btn primary">生成配置</button>
+            </div>
+            <div
+              id="apply-msg"
+              class="apply-msg hidden"
+              role="status"
+              aria-live="polite"
+            ></div>
+          </div>
+        </footer>
       </div>
     </div>
-    <noscript>需要启用 JavaScript 才能使用此页面。</noscript>
+    <noscript>请启用 JavaScript 后使用管理面板。</noscript>
   </body>
 </html>

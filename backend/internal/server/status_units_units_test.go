@@ -30,7 +30,7 @@ func (f *fakeRunnerStatus) Output(name string, args ...string) (string, error) {
 	u := args[1]
 	out := f.byUnit[u]
 	if out == "" {
-		// Simulate not-found
+		// Simulate a command failure without a conclusive state response
 		return "", assertErr
 	}
 	// When explicitly set to "not-found", also simulate error
@@ -99,7 +99,7 @@ func TestStatusUnits_StateMapping(t *testing.T) {
 			"tailscaled.service":   "active",
 			"headscale.service":    "not-found", // simulate explicit not-found
 			"zerotier-one.service": "activating",
-			// mihomo not provided -> treated as missing
+			// mihomo has no response -> status is unknown
 		},
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
@@ -132,7 +132,7 @@ func TestStatusUnits_StateMapping(t *testing.T) {
 		"dnsmasq":      "active",
 		"nftables":     "failed",
 		"hostapd":      "inactive",
-		"mihomo":       "missing",
+		"mihomo":       "unknown",
 		"tailscaled":   "active",
 		"headscale":    "missing",
 		"zerotier-one": "unknown", // activating -> unknown
@@ -143,4 +143,3 @@ func TestStatusUnits_StateMapping(t *testing.T) {
 		}
 	}
 }
-
