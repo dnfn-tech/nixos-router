@@ -80,3 +80,19 @@ socket 初始权限 0600；不同 UID 的访问权限由后续特权 daemon 在�
 - `go test -race ./internal/privsep ./cmd/router-executor`、`go test ./...`、定向 `go vet` 通过。`go build -buildvcs=false -o /tmp/router-executor-check ./cmd/router-executor` 构建成功；该 worktree 的默认 VCS stamping 曾失败，未将该环境错误当成代码通过。
 - 尚未启动特权 executor、未操作宿主网络。真实不同 UID、损坏状态阻止 systemd 服务启动、API/执行器进程强杀和恢复仍须 Task 3/4 的 VM 证据；本轮 journal 状态夹具不代替进程崩溃测试。
 - PR #16（c83ce4f）的 Go/Browser/VM CI 已全部通过，VM run 为 42587212570；此证据不覆盖本权限隔离分支的新代码。
+
+## Task 3 API 接线检查点（未完成 NixOS 服务接线）
+
+- 新增 `--executor-socket`，限制非 root、认证 managed 模式且禁止 legacy runtime flags；API 与执行器使用同一持久作业 ID。
+- API 重启后按原 ID 对账；传输失败保留未知结果，不自动重放。草稿损坏时只读使用执行器的已应用快照，不覆盖原文件。
+- 独立审查发现 API 返回 202 后、执行器接收前中断会产生孤儿作业并遮蔽整个历史列表。现将执行器 404 投影为 `unknown` / `outcome-unknown` / `not-found`，不覆盖数据库 running 行；迟到提交仍可继续对账。列表逐条 unavailable 降级，保留其他历史结果；单条传输失败仍返回 503。
+- Web 已有逻辑只将 success/failed 当终态；unknown 继续有限轮询，超时保留作业编号并提示在系统记录核查。系统记录展示 unknown 及详细 payload，不宣称成功。
+- 全量 Go 测试通过（部分未变包缓存）；API 接线三个包 race 通过；新增孤儿/历史列表/迟到提交测试通过。未运行新增跨 UID/进程崩溃 VM；本检查点不证明部署权限隔离已生效。
+
+### Task 3 后续接线基础
+
+- Remote API 的 reboot 能力和入口统一禁用；即使环境变量允许也不直接调用宿主 reboot。回归先观察 health 错误宣称可重启，再修复为禁用。
+- executor 在 Restore 完成并启动 RPC 后发送 `READY=1`，支持后续 systemd `Type=notify` 排序；真实 Unix datagram 测试验证发送、无 supervisor 和发送失败。此处尚未证明服务排序，仍需 NixOS/VM 接线验证。
+- 两处 Nix Go 包入口均包含 routerd 和 router-executor；两个二进制以 `-buildvcs=false` 本地构建通过。
+- 固定 `/v1/leases` 只读查询由执行器读取其专用 dnsmasq.leases，拒绝调用方参数、symlink、特殊文件及超过 1 MiB 的内容。API 不读取私有 executor 目录；空文件返回真实空集合，文件缺失/不可读明确 503。新增 managed/RPC/API 回归先失败再通过；legacy 解析复用共享解析器。
+- 全量 Go 回归通过，新增租约和 API 权限边界定向 race 通过；新增功能仅在代码/真实本地 IPC 层验证，尚未完成服务账户分离、升级迁移、无线观测代理和跨 UID VM。

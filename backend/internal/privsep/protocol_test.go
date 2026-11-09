@@ -417,3 +417,27 @@ func TestRPCLostSubmitResponseCanBeQueriedAndRetried(t *testing.T) {
 		t.Fatal("lost response retry executed twice")
 	}
 }
+
+func TestRPCLeaseSnapshot(t *testing.T) {
+	r := &protocolRunner{}
+	m, _, state := protocolFixture(t, r)
+	_, c, stop := protocolService(t, m, state)
+	defer stop()
+	if _, err := c.Leases(context.Background()); err == nil {
+		t.Fatal("missing lease file treated as empty")
+	}
+	if err := os.WriteFile(filepath.Join(state, "dnsmasq.leases"), []byte("0 aa:bb:cc:dd:ee:ff 192.168.1.2 laptop *\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	leases, err := c.Leases(context.Background())
+	if err != nil || len(leases) != 1 || leases[0].IP != "192.168.1.2" {
+		t.Fatalf("lease RPC: %+v %v", leases, err)
+	}
+	var body map[string]any
+	if err := c.call(context.Background(), "GET", "/v1/leases?path=/etc/passwd", nil, &body); err == nil {
+		t.Fatal("caller-selected path accepted")
+	}
+	if r.calls.Load() != 0 {
+		t.Fatal("lease query executed commands")
+	}
+}

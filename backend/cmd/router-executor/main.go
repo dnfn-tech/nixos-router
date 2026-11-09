@@ -141,6 +141,9 @@ func run(o options) error {
 	defer stop()
 	done := make(chan error, 1)
 	go func() { done <- executor.Serve(l) }()
+	if err := notifyReady(); err != nil {
+		return err
+	}
 	select {
 	case <-ctx.Done():
 		return executor.Close()

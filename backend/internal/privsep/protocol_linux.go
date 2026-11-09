@@ -186,6 +186,21 @@ func (e *Executor) handle(w http.ResponseWriter, r *http.Request) {
 		} else {
 			rpcJSON(w, 200, j)
 		}
+
+	case r.Method == "GET" && r.URL.Path == "/v1/leases":
+		observer, ok := e.runtime.(interface {
+			Leases(context.Context) ([]managed.Lease, error)
+		})
+		if !ok {
+			rpcError(w, 503, "leases_unavailable")
+			return
+		}
+		leases, err := observer.Leases(r.Context())
+		if err != nil {
+			rpcError(w, 503, "leases_unavailable")
+			return
+		}
+		rpcJSON(w, 200, leases)
 	case r.Method == "GET" && r.URL.Path == "/v1/applied":
 		c, ok := e.runtime.AppliedConfig()
 		rpcJSON(w, 200, appliedResponse{Config: c, Available: ok})

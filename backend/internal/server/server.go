@@ -22,6 +22,7 @@ import (
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/db"
+	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -454,11 +455,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp["deployment"] = map[string]interface{}{
 		"mode":          mode,
 		"runtimeApply":  s.applyReload,
-		"rebootAllowed": !s.devMode && os.Getenv("NIXOS_ROUTER_ALLOW_REBOOT") == "1",
+		"rebootAllowed": s.rebootAllowed(),
 	}
 
 	if s.managedRuntime != nil {
-		resp["deployment"] = map[string]interface{}{"mode": "runtime", "runtimeApply": true, "rebootAllowed": !s.devMode && os.Getenv("NIXOS_ROUTER_ALLOW_REBOOT") == "1", "profile": "ipv4-single-lan"}
+		resp["deployment"] = map[string]interface{}{"mode": "runtime", "runtimeApply": true, "rebootAllowed": s.rebootAllowed(), "profile": "ipv4-single-lan"}
 		resp["startupWarning"] = s.startupWarning
 		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "wanModes": []string{"dhcp", "static"}, "singleLAN": true, "singleAP": true, "unsupported": []string{"pppoe", "ipv6", "qos", "ddns", "parental", "plugins", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
 	}
@@ -912,9 +913,25 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		BlockedSource       string `json:"blockedSource,omitempty"`
 		BlockedRuntimeKnown *bool  `json:"blockedRuntimeKnown,omitempty"`
 	}
-	var clients []Client
+	clients := []Client{}
 	source := "stub"
-	leases := s.readDnsmasqLeases()
+	var leases []dnsmasqLease
+	observer, remote := s.managedRuntime.(interface {
+		Leases(context.Context) ([]managed.Lease, error)
+	})
+	if remote {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		var err error
+		leases, err = observer.Leases(ctx)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"error": "leases_unavailable", "source": "unavailable", "clients": clients})
+			return
+		}
+		source = "leases"
+	} else {
+		leases = s.readDnsmasqLeases()
+	}
 	if len(leases) > 0 {
 		source = "leases"
 		// index static leases for hostnames
@@ -951,7 +968,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 				Blocked: isMacBlocked(cfg, L.MAC),
 			})
 		}
-	} else {
+	} else if !remote {
 		// From static leases fallback
 		for _, sl := range cfg.LAN.StaticLeases {
 			clients = append(clients, Client{IP: sl.IP, MAC: sl.MAC, Hostname: sl.Hostname, Source: "static", Blocked: isMacBlocked(cfg, sl.MAC)})
@@ -1438,7 +1455,13 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]map[string]interface{}, 0, len(jobs))
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
 	for _, j := range jobs {
+		j, err = s.reconcileRemoteJob(ctx, j)
+		if err != nil {
+			j = unknownRemoteJob(j, "unavailable")
+		}
 		items = append(items, map[string]interface{}{
 			"id":        j.ID,
 			"kind":      j.Kind,
@@ -1566,13 +1589,19 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "applied": false})
 }
 
+// Remote APIs have no direct reboot privilege. A future executor operation must
+// implement its own explicit contract before this capability can be advertised.
+func (s *Server) rebootAllowed() bool {
+	_, remote := s.managedRuntime.(remoteRuntime)
+	return !remote && !s.devMode && os.Getenv("NIXOS_ROUTER_ALLOW_REBOOT") == "1"
+}
+
 func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	allow := os.Getenv("NIXOS_ROUTER_ALLOW_REBOOT") == "1"
-	if s.devMode || !allow {
+	if !s.rebootAllowed() {
 		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "reboot disabled"})
 		return
 	}
@@ -1603,6 +1632,13 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	j, err = s.reconcileRemoteJob(ctx, j)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "executor_result_unavailable"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -2150,13 +2186,7 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 	return nil
 }
 
-type dnsmasqLease struct {
-	Expires  time.Time
-	MAC      string
-	IP       string
-	Hostname string
-	ClientID string
-}
+type dnsmasqLease = managed.Lease
 
 func (s *Server) readDnsmasqLeases() []dnsmasqLease {
 	paths := []string{}
@@ -2180,40 +2210,10 @@ func (s *Server) readDnsmasqLeases() []dnsmasqLease {
 
 func parseDnsmasqLeasesFile(path string) []dnsmasqLease {
 	data, err := os.ReadFile(path)
-	if err != nil || len(data) == 0 {
+	if err != nil {
 		return nil
 	}
-	lines := strings.Split(string(data), "\n")
-	var out []dnsmasqLease
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		// Format: <expiry> <mac|duid> <ip> <hostname> <client-id or *>
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-		var exp time.Time
-		if secs, err := strconv.ParseInt(fields[0], 10, 64); err == nil && secs > 0 {
-			exp = time.Unix(secs, 0)
-		}
-		mac := fields[1]
-		ip := fields[2]
-		hostname := fields[3]
-		clientID := ""
-		if len(fields) >= 5 {
-			clientID = fields[4]
-		}
-		out = append(out, dnsmasqLease{
-			Expires:  exp,
-			MAC:      mac,
-			IP:       ip,
-			Hostname: hostname,
-			ClientID: clientID,
-		})
-	}
-	return out
+	return managed.ParseLeases(data)
 }
 
 func isMacBlocked(cfg config.Config, mac string) bool {

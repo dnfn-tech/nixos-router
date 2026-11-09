@@ -20,6 +20,7 @@ import (
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/db"
 	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
+	"github.com/dnfn-tech/nixos-router/backend/internal/privsep"
 	"github.com/dnfn-tech/nixos-router/backend/internal/server"
 	webfs "github.com/dnfn-tech/nixos-router/backend/web"
 	"golang.org/x/crypto/bcrypt"
@@ -47,7 +48,16 @@ func main() {
 	wifiInterface := flag.String("wifi-interface", os.Getenv("NIXOS_ROUTER_WIFI_INTERFACE"), "Explicit AP interface")
 	country := flag.String("country-code", getEnv("NIXOS_ROUTER_COUNTRY_CODE", "CN"), "AP regulatory country")
 	managedSSHPorts := flag.String("managed-ssh-ports", getEnv("NIXOS_ROUTER_MANAGED_SSH_PORTS", "22"), "Trusted NixOS sshd ports to preserve, comma-separated (not HTTP draft SSH settings)")
+	executorSocket := flag.String("executor-socket", os.Getenv("NIXOS_ROUTER_EXECUTOR_SOCKET"), "Authenticated local executor socket; requires unprivileged managed API")
 	flag.Parse()
+	var remote *privsep.Client
+	if *executorSocket != "" {
+		if err := validateExecutorMode(*executorSocket, *managedMode, *dev, *applyReload || *privApply || *consumeGen || *applyTC || *allowReboot, os.Geteuid()); err != nil {
+			log.Fatal(err)
+		}
+		remote = privsep.NewClient(*executorSocket, 0)
+		defer remote.Close()
+	}
 
 	opts := config.LoadOptions{
 		StateDir:             *stateDir,
@@ -63,7 +73,13 @@ func main() {
 	if daemonLock != nil {
 		defer daemonLock.Close()
 	}
-	cfg, cfgPath, startupWarning, err := loadStartupConfig(opts, *managedMode)
+	var cfg config.Config
+	var cfgPath, startupWarning string
+	if remote != nil {
+		cfg, cfgPath, startupWarning, err = loadRemoteStartupConfig(opts, remote)
+	} else {
+		cfg, cfgPath, startupWarning, err = loadStartupConfig(opts, *managedMode)
+	}
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
@@ -84,39 +100,50 @@ func main() {
 
 	var runtime server.ManagedRuntime
 	if *managedMode {
-		if *dev || !*applyReload || !*privApply {
+		if remote == nil && (*dev || !*applyReload || !*privApply) {
 			log.Fatal("managed mode requires authentication, apply-reload and privileged-apply")
 		}
 		has, e := database.HasAnyUser()
 		if e != nil || !has {
 			log.Fatal("managed mode requires an initial administrator credential")
 		}
-		_, portText, e := net.SplitHostPort(*addr)
-		if e != nil {
-			log.Fatalf("managed listen address: %v", e)
+		if remote != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, ready, e := remote.Applied(ctx)
+			cancel()
+			if e != nil || !ready {
+				log.Fatalf("executor is not ready: %v", e)
+			}
+			runtime = remote
+			// Executor jobs outlive this API. Do not interrupt them on restart.
+		} else {
+			_, portText, e := net.SplitHostPort(*addr)
+			if e != nil {
+				log.Fatalf("managed listen address: %v", e)
+			}
+			port, e := strconv.Atoi(portText)
+			if e != nil {
+				log.Fatal("invalid management port")
+			}
+			sshPorts, e := parseManagedSSHPorts(*managedSSHPorts)
+			if e != nil {
+				log.Fatalf("managed SSH ports: %v", e)
+			}
+			manager, e := managed.New(managed.Options{StateDir: opts.StateDir, Interfaces: strings.Split(*managedInterfaces, ","), WiFiInterface: *wifiInterface, ManagementPort: port, CountryCode: *country, SSHPorts: sshPorts})
+			if e != nil {
+				log.Fatalf("managed initialization: %v", e)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			e = manager.Restore(ctx, cfg)
+			cancel()
+			if e != nil {
+				log.Fatalf("managed startup restore failed: %v", e)
+			}
+			if e = database.InterruptRunningJobs(); e != nil {
+				log.Fatalf("recover job state: %v", e)
+			}
+			runtime = manager
 		}
-		port, e := strconv.Atoi(portText)
-		if e != nil {
-			log.Fatal("invalid management port")
-		}
-		sshPorts, e := parseManagedSSHPorts(*managedSSHPorts)
-		if e != nil {
-			log.Fatalf("managed SSH ports: %v", e)
-		}
-		manager, e := managed.New(managed.Options{StateDir: opts.StateDir, Interfaces: strings.Split(*managedInterfaces, ","), WiFiInterface: *wifiInterface, ManagementPort: port, CountryCode: *country, SSHPorts: sshPorts})
-		if e != nil {
-			log.Fatalf("managed initialization: %v", e)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		e = manager.Restore(ctx, cfg)
-		cancel()
-		if e != nil {
-			log.Fatalf("managed startup restore failed: %v", e)
-		}
-		if e = database.InterruptRunningJobs(); e != nil {
-			log.Fatalf("recover job state: %v", e)
-		}
-		runtime = manager
 	}
 	s := server.New(server.Options{
 		ManagedRuntime:      runtime,

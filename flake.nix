@@ -17,7 +17,7 @@
           src = ./.;
           # 指定 Go 模块根，便于 vendorHash 计算与后续 vendor 固定
           modRoot = "./backend";
-          subPackages = [ "cmd/routerd" ];
+          subPackages = [ "cmd/routerd" "cmd/router-executor" ];
           # 已在有 Nix 的主机上验证：nix build .#routerd 成功
           vendorHash = "sha256-MM1ODEBButuG1Yalmyxv1mkJmc4Va4tclJpq1q0IAcc=";
         };

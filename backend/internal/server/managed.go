@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
+	"github.com/dnfn-tech/nixos-router/backend/internal/privsep"
 	"log"
 	"net/http"
 	"time"
@@ -31,7 +33,13 @@ func (s *Server) handleManagedApply(w http.ResponseWriter, r *http.Request) {
 	}
 	id := newSessionID()
 	user, _, _ := s.getSession(r)
-	if err = s.db.CreateJob(id, "apply", `{"mode":"managed-runtime","appliedRuntime":false,"stage":"queued"}`); err != nil {
+	queued := map[string]interface{}{"mode": "managed-runtime", "appliedRuntime": false, "stage": "queued"}
+	remote, durable := s.managedRuntime.(remoteRuntime)
+	if durable {
+		queued["executor"] = true
+	}
+	queuedJSON, _ := json.Marshal(queued)
+	if err = s.db.CreateJob(id, "apply", string(queuedJSON)); err != nil {
 		s.applyMu.Unlock()
 		http.Error(w, "cannot create apply job", 500)
 		return
@@ -45,7 +53,18 @@ func (s *Server) handleManagedApply(w http.ResponseWriter, r *http.Request) {
 		defer s.applyMu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
-		result, runErr := s.managedRuntime.Apply(ctx, cfg)
+		var result managed.Result
+		var runErr error
+		if durable {
+			result, runErr = remote.ApplyJob(ctx, id, cfg)
+		} else {
+			result, runErr = s.managedRuntime.Apply(ctx, cfg)
+		}
+		var unknown *privsep.OutcomeUnknownError
+		if errors.As(runErr, &unknown) {
+			log.Printf("managed job %s remains queryable: executor outcome unknown", id)
+			return
+		}
 		status := "success"
 		message := ""
 		if runErr != nil {
@@ -53,6 +72,9 @@ func (s *Server) handleManagedApply(w http.ResponseWriter, r *http.Request) {
 			message = runErr.Error()
 		}
 		payload := map[string]interface{}{"jobId": id, "mode": "managed-runtime", "status": status, "stage": result.Stage, "appliedRuntime": runErr == nil, "rollbackStatus": result.RollbackStatus, "warnings": result.Warnings}
+		if durable {
+			payload["executor"] = true
+		}
 		if runErr != nil {
 			payload["error"] = message
 		}

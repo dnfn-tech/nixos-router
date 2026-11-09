@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
+	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
 )
 
 type Client struct {
@@ -65,9 +66,15 @@ func (c *Client) call(ctx context.Context, method, path string, payload, dst any
 			Error string `json:"error"`
 		}
 		_ = json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&msg)
-		return fmt.Errorf("executor HTTP %d: %s", res.StatusCode, msg.Error)
+		return &RPCError{Status: res.StatusCode, Code: msg.Error}
 	}
 	dec := json.NewDecoder(io.LimitReader(res.Body, 4<<20))
 	dec.DisallowUnknownFields()
 	return dec.Decode(dst)
+}
+
+func (c *Client) Leases(ctx context.Context) ([]managed.Lease, error) {
+	var leases []managed.Lease
+	err := c.call(ctx, "GET", "/v1/leases", nil, &leases)
+	return leases, err
 }
