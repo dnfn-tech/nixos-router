@@ -283,6 +283,16 @@ func (m *Manager) apply(ctx context.Context, c config.Config) (res Result, err e
 	m.publish(&c)
 	res.Stage = "complete"
 	res.Warnings = []string{"SSH and system identity remain controlled by NixOS"}
+	if c.WAN.Mode == "pppoe" {
+		ready, observeErr := m.pppAddressReady(ctx)
+		if observeErr != nil {
+			res.Stage = "wan-status-unknown"
+			res.Warnings = append(res.Warnings, "PPP address observation failed; connectivity is unverified")
+		} else if !ready {
+			res.Stage = "awaiting-pppoe-session"
+			res.Warnings = append(res.Warnings, "PPPoE client started; awaiting an authenticated IPv4 session; connectivity is unverified")
+		}
+	}
 	if c.WAN.Mode == "dhcp" {
 		ready, observeErr := m.wanAddressReady(ctx, c.WAN.Interface)
 		if observeErr != nil {
@@ -355,6 +365,9 @@ func (m *Manager) prepare(ctx context.Context, c config.Config) (string, error) 
 		return "", fmt.Errorf("read interface ownership: %w", e)
 	}
 	for _, l := range links {
+		if l.IfName == managedPPPInterface && l.IfAlias != "nixos-router-managed-ppp" {
+			return "", errors.New("refusing to adopt an existing foreign PPP interface")
+		}
 		if l.IfName == c.WAN.Interface && l.Master != "" {
 			return "", errors.New("WAN interface must not be attached to any master")
 		}
@@ -379,6 +392,9 @@ func (m *Manager) prepare(ctx context.Context, c config.Config) (string, error) 
 	for n, s := range m.render(c) {
 		if n == "wan.env" && c.WAN.Mode == "dhcp" {
 			s += "WAN_GENERATION='" + filepath.Base(dir) + "'\n"
+		}
+		if n == "pppoe.options" && c.WAN.Mode == "pppoe" {
+			s += "ipparam " + filepath.Base(dir) + "\n"
 		}
 		if e = atomicFile(filepath.Join(dir, n), []byte(s)); e != nil {
 			return "", e
@@ -406,7 +422,7 @@ func (m *Manager) switchFiles(dir string) error {
 	return os.Rename(tmp, filepath.Join(m.base(), "current"))
 }
 func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Config, dir string) error {
-	for _, unit := range []string{"hostapd", "dnsmasq", "wan"} {
+	for _, unit := range []string{"hostapd", "dnsmasq", "wan", "pppoe"} {
 		if e := m.cmd(ctx, "systemctl", "stop", "nixos-router-"+unit+".service"); e != nil {
 			return e
 		}
@@ -422,6 +438,11 @@ func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Con
 		}
 	}
 	if e := m.switchFiles(dir); e != nil {
+		return e
+	}
+	// Old protocol processes and callbacks have stopped. A new candidate
+	// must not use peer DNS from the previous session while dialing.
+	if e := atomicFile(filepath.Join(m.base(), "wan-resolv.conf"), nil); e != nil {
 		return e
 	}
 	s, e := m.run(ctx, "ip", "-j", "link", "show")
@@ -528,10 +549,14 @@ func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Con
 			}
 		}
 	} else {
-		if e = m.cmd(ctx, "systemctl", "restart", "nixos-router-wan.service"); e != nil {
+		service := "nixos-router-wan.service"
+		if c.WAN.Mode == "pppoe" {
+			service = "nixos-router-pppoe.service"
+		}
+		if e = m.cmd(ctx, "systemctl", "restart", service); e != nil {
 			return e
 		}
-		if e = m.cmd(ctx, "systemctl", "is-active", "--quiet", "nixos-router-wan.service"); e != nil {
+		if e = m.cmd(ctx, "systemctl", "is-active", "--quiet", service); e != nil {
 			return e
 		}
 	}
@@ -596,7 +621,7 @@ func (m *Manager) removeBridge(ctx context.Context, name string) error {
 }
 func (m *Manager) cleanup(ctx context.Context, c config.Config) error {
 	var errs []error
-	for _, u := range []string{"wan", "dnsmasq", "hostapd"} {
+	for _, u := range []string{"wan", "pppoe", "dnsmasq", "hostapd"} {
 		errs = append(errs, m.cmd(ctx, "systemctl", "stop", "nixos-router-"+u+".service"))
 	}
 	errs = append(errs, m.detach(ctx, c), m.removeBridge(ctx, c.LAN.BridgeName))

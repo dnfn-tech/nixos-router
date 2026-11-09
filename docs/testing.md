@@ -39,7 +39,7 @@ nix run .#checks.x86_64-linux.vm-router.driverInteractive
 
 ## CI
 
-GitHub Actions 使用 `cachix/install-nix-action` 运行 `vm-router`、`vm-privsep`、`vm-managed-router`、`vm-managed-wifi` 四个 check，并评估两个模块契约。运行前检查并开放 `/dev/kvm`，因为旧 `vm-router` 仍要求 KVM。宿主没有 KVM 设备或设备不可读写时直接失败，需要改用支持 KVM 的 runner。
+GitHub Actions 使用 `cachix/install-nix-action` 运行 `vm-router`、`vm-privsep`、`vm-managed-router`、`vm-managed-wifi`、`vm-managed-pppoe` 五个 check，并评估两个模块契约。运行前检查并开放 `/dev/kvm`，因为旧 `vm-router` 仍要求 KVM。宿主没有 KVM 设备或设备不可读写时直接失败，需要改用支持 KVM 的 runner。
 
 ## 保存与应用反馈的浏览器回归
 
@@ -67,7 +67,7 @@ Nix 断言在 `applyReload=true` 时拒绝同时启用 NetworkManager、systemd-
 
 ## Web 全局布局与数据契约回归
 
-同一 `tests/web-save-apply.cjs` 现覆盖 37 项回归：24 个页面/面板在四种宽度下的溢出和标签检查，真实配置读写、WAN/DDNS 条件字段、WiFi 与插件密钥、备份恢复、密码和客户端编辑，以及注入的错误/慢响应/异步作业。加上 managed 能力文件，共 43 项；双浏览器编辑覆盖真实 API 的过期修订拒绝、输入保留及显式重新加载后保存。字段错误用例验证真实 API 的静态地址和数组行定位、修正后保存，以及受控错误文本的安全展示。
+同一 `tests/web-save-apply.cjs` 现覆盖 37 项回归：24 个页面/面板在四种宽度下的溢出和标签检查，真实配置读写、WAN/DDNS 条件字段、WiFi 与插件密钥、备份恢复、密码和客户端编辑，以及注入的错误/慢响应/异步作业。加上 managed 能力文件，共 44 项；双浏览器编辑覆盖真实 API 的过期修订拒绝、输入保留及显式重新加载后保存。字段错误用例验证真实 API 的静态地址和数组行定位、修正后保存，以及受控错误文本的安全展示。
 
 密钥回归覆盖默认插件脱敏、引用重排与连续保存、显式清空和撤销、新值取消清空、校验失败保留意图，以及数组空占位保留和歧义拒绝。
 
@@ -115,3 +115,13 @@ Linux 上安装浏览器系统依赖可能需要管理员权限。已有浏览�
 ### 分权与旧状态迁移 VM
 
 `vm-privsep` 使用真实不同 UID 的 API/executor 服务，先构造旧账户、会话、草稿和独立 last-good，再启动新模块验证迁移。检查 API 有效 capabilities 为零、不能读取或写入 root 运行目录、root peer 不能冒充 API、未知 RPC/路径参数被拒绝；暂停真实 dnsmasq 应用步骤后强杀 API，验证原编号仍能查询执行器完成结果。另验证重复初始化不覆盖新草稿、坏 last-good 阻止就绪及 API 启动。该 VM 不证明完整客户端转发或真实无线设备；有线/WiFi VM 仍须单独通过。
+
+## PPPoE 隔离验收
+
+`tests/vm-managed-pppoe.nix` / `tests/managed-pppoe.py` 使用独立接入服务器、router 和 LAN client，通过真实 API 配置专属 pppd。验收覆盖 peer DNS、NAT/DNAT、错误密码、断线重连、本地 pppd 强杀和服务重启、切回 DHCP、旧 generation 回调、重启恢复和凭据保护；特殊字符密码使用合成测试数据。低 MRU 场景将 TCP 端点放在 ISP 后方独立网段，检查实际接口 MTU、连接两端 MSS，并校验双向 2 MiB 数据，避免由 PPP 对端自身的 TCP 限制掩盖路由器问题。
+
+```bash
+nix build --no-link "path:$PWD#checks.x86_64-linux.vm-managed-pppoe" -L
+```
+
+新增 check 已接入 CI 定义。2026-11-09 最新本地完整 PPP VM 通过（105.29s），低 MRU 测试在修复前观察到两端 MSS1440 的失败，修复后为1348且双向数据完整。既有四套 VM 回归也已通过，但使用较早的产品快照，早于仅影响 PPP 的 net-init/MSS 钩子修复；不把不同快照描述成同一制品的远程 CI 成绩。源码及日志边界见 PPPoE 实施计划。实体 gw 和真实运营商未验收。

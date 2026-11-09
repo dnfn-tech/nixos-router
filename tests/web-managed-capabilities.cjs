@@ -160,3 +160,17 @@ test("unknown ownership protects host settings until generate-only health is con
     assert.equal(await page.getByLabel("启用 SSH", { exact: true }).isDisabled(), false, "confirmed generate-only deployment keeps its editor");
   } finally { await context.close(); }
 });
+
+test("managed WAN description follows advertised PPPoE capability", async () => {
+ const {page,context}=await pageAt("wifi");
+ try {
+  const health=structuredClone(managedHealth);
+  health.capabilities.wanModes=["dhcp","static","pppoe"];
+  health.capabilities.unsupported=health.capabilities.unsupported.filter(x=>x!=="pppoe");
+  await page.route("**/api/v1/health",route=>route.fulfill({json:health}));
+  await page.locator("#page-refresh").click();await page.waitForFunction(()=>!window.app.state.loading);
+  const description=await page.locator("#deployment-description").innerText();
+  assert.match(description,/WAN 支持 DHCP \/ 静态地址 \/ PPPoE/);
+  assert.doesNotMatch(description,/不支持 PPPoE/);
+ } finally {await context.close()}
+});

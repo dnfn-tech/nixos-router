@@ -535,7 +535,10 @@
           ? "应用会修改部署环境；生成和应用结果请以作业记录为准。"
           : "暂不能确认部署能力，请刷新连接。";
     if (state.health?.deployment?.profile === "ipv4-single-lan") {
-      $("#deployment-description").textContent = "首版：IPv4 单内网，WAN 支持 DHCP / 静态地址，最多一个接入点，5 GHz 仅支持非 DFS 信道；不支持 PPPoE、IPv6、QoS、DDNS、家长控制、插件、UPnP 和访客网络。SSH 与系统设置由 NixOS 管理，本页应用不会修改它们。";
+      const ppp = state.health?.capabilities?.wanModes?.includes("pppoe");
+      const modes = ppp ? "DHCP / 静态地址 / PPPoE" : "DHCP / 静态地址";
+      const unsupported = ppp ? "IPv6" : "PPPoE、IPv6";
+      $("#deployment-description").textContent = `IPv4 单内网，WAN 支持 ${modes}，最多一个接入点，5 GHz 仅支持非 DFS 信道；不支持 ${unsupported}、QoS、DDNS、家长控制、插件、UPnP 和访客网络。SSH 与系统设置由 NixOS 管理，本页应用不会修改它们。`;
     }
     $("#apply-run").textContent =
       mode === "generate-only" ? "生成配置" : "应用配置";

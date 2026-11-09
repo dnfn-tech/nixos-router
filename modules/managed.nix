@@ -17,6 +17,48 @@ let
   current = "${cfg.stateDir}/managed/current";
   matchPort = builtins.match ".*:([0-9]+)$" cfg.address;
   port = if matchPort == null then 8080 else builtins.fromJSON (builtins.head matchPort);
+  pppHook = action: pkgs.writeShellScript "routerd-ppp-${action}" ''
+    set -eu
+    test "''${1:-}" = nr-ppp0 || exit 1
+    # net-init runs before authentication and passes ipparam as argument 4;
+    # IPCP up/down pass it as argument 6.
+    generation="${if action == "init" then "\${4:-}" else "\${6:-}"}"
+    test -n "$generation" || exit 1
+    test "$generation" = "$(${pkgs.coreutils}/bin/readlink ${lib.escapeShellArg current})" || exit 0
+    test -s ${lib.escapeShellArg "${current}/pppoe.options"} || exit 0
+    ${if action == "init" then ''
+      ${pkgs.iproute2}/bin/ip link set dev "$1" alias nixos-router-managed-ppp
+    '' else if action == "pre-up" then ''
+      # LCP has set the negotiated transmit MTU. This synchronous hook runs
+      # before IPCP enables traffic, so both SYN directions are clamped first.
+      read -r mtu < /sys/class/net/nr-ppp0/mtu
+      case "$mtu" in ""|*[!0-9]*) exit 1;; esac
+      test "$mtu" -ge 128 && test "$mtu" -le 1492 || exit 1
+      mss=$((mtu - 40))
+      printf '%s\n' \
+        'flush chain inet nixos_router ppp_mss' \
+        "add rule inet nixos_router ppp_mss iifname \"nr-ppp0\" tcp flags & (syn | rst) == syn tcp option maxseg size > $mss tcp option maxseg size set $mss" \
+        "add rule inet nixos_router ppp_mss oifname \"nr-ppp0\" tcp flags & (syn | rst) == syn tcp option maxseg size > $mss tcp option maxseg size set $mss" \
+        | ${pkgs.nftables}/bin/nft -f -
+    '' else if action == "up" then ''
+      ${pkgs.iproute2}/bin/ip -4 route replace default dev "$1" proto static
+      umask 077
+      temp=${lib.escapeShellArg "${cfg.stateDir}/managed/wan-resolv.conf"}.tmp.$$
+      trap '${pkgs.coreutils}/bin/rm -f "$temp"' EXIT
+      : > "$temp"
+      for server in "''${DNS1:-}" "''${DNS2:-}"; do
+        case "$server" in *[!0-9.]*|"") continue;; esac
+        printf 'nameserver %s\n' "$server" >> "$temp"
+      done
+      ${pkgs.coreutils}/bin/mv "$temp" ${lib.escapeShellArg "${cfg.stateDir}/managed/wan-resolv.conf"}
+    '' else ''
+      ${pkgs.iproute2}/bin/ip -4 route flush dev "$1" proto static || true
+      umask 077
+      temp=${lib.escapeShellArg "${cfg.stateDir}/managed/wan-resolv.conf"}.tmp.$$
+      : > "$temp"
+      ${pkgs.coreutils}/bin/mv "$temp" ${lib.escapeShellArg "${cfg.stateDir}/managed/wan-resolv.conf"}
+    ''}
+  '';
   dhcpHook = pkgs.writeShellScript "routerd-dhcp-hook" ''
     set -eu
     set -f
@@ -81,6 +123,7 @@ in {
       consumeGenerated = lib.mkForce false;
     };
     boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
+    boot.kernelModules = [ "ppp_generic" "pppoe" ];
     users.groups.nixos-router-api = {};
     users.users.nixos-router-api = { isSystemUser = true; group = "nixos-router-api"; };
     systemd.services.nixos-router-state-init = {
@@ -167,6 +210,25 @@ in {
         RestartSec = 2;
         KillMode = "control-group";
         TimeoutStopSec = 10;
+      };
+    };
+    systemd.services.nixos-router-pppoe = {
+      description = "routerd dedicated WAN PPPoE protocol client";
+      serviceConfig = {
+        Type = "simple";
+        User = "root";
+        UMask = "0077";
+        ExecStart = "${pkgs.ppp}/sbin/pppd file ${current}/pppoe.options usepeerdns net-init-script ${pppHook "init"} ip-pre-up-script ${pppHook "pre-up"} ip-up-script ${pppHook "up"} ip-down-script ${pppHook "down"}";
+        Restart = "always";
+        RestartSec = 5;
+        KillMode = "control-group";
+        TimeoutStopSec = 15;
+        PrivateTmp = true;
+        ProtectHome = true;
+        ProtectSystem = "strict";
+        ReadWritePaths = [ cfg.stateDir "/run" ];
+        # Isolate global options, default hooks and generated resolv.conf.
+        TemporaryFileSystem = [ "/etc/ppp:rw,mode=0700" ];
       };
     };
     systemd.services.nixos-router-dnsmasq = {

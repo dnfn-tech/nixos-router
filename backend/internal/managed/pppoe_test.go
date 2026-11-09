@@ -1,6 +1,9 @@
 package managed
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -69,6 +72,87 @@ func TestPPPoERejectsUnsafeOptions(t *testing.T) {
 		c.WAN.Interface = iface
 		if _, err := renderPPPoE(c); err == nil {
 			t.Fatal("invalid physical WAN accepted")
+		}
+	}
+}
+
+func TestPPPoEApplyAndSwitchBack(t *testing.T) {
+	m, r, c := fixture(t)
+	c.WAN.Mode = "pppoe"
+	c.WAN.PPPoE = &config.PPPoEConfig{Username: "test-user", Password: "test-secret"}
+	res, err := m.Apply(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Stage != "awaiting-pppoe-session" {
+		t.Fatal(res)
+	}
+	root := filepath.Join(m.base(), "current")
+	options, err := os.ReadFile(filepath.Join(root, "pppoe.options"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(options), "ipparam generation-") {
+		t.Fatal("missing generation")
+	}
+	info, _ := os.Stat(filepath.Join(root, "pppoe.options"))
+	if info.Mode().Perm() != 0600 {
+		t.Fatal("credential permissions")
+	}
+	rules, _ := os.ReadFile(filepath.Join(root, "firewall.nft"))
+	if !strings.Contains(string(rules), `oifname "nr-ppp0" masquerade`) || strings.Contains(string(rules), `oifname "wan0" masquerade`) {
+		t.Fatal("wrong NAT exit")
+	}
+	calls := strings.Join(r.calls, "\n")
+	if !strings.Contains(calls, "systemctl restart nixos-router-pppoe.service") || strings.Contains(calls, "systemctl restart nixos-router-wan.service") {
+		t.Fatal(calls)
+	}
+	if strings.Contains(calls, "test-secret") {
+		t.Fatal("password in command arguments")
+	}
+	if err = os.WriteFile(filepath.Join(m.base(), "wan-resolv.conf"), []byte("nameserver 10.77.0.1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r.calls = nil
+	c.WAN.Mode = "dhcp"
+	if _, err = m.Apply(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	calls = strings.Join(r.calls, "\n")
+	if !strings.Contains(calls, "systemctl stop nixos-router-pppoe.service") || !strings.Contains(calls, "systemctl restart nixos-router-wan.service") {
+		t.Fatal(calls)
+	}
+	resolver, err := os.ReadFile(filepath.Join(m.base(), "wan-resolv.conf"))
+	if err != nil || len(resolver) != 0 {
+		t.Fatal("new WAN candidate retained old peer DNS")
+	}
+	options, _ = os.ReadFile(filepath.Join(root, "pppoe.options"))
+	if len(options) != 0 {
+		t.Fatal("inactive candidate retained PPP credentials")
+	}
+}
+
+type foreignPPPRunner struct{ recorder }
+
+func (r *foreignPPPRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	if name == "ip" && strings.Join(args, " ") == "-j -d link show" {
+		return `[{"ifname":"nr-ppp0","ifalias":"foreign"}]`, nil
+	}
+	return r.recorder.Run(ctx, name, args...)
+}
+func TestPPPoERejectsForeignInterfaceBeforeMutation(t *testing.T) {
+	m, _, c := fixture(t)
+	r := &foreignPPPRunner{}
+	m.opts.Runner = r
+	c.WAN.Mode = "pppoe"
+	c.WAN.PPPoE = &config.PPPoEConfig{Username: "u", Password: "p"}
+	_, err := m.Apply(context.Background(), c)
+	if err == nil || !strings.Contains(err.Error(), "foreign PPP") {
+		t.Fatalf("unexpected result %v", err)
+	}
+	for _, call := range r.calls {
+		if strings.HasPrefix(call, "systemctl stop") || strings.Contains(call, "ip link set") {
+			t.Fatal("mutated before ownership check")
 		}
 	}
 }

@@ -58,7 +58,9 @@
 }
 ```
 
-启用 WiFi 时提供独立 `wifiInterface`、一个启用的 WPA2 AP、合法国家/非DFS信道和运行时密钥。当前配置不支持 WPA3、WiFi 6/7 参数、访客/多AP、IPv6路由、PPPoE等高级能力；不要把宿主已有能力视为被框架自动保留。
+启用 WiFi 时提供独立 `wifiInterface`、一个启用的 WPA2 AP、合法国家/非DFS信道和运行时密钥。当前配置不支持 WPA3、WiFi 6/7 参数、访客/多AP、IPv6路由等高级能力；不要把宿主已有能力视为被框架自动保留。
+
+PPPoE 使用独立的 `nixos-router-pppoe` 服务和逻辑出口 `nr-ppp0`，物理 WAN 仍须在接口 allowlist 内。凭据从运行时配置写入 root 私有 options 文件，不应写入 Nix store。应用成功或服务 active 不代表认证及联网成功；`awaiting-pppoe-session` 表示尚未观察到 PPP 地址。完整验收进度见 [测试说明](testing.md)。
 
 ## managed 权限与升级布局
 

@@ -465,7 +465,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.managedRuntime != nil {
 		resp["deployment"] = map[string]interface{}{"mode": "runtime", "runtimeApply": true, "rebootAllowed": s.rebootAllowed(), "profile": "ipv4-single-lan"}
 		resp["startupWarning"] = s.startupWarning
-		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "wanModes": []string{"dhcp", "static"}, "singleLAN": true, "singleAP": true, "unsupported": []string{"pppoe", "ipv6", "qos", "ddns", "parental", "plugins", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
+		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "wanModes": []string{"dhcp", "static", "pppoe"}, "singleLAN": true, "singleAP": true, "unsupported": []string{"ipv6", "qos", "ddns", "parental", "plugins", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -726,7 +726,7 @@ func (s *Server) collectUnitStatuses() ([]map[string]string, string) {
 		}
 	}
 	if s.managedRuntime != nil {
-		known = []struct{ id, unit string }{{"dnsmasq", "nixos-router-dnsmasq.service"}, {"hostapd", "nixos-router-hostapd.service"}, {"wan", "nixos-router-wan.service"}}
+		known = []struct{ id, unit string }{{"dnsmasq", "nixos-router-dnsmasq.service"}, {"hostapd", "nixos-router-hostapd.service"}, {"wan", "nixos-router-wan.service"}, {"pppoe", "nixos-router-pppoe.service"}}
 	}
 	// If systemctl is absent, return stub states
 	if err := s.runner.LookPath("systemctl"); err != nil {

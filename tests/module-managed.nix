@@ -29,6 +29,12 @@ in {
     assert cfg.systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22";
     assert cfg.systemd.services.nixos-router-dnsmasq.serviceConfig.Type == "forking";
     assert builtins.hasAttr "nixos-router-wan" cfg.systemd.services;
+    assert builtins.hasAttr "nixos-router-pppoe" cfg.systemd.services;
+    assert cfg.systemd.services.nixos-router-pppoe.serviceConfig.KillMode == "control-group";
+    assert cfg.systemd.services.nixos-router-pppoe.serviceConfig.TemporaryFileSystem == [ "/etc/ppp:rw,mode=0700" ];
+    assert lib.hasInfix "file /var/lib/nixos-router/managed/current/pppoe.options" cfg.systemd.services.nixos-router-pppoe.serviceConfig.ExecStart;
+    assert lib.elem "pppoe" cfg.boot.kernelModules;
+    assert lib.hasInfix "net-init-script" cfg.systemd.services.nixos-router-pppoe.serviceConfig.ExecStart;
     assert builtins.hasAttr "nixos-router-dnsmasq" cfg.systemd.services;
     assert builtins.hasAttr "nixos-router-hostapd" cfg.systemd.services;
     assert cfg.networking.firewall.allowedTCPPorts == [];

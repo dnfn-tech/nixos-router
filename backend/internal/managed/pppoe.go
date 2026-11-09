@@ -1,6 +1,8 @@
 package managed
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"unicode"
@@ -52,4 +54,33 @@ func renderPPPoE(c config.Config) (string, error) {
 		"nodetach\nnoauth\nnoipdefault\nnoipv6\nnodefaultroute\n" +
 		"mtu 1492\nmru 1492\npersist\nmaxfail 0\nholdoff 5\n" +
 		"lcp-echo-interval 10\nlcp-echo-failure 3\nhide-password\n", nil
+}
+
+// Query all links: an interface absent while pppd is reconnecting is waiting,
+// whereas command/JSON errors mean observation is unknown.
+func (m *Manager) pppAddressReady(ctx context.Context) (bool, error) {
+	raw, err := m.run(ctx, "ip", "-j", "-4", "addr", "show")
+	if err != nil {
+		return false, err
+	}
+	var links []struct {
+		Name      string `json:"ifname"`
+		Addresses []struct {
+			Local string `json:"local"`
+			Scope string `json:"scope"`
+		} `json:"addr_info"`
+	}
+	if err = json.Unmarshal([]byte(raw), &links); err != nil {
+		return false, err
+	}
+	for _, link := range links {
+		if link.Name == managedPPPInterface {
+			for _, a := range link.Addresses {
+				if a.Scope == "global" && ipv4(a.Local) {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
 }

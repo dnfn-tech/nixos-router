@@ -139,3 +139,33 @@ func TestManagedApplyFlushesJobBeforeNetworkMutation(t *testing.T) {
 	s.applyMu.Lock()
 	s.applyMu.Unlock()
 }
+
+func TestManagedHealthReportsPPPoECapability(t *testing.T) {
+	s := concurrentServer(t)
+	s.managedRuntime = &runtimeStub{}
+	w := httptest.NewRecorder()
+	s.handleHealth(w, httptest.NewRequest("GET", "/api/v1/health", nil))
+	var body struct {
+		Capabilities struct {
+			WANModes    []string `json:"wanModes"`
+			Unsupported []string `json:"unsupported"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, mode := range body.Capabilities.WANModes {
+		if mode == "pppoe" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("implemented PPPoE missing from WAN capabilities")
+	}
+	for _, feature := range body.Capabilities.Unsupported {
+		if feature == "pppoe" {
+			t.Fatal("PPPoE still reported unsupported")
+		}
+	}
+}

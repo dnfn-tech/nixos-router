@@ -28,6 +28,7 @@
 | 密钥编辑 | 默认插件递归脱敏、修订绑定引用、显式清空、数组身份歧义拒绝 | 全量 Go/vet、定向 race、43 项浏览器通过；未为本改造重新运行 VM；高级 JSON 撤销重复引用清空后需再次编辑以刷新校验提示 |
 | 接口所有权 | 有线/WiFi 显式授权；配置期和运行前拒绝冲突；未知桥拒绝接管 | `tests/module-managed.nix`、`tests/module-apply.nix`、`backend/internal/managed/manager_test.go` |
 | IPv4 WAN/LAN | DHCP/静态 WAN、单桥、多有线成员、DHCP 池/静态租约、DNS | `tests/managed-router.py`：API 修改后检查客户端实际行为 |
+| PPPoE | 专属 pppd、私有凭据、peer DNS、逻辑出口 NAT/DNAT、按协商 MTU 限制双向 MSS | 最新本地完整 PPP VM 105.29s 通过：真实拨号、特殊字符凭据、错误密码修正、断线/进程崩溃/服务重启、DHCP切换、旧回调、整机重启；MTU1400 时双端 MSS1348、双向2MiB完整传输；未做实体运营商验收 |
 | 防火墙 | 专属 nft 表、NAT、DNAT 增删、转发 MAC 阻断；LAN-only Web/宿主 SSH 端口保护覆盖 IPv4/IPv6 | 同一有线 VM；IPv6 管理面隔离不表示支持 IPv6 路由；MAC 转发阻断不表示同桥二层隔离 |
 | 应用与恢复 | 不可变候选、串行作业、last-good、失败恢复、重启恢复、坏草稿诊断 | 有线 VM 的失败注入/重启/改址；不增加 LAN 改址倒计时或超时自动回滚 |
 | 无线 | 显式单 AP、WPA2、独立 hostapd、检测及受支持信道校验 | `tests/managed-wifi.py` 使用 mac80211_hwsim 真实认证、租约、关闭/重开；不证明实体芯片/射频性能 |
@@ -42,7 +43,6 @@
 
 | 项目 | 当前差距 | 完成所需证据 |
 |---|---|---|
-| PPPoE | managed 校验明确拒绝 | 模拟接入服务器上的拨号、断线重拨、凭据失败、真实出口 NAT |
 | IPv6 路由 | managed 拒绝启用 IPv6/RA/PD | 上游获取/PD、LAN 地址与路由、双栈流量和管理隔离 |
 | 多 AP/访客 | managed 拒绝访客/不支持组合 | 能力裁剪与真实无线客户端；访客二层及三层隔离、禁用清理 |
 | QoS/家长控制/DDNS/UPnP | managed 拒绝启用 | 吞吐/时间规则/协议更新/映射创建撤销，含失败路径和停用清理 |

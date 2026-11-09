@@ -25,8 +25,11 @@ func (m *Manager) validate(c config.Config) error {
 	if e := c.Validate(); e != nil {
 		return e
 	}
-	if c.WAN.Mode != "dhcp" && c.WAN.Mode != "static" {
-		return errors.New("managed mode does not support PPPoE")
+	if _, err := renderPPPoE(c); err != nil {
+		return err
+	}
+	if c.LAN.BridgeName == managedPPPInterface || m.allowed[managedPPPInterface] || m.opts.WiFiInterface == managedPPPInterface {
+		return errors.New("PPP interface name is reserved")
 	}
 	if c.QoS.Enable || c.DDNS.Enable || c.Parental.Enable || c.IPv6.Enable || c.IPv6.LANRA || c.IPv6.LANPD || c.Firewall.UPnPEnable {
 		return errors.New("managed mode does not support QoS/DDNS/parental/IPv6/UPnP")
@@ -216,6 +219,8 @@ func (m *Manager) render(c config.Config) map[string]string {
 	if c.WAN.Mode == "dhcp" {
 		wan = "WAN_INTERFACE='" + c.WAN.Interface + "'\n"
 	}
+	egress := wanEgress(c)
+	ppp, _ := renderPPPoE(c) // validated before generation
 	// add+flush+redefine runs as a single nft transaction and never touches foreign tables.
 	nft := "add table inet nixos_router\nflush table inet nixos_router\ntable inet nixos_router {\n"
 	managementPorts := []string{fmt.Sprint(m.opts.ManagementPort)}
@@ -226,7 +231,12 @@ func (m *Manager) render(c config.Config) map[string]string {
 	}
 	nft += fmt.Sprintf(" chain input { type filter hook input priority 0; policy accept; iifname != { \"lo\", \"%s\" } tcp dport { %s } drop;", c.LAN.BridgeName, strings.Join(managementPorts, ", "))
 	if c.Firewall.Enable {
-		nft += fmt.Sprintf(" iifname \"%s\" ct state established,related accept; iifname \"%s\" udp sport 67 udp dport 68 accept; iifname \"%s\" drop;", c.WAN.Interface, c.WAN.Interface, c.WAN.Interface)
+		for _, iface := range []string{c.WAN.Interface} {
+			nft += fmt.Sprintf(" iifname \"%s\" ct state established,related accept; iifname \"%s\" udp sport 67 udp dport 68 accept; iifname \"%s\" drop;", iface, iface, iface)
+		}
+		if egress != c.WAN.Interface {
+			nft += fmt.Sprintf(" iifname \"%s\" ct state established,related accept; iifname \"%s\" drop;", egress, egress)
+		}
 	}
 	nft += " }\n"
 	policy := "accept"
@@ -237,9 +247,9 @@ func (m *Manager) render(c config.Config) map[string]string {
 	for _, s := range c.Firewall.BlockedMACs {
 		nft += " ether saddr " + s + " drop\n"
 	}
-	nft += fmt.Sprintf(" ct state established,related accept\n iifname \"%s\" oifname \"%s\" accept\n", c.LAN.BridgeName, c.WAN.Interface)
+	nft += fmt.Sprintf(" ct state established,related accept\n iifname \"%s\" oifname \"%s\" accept\n", c.LAN.BridgeName, egress)
 	for _, p := range c.Firewall.PortForwards {
-		nft += fmt.Sprintf(" iifname \"%s\" oifname \"%s\" ct status dnat ip daddr %s %s dport %d accept\n", c.WAN.Interface, c.LAN.BridgeName, p.DestIP, p.Protocol, p.DestPort)
+		nft += fmt.Sprintf(" iifname \"%s\" oifname \"%s\" ct status dnat ip daddr %s %s dport %d accept\n", egress, c.LAN.BridgeName, p.DestIP, p.Protocol, p.DestPort)
 	}
 	nft += " }\n chain prerouting { type nat hook prerouting priority dstnat; policy accept;\n"
 	for _, p := range c.Firewall.PortForwards {
@@ -247,15 +257,25 @@ func (m *Manager) render(c config.Config) map[string]string {
 		if p.ExternalPortEnd > p.ExternalPort {
 			ports += fmt.Sprintf("-%d", p.ExternalPortEnd)
 		}
-		nft += fmt.Sprintf(" iifname \"%s\" %s dport %s dnat ip to %s:%d\n", c.WAN.Interface, p.Protocol, ports, p.DestIP, p.DestPort)
+		nft += fmt.Sprintf(" iifname \"%s\" %s dport %s dnat ip to %s:%d\n", egress, p.Protocol, ports, p.DestIP, p.DestPort)
 	}
 	nft += " }\n chain postrouting { type nat hook postrouting priority srcnat; policy accept;\n"
 	if c.Firewall.NATEnabled {
 		_, subnet, _ := net.ParseCIDR(c.LAN.IPv4CIDR)
-		nft += fmt.Sprintf(" ip saddr %s oifname \"%s\" masquerade\n", subnet, c.WAN.Interface)
+		nft += fmt.Sprintf(" ip saddr %s oifname \"%s\" masquerade\n", subnet, egress)
 	}
-	nft += " }\n}\n"
-	return map[string]string{"dnsmasq.conf": dns, "hostapd.conf": host, "wan.env": wan, "firewall.nft": nft}
+	nft += " }\n"
+	if c.WAN.Mode == "pppoe" {
+		// Initial ceiling before a session exists. The synchronous PPP pre-up
+		// hook replaces both rules using the negotiated interface MTU.
+		nft += " chain ppp_mss { type filter hook forward priority mangle; policy accept;\n"
+		for _, direction := range []string{"iifname", "oifname"} {
+			nft += fmt.Sprintf(" %s \"%s\" tcp flags & (syn | rst) == syn tcp option maxseg size > 1452 tcp option maxseg size set 1452\n", direction, egress)
+		}
+		nft += " }\n"
+	}
+	nft += "}\n"
+	return map[string]string{"dnsmasq.conf": dns, "hostapd.conf": host, "wan.env": wan, "firewall.nft": nft, "pppoe.options": ppp}
 }
 
 func configuredUpstreams(c config.Config) []string {
