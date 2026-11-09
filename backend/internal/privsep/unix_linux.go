@@ -148,3 +148,12 @@ func checkParent(path string, uids ...uint32) error {
 	}
 	return nil
 }
+
+// CheckDirectory validates a supervisor-provisioned directory before privileged
+// code creates or reads state inside it. It does not create or change ownership.
+func CheckDirectory(dir string, uid uint32) error {
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return fmt.Errorf("clean absolute directory required")
+	}
+	return checkParent(filepath.Join(dir, ".directory-check"), uid)
+}

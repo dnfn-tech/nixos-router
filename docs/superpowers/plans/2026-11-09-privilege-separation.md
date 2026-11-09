@@ -36,12 +36,13 @@ socket 初始权限 0600；不同 UID 的访问权限由后续特权 daemon 在�
 
 ## 2. 配置级 RPC 和独立执行器
 
-文件：新增 `backend/internal/privsep/protocol.go`、`client.go`、相应测试和 `backend/cmd/router-executor/main.go`。
+文件：新增 `backend/internal/privsep/protocol_linux.go`、`client_linux.go`、`journal_linux.go`、`state_linux.go`、相应测试和 `backend/cmd/router-executor/main.go`。
 
-- [ ] 定义版本化、大小有界且拒绝未知字段的 apply/status 请求；传入配置而不是路径/命令。
-- [ ] 执行器独占 managed.Manager；apply 保持有界串行任务和持久化结果，连接断开不取消或重复网络事务。API 重启可按任务 ID 查询；ID 内容绑定避免重复 ID 换配置。
-- [ ] 真 socket 集成验证未知动作/超大消息/非法配置/未授权接口被拒绝，合法调用保留结果与恢复错误；模拟仅限系统 runner。
-- [ ] root 状态目录与低权限 API 目录分离；执行器只接受可信启动参数及独立 bootstrap，恢复不得信任低权限草稿。
+- [x] 定义版本化、大小有界且拒绝未知字段的 apply/status 请求；传入配置而不是路径/命令。
+- [x] 执行器独占 managed.Manager；apply 保持有界串行任务和持久化结果，连接断开不取消或重复网络事务。API 重启可按任务 ID 查询；ID 内容绑定避免重复 ID 换配置。
+- [x] 真 socket 集成验证未知动作/超大消息/非法配置/未授权接口被拒绝，合法调用保留结果与恢复错误；模拟仅限系统 runner。
+- [x] 独立执行器接受受信启动参数、私有状态目录和 bootstrap；恢复前拒绝不可信状态子树。
+- [ ] 在 NixOS 接线中实际分离 root 状态目录与低权限 API 目录（Task 3），并完成不同 UID 与服务重启验证（Task 4）。
 
 ## 3. API、模块与升级
 
@@ -68,3 +69,14 @@ socket 初始权限 0600；不同 UID 的访问权限由后续特权 daemon 在�
 - 尚未接入 API/daemon/Nix 服务。不同真实 UID 通信、root 运行目录迁移、进程崩溃以及网络行为仍按 Task 2–4 验收；不能据此宣称权限隔离完成。
 
 独立复审已确认 Task 1 无剩余阻塞问题；复审为源码检查，运行证据来自上述实际测试。
+
+## Task 2 验证记录
+
+- 新增配置级 `/v1/jobs` 与 `/v1/applied`，单次 JSON 请求上限 1 MiB；拒绝未知字段、尾随 JSON、非法 ID/配置、任意命令路径。Serve 只接受已认证 Unix listener。
+- 执行器 SQLite 持久化 ID、配置摘要与结果；相同 ID/配置返回原任务，换配置冲突；仅一个活动任务，不排无限队列。持久化接受失败不执行；结果落盘失败不报告成功并拒绝继续应用。
+- 真实 socket + managed.Manager 测试通过；仅系统命令使用 runner。覆盖未授权接口、应答丢失后查询/重试、并发拒绝、应用失败恢复成功/失败及日志重开。running 行重开标 interrupted，不自动重放。
+- 独立审查发现顶层目录验证不足：恢复前必须检查 managed 子树。五种不可信目录/配置/硬链接回归先失败；增加 CheckState 后通过。保留引擎的受限 generation 指针，并允许私有父目录内 root 组的 hostapd 控制 socket。
+- 故障注入初次误匹配 start，实际命令为 restart；修正测试夹具后恢复成功/失败两种结果均通过，不改动引擎来迎合测试。
+- `go test -race ./internal/privsep ./cmd/router-executor`、`go test ./...`、定向 `go vet` 通过。`go build -buildvcs=false -o /tmp/router-executor-check ./cmd/router-executor` 构建成功；该 worktree 的默认 VCS stamping 曾失败，未将该环境错误当成代码通过。
+- 尚未启动特权 executor、未操作宿主网络。真实不同 UID、损坏状态阻止 systemd 服务启动、API/执行器进程强杀和恢复仍须 Task 3/4 的 VM 证据；本轮 journal 状态夹具不代替进程崩溃测试。
+- PR #16（c83ce4f）的 Go/Browser/VM CI 已全部通过，VM run 为 42587212570；此证据不覆盖本权限隔离分支的新代码。
