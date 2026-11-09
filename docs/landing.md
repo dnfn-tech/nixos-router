@@ -215,3 +215,9 @@ nix build .#routerd
 API 调用者先 `GET /api/v1/config`，保留响应的完整 `ETag`，再将它作为写请求的 `If-Match`。`PUT /config`、插件配置、设备 PATCH 和备份恢复共享同一个修订；成功返回新 ETag。缺失条件返回 428/config_revision_required，过期条件返回 409/config_conflict。不得收到 409 后自动取新修订并重发旧内容；应重新加载、核对再保存。
 
 旧 JSON/备份格式继续可导入，但无条件写 API 不再接受。这是为了阻止旧调用者静默覆盖新配置；集成脚本须同步增加 GET/If-Match。Web 自动携带编辑开始时的修订，冲突时保留输入。恢复备份也生成新修订，不重用备份中的旧身份。managed apply 作业记录其捕获的 configRevision。
+
+### API 失败反馈
+
+HTTP 失败响应提供 `code`、`message`、`fieldErrors`（无字段错误时为 `{}`）。字段路径使用配置 JSON 名称和零起始数组下标，例如 `lan.staticLeases.1.ip`。旧 `error`/`errors` 字段在兼容期保留；调用者应使用 `code` 判断失败类型、`message` 展示说明。保存失败不改变草稿修订；Web 保留输入并标记当前页面可见的错误字段。
+
+API 写请求体上限为 16 MiB，JSON 和 multipart 请求均适用；超出返回 413。认证和 CSRF 检查在读取请求体之前执行。

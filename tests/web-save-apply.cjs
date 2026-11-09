@@ -1271,3 +1271,60 @@ test("two editors reject stale saves and retain input until explicit reload", as
     await second.context.close();
   }
 });
+
+test("field validation preserves input and focuses the rejected configuration field", async () => {
+  const {page,context}=await pageAt("plugins");
+  const original=await configOf(context);
+  try {
+    await navigate(page,"wan");
+    await page.getByLabel("上网方式",{exact:true}).selectOption("static");
+    const address=page.getByLabel("静态地址 / CIDR",{exact:true});
+    await address.fill("invalid-address");
+    await waitAction(page,"#apply-save");
+    assert.equal(await address.getAttribute("aria-invalid"),"true");
+    assert.equal(await address.inputValue(),"invalid-address");
+    assert.equal(await address.evaluate(el=>document.activeElement===el),true);
+    assert.equal(await page.locator("#apply-dirty").isVisible(),true);
+    const described=await address.getAttribute("aria-describedby");
+    assert.ok(described?.includes("-error"));
+    await address.fill("10.20.30.2/24");
+    assert.equal(await address.getAttribute("aria-invalid"),null);
+    await waitAction(page,"#apply-save");
+    assert.equal((await configOf(context)).wan.static.addressCidr,"10.20.30.2/24");
+  } finally {await putConfig(context,original);await context.close();}
+});
+
+test("field validation identifies the second array row without marking the first", async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const fixture=JSON.parse(JSON.stringify(original));
+  fixture.lan.staticLeases=[{mac:"00:11:22:33:44:55",ip:"192.168.1.10"},{mac:"00:11:22:33:44:66",ip:"192.168.1.11"}];
+  await putConfig(context,fixture);await navigate(page,"lan");
+  const ips=page.getByLabel("IP 地址",{exact:true});
+  await ips.nth(1).fill("not-an-ip");await waitAction(page,"#apply-save");
+  assert.equal(await ips.nth(0).getAttribute("aria-invalid"),null);
+  assert.equal(await ips.nth(1).getAttribute("aria-invalid"),"true");
+  assert.equal(await ips.nth(1).getAttribute("data-config-path"),"lan.staticLeases.1.ip");
+  assert.equal(await ips.nth(1).evaluate(el=>document.activeElement===el),true);
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("field validation renders text safely and keeps other errors when editing one field",async()=>{
+ const {page,context}=await pageAt("plugins");
+ try {
+  await navigate(page,"lan");
+  const message='<img src=x onerror="window.errorInjected=true">';
+  await page.route("**/api/v1/config",async route=>{
+   if(route.request().method()!=="PUT")return route.continue();
+   await route.fulfill({status:400,contentType:"application/json",body:JSON.stringify({code:"invalid_config",message:"检查输入",fieldErrors:{"lan.dhcp.rangeStart":message,"lan.dhcp.rangeEnd":"结束地址错误","wan.static.gateway":"其他页面字段错误"}})});
+  });
+  await page.getByLabel("地址池起始地址",{exact:true}).fill("192.168.1.30");await waitAction(page,"#apply-save");
+  assert.equal(await page.locator(".field-error img").count(),0);
+  assert.equal(await page.evaluate(()=>window.errorInjected),undefined);
+  assert.ok((await page.locator(".field-error").allTextContents()).includes(message));
+  assert.match(await page.locator("#apply-msg").innerText(),/其他页面字段错误/);
+  await page.getByLabel("地址池起始地址",{exact:true}).fill("192.168.1.31");
+  assert.equal(await page.getByLabel("地址池起始地址",{exact:true}).getAttribute("aria-invalid"),null);
+  assert.equal(await page.getByLabel("地址池结束地址",{exact:true}).getAttribute("aria-invalid"),"true");
+ } finally {await context.close();}
+});

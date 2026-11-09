@@ -33,12 +33,12 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 
 func (c Config) validateDocumentMetadata() error {
 	if c.SchemaVersion != 0 && c.SchemaVersion != CurrentSchemaVersion {
-		return fmt.Errorf("unsupported configuration schema version")
+		return invalidField("schemaVersion", "unsupported configuration schema version")
 	}
 	if c.Revision != "" {
 		b, err := hex.DecodeString(c.Revision)
 		if err != nil || len(b) != 16 || hex.EncodeToString(b) != c.Revision || c.SchemaVersion == 0 {
-			return fmt.Errorf("invalid configuration revision")
+			return invalidField("revision", "invalid configuration revision")
 		}
 	}
 	return nil

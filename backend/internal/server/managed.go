@@ -28,7 +28,7 @@ func (s *Server) handleManagedApply(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.RUnlock()
 	if err != nil {
 		s.applyMu.Unlock()
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "invalid_config", "message": err.Error()})
+		writeConfigError(w, err)
 		return
 	}
 	id := newSessionID()
@@ -41,7 +41,7 @@ func (s *Server) handleManagedApply(w http.ResponseWriter, r *http.Request) {
 	queuedJSON, _ := json.Marshal(queued)
 	if err = s.db.CreateJob(id, "apply", string(queuedJSON)); err != nil {
 		s.applyMu.Unlock()
-		http.Error(w, "cannot create apply job", 500)
+		apiHTTPError(w, "cannot create apply job", 500)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]interface{}{"jobId": id, "mode": "managed-runtime", "configRevision": cfg.Revision, "status": "running", "appliedRuntime": false})

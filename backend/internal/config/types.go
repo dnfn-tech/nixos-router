@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -267,165 +266,195 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if strings.TrimSpace(c.System.Hostname) == "" {
-		return errors.New("system.hostname must not be empty")
+		return invalidField("system.hostname", "must not be empty")
 	}
 	switch c.WAN.Mode {
 	case "dhcp":
 	case "static":
 		if c.WAN.Static == nil {
-			return errors.New("wan.static must be set when wan.mode is 'static'")
+			return invalidField("wan.static", "must be set when wan.mode is 'static'")
 		}
 		if _, _, err := net.ParseCIDR(c.WAN.Static.AddressCIDR); err != nil {
-			return fmt.Errorf("wan.static.addressCidr invalid: %w", err)
+			return invalidField("wan.static.addressCidr", "invalid CIDR address")
 		}
 		if c.WAN.Static.Gateway != "" && net.ParseIP(c.WAN.Static.Gateway) == nil {
-			return errors.New("wan.static.gateway invalid IP")
+			return invalidField("wan.static.gateway", "invalid IP")
 		}
-		for _, ip := range c.WAN.Static.DNS {
+		for i, ip := range c.WAN.Static.DNS {
 			if net.ParseIP(ip) == nil {
-				return fmt.Errorf("wan.static.dns contains invalid IP: %s", ip)
+				return invalidField(fmt.Sprintf("wan.static.dns.%d", i), "invalid IP address")
 			}
 		}
 	case "pppoe":
 		if c.WAN.PPPoE == nil {
-			return errors.New("wan.pppoe must be set when wan.mode is 'pppoe'")
+			return invalidField("wan.pppoe", "must be set when wan.mode is 'pppoe'")
 		}
 		if c.WAN.PPPoE.Username == "" {
-			return errors.New("wan.pppoe.username must not be empty")
+			return invalidField("wan.pppoe.username", "must not be empty")
 		}
 		if c.WAN.PPPoE.Password == "" {
-			return errors.New("wan.pppoe.password must not be empty")
+			return invalidField("wan.pppoe.password", "must not be empty")
 		}
 	default:
-		return errors.New("wan.mode must be one of: dhcp, static, pppoe")
+		return invalidField("wan.mode", "must be one of: dhcp, static, pppoe")
 	}
 
 	if _, _, err := net.ParseCIDR(c.LAN.IPv4CIDR); err != nil {
-		return fmt.Errorf("lan.ipv4Cidr invalid: %w", err)
+		return invalidField("lan.ipv4Cidr", "invalid CIDR address")
 	}
 	if c.LAN.DHCP.Enable {
 		if net.ParseIP(c.LAN.DHCP.RangeStart) == nil {
-			return errors.New("lan.dhcp.rangeStart invalid IP")
+			return invalidField("lan.dhcp.rangeStart", "invalid IP")
 		}
 		if net.ParseIP(c.LAN.DHCP.RangeEnd) == nil {
-			return errors.New("lan.dhcp.rangeEnd invalid IP")
+			return invalidField("lan.dhcp.rangeEnd", "invalid IP")
 		}
 		if c.LAN.DHCP.LeaseMins < 1 {
-			return errors.New("lan.dhcp.leaseMins must be >= 1")
+			return invalidField("lan.dhcp.leaseMins", "must be >= 1")
 		}
 	}
 	// Static leases
 	if len(c.LAN.StaticLeases) > 0 {
 		_, lanNet, _ := net.ParseCIDR(c.LAN.IPv4CIDR)
-		for _, sl := range c.LAN.StaticLeases {
+		for i, sl := range c.LAN.StaticLeases {
 			if _, err := net.ParseMAC(sl.MAC); err != nil {
-				return fmt.Errorf("lan.staticLeases mac invalid: %s", sl.MAC)
+				return invalidField(fmt.Sprintf("lan.staticLeases.%d.mac", i), "invalid MAC address")
 			}
 			ip := net.ParseIP(sl.IP)
 			if ip == nil {
-				return fmt.Errorf("lan.staticLeases ip invalid: %s", sl.IP)
+				return invalidField(fmt.Sprintf("lan.staticLeases.%d.ip", i), "invalid IP address")
 			}
 			if lanNet != nil && !lanNet.Contains(ip) {
-				return fmt.Errorf("lan.staticLeases ip %s not in %s", sl.IP, c.LAN.IPv4CIDR)
+				return invalidField(fmt.Sprintf("lan.staticLeases.%d.ip", i), "address must be in the LAN subnet")
 			}
 		}
 	}
 
-	for _, u := range c.DNS.Upstreams {
+	for i, u := range c.DNS.Upstreams {
 		if net.ParseIP(u) == nil {
-			return fmt.Errorf("dns.upstreams contains invalid IP: %s", u)
+			return invalidField(fmt.Sprintf("dns.upstreams.%d", i), "invalid IP address")
 		}
 	}
 
 	// Basic WiFi checks (more in later milestones)
-	for _, ap := range c.WiFi.APs {
+	for i, ap := range c.WiFi.APs {
 		if ap.SSID == "" {
-			return errors.New("wifi.aps[].ssid must not be empty")
+			return invalidField(fmt.Sprintf("wifi.aps.%d.ssid", i), "must not be empty")
 		}
 		if ap.PSK != "" && len(ap.PSK) < 8 {
-			return errors.New("wifi.aps[].psk must be at least 8 characters if set")
+			return invalidField(fmt.Sprintf("wifi.aps.%d.psk", i), "must be at least 8 characters if set")
 		}
 		switch ap.Band {
 		case "", "2g", "5g", "6g":
 		default:
-			return fmt.Errorf("wifi.aps[].band invalid: %s", ap.Band)
+			return invalidField(fmt.Sprintf("wifi.aps.%d.band", i), "unsupported band")
 		}
 	}
 
 	// SSH port sanity
 	if c.SSH.Port < 0 || c.SSH.Port > 65535 {
-		return errors.New("ssh.port must be 0-65535")
+		return invalidField("ssh.port", "must be 0-65535")
 	}
 	// QoS sanity
-	for _, dp := range c.QoS.DevicePolicy {
+	for i, dp := range c.QoS.DevicePolicy {
 		if dp.MAC == "" && dp.IP == "" {
-			return errors.New("qos.devicePolicy[] requires mac or ip")
+			return invalidField(fmt.Sprintf("qos.devicePolicy.%d.mac", i), "MAC or IP address is required")
 		}
 		if dp.MAC != "" {
 			if _, err := net.ParseMAC(dp.MAC); err != nil {
-				return fmt.Errorf("qos.devicePolicy mac invalid: %s", dp.MAC)
+				return invalidField(fmt.Sprintf("qos.devicePolicy.%d.mac", i), "invalid MAC address")
 			}
 		}
 		if dp.IP != "" && net.ParseIP(dp.IP) == nil {
-			return fmt.Errorf("qos.devicePolicy ip invalid: %s", dp.IP)
+			return invalidField(fmt.Sprintf("qos.devicePolicy.%d.ip", i), "invalid IP address")
 		}
 		if dp.LimitKbps < 0 {
-			return errors.New("qos.devicePolicy.limitKbps must be >=0")
+			return invalidField(fmt.Sprintf("qos.devicePolicy.%d.limitKbps", i), "must be >=0")
 		}
 	}
 	// IPv6 sanity
 	switch c.IPv6.WANMode {
 	case "dhcpv6", "slaac", "pppoe6", "disabled", "":
 	default:
-		return errors.New("ipv6.wanMode must be one of: dhcpv6, slaac, pppoe6, disabled")
+		return invalidField("ipv6.wanMode", "must be one of: dhcpv6, slaac, pppoe6, disabled")
 	}
 	// Firewall port forwards
-	for _, pf := range c.Firewall.PortForwards {
+	for i, pf := range c.Firewall.PortForwards {
 		if pf.Protocol != "tcp" && pf.Protocol != "udp" {
-			return fmt.Errorf("firewall.portForwards[].protocol invalid: %s", pf.Protocol)
+			return invalidField(fmt.Sprintf("firewall.portForwards.%d.protocol", i), "must be tcp or udp")
 		}
 		if pf.ExternalPort < 1 || pf.ExternalPort > 65535 {
-			return errors.New("firewall.portForwards[].externalPort 1-65535")
+			return invalidField(fmt.Sprintf("firewall.portForwards.%d.externalPort", i), "must be 1-65535")
 		}
 		if pf.ExternalPortEnd != 0 {
 			if pf.ExternalPortEnd < pf.ExternalPort || pf.ExternalPortEnd > 65535 {
-				return errors.New("firewall.portForwards[].externalPortEnd invalid")
+				return invalidField(fmt.Sprintf("firewall.portForwards.%d.externalPortEnd", i), "invalid end port")
 			}
 		}
 		if net.ParseIP(pf.DestIP) == nil {
-			return fmt.Errorf("firewall.portForwards[].destIp invalid: %s", pf.DestIP)
+			return invalidField(fmt.Sprintf("firewall.portForwards.%d.destIp", i), "invalid IP address")
 		}
 		if pf.DestPort < 1 || pf.DestPort > 65535 {
-			return errors.New("firewall.portForwards[].destPort 1-65535")
+			return invalidField(fmt.Sprintf("firewall.portForwards.%d.destPort", i), "must be 1-65535")
 		}
 	}
 	// Firewall blocked MACs
-	for _, m := range c.Firewall.BlockedMACs {
+	for i, m := range c.Firewall.BlockedMACs {
 		if _, err := net.ParseMAC(m); err != nil {
-			return fmt.Errorf("firewall.blockedMacs invalid: %s", m)
+			return invalidField(fmt.Sprintf("firewall.blockedMacs.%d", i), "invalid MAC address")
 		}
 	}
 	// DDNS sanity
 	if c.DDNS.Enable {
 		switch c.DDNS.Provider {
 		case "cloudflare":
-			if c.DDNS.Cloudflare == nil || c.DDNS.Cloudflare.APIToken == "" || c.DDNS.Cloudflare.Zone == "" || c.DDNS.Cloudflare.Record == "" {
-				return errors.New("ddns.cloudflare requires apiToken, zone, record")
+			if c.DDNS.Cloudflare == nil {
+				return invalidField("ddns.cloudflare", "provider configuration is required")
+			}
+			if c.DDNS.Cloudflare.APIToken == "" {
+				return invalidField("ddns.cloudflare.apiToken", "must not be empty")
+			}
+			if c.DDNS.Cloudflare.Zone == "" {
+				return invalidField("ddns.cloudflare.zone", "must not be empty")
+			}
+			if c.DDNS.Cloudflare.Record == "" {
+				return invalidField("ddns.cloudflare.record", "must not be empty")
 			}
 		case "duckdns":
-			if c.DDNS.DuckDNS == nil || c.DDNS.DuckDNS.Token == "" || c.DDNS.DuckDNS.Domain == "" {
-				return errors.New("ddns.duckdns requires token, domain")
+			if c.DDNS.DuckDNS == nil {
+				return invalidField("ddns.duckdns", "provider configuration is required")
+			}
+			if c.DDNS.DuckDNS.Token == "" {
+				return invalidField("ddns.duckdns.token", "must not be empty")
+			}
+			if c.DDNS.DuckDNS.Domain == "" {
+				return invalidField("ddns.duckdns.domain", "must not be empty")
 			}
 		case "aliyun":
-			if c.DDNS.Aliyun == nil || c.DDNS.Aliyun.AccessKey == "" || c.DDNS.Aliyun.SecretKey == "" || c.DDNS.Aliyun.Domain == "" || c.DDNS.Aliyun.Record == "" {
-				return errors.New("ddns.aliyun requires accessKey, secretKey, domain, record")
+			if c.DDNS.Aliyun == nil {
+				return invalidField("ddns.aliyun", "provider configuration is required")
+			}
+			if c.DDNS.Aliyun.AccessKey == "" {
+				return invalidField("ddns.aliyun.accessKey", "must not be empty")
+			}
+			if c.DDNS.Aliyun.SecretKey == "" {
+				return invalidField("ddns.aliyun.secretKey", "must not be empty")
+			}
+			if c.DDNS.Aliyun.Domain == "" {
+				return invalidField("ddns.aliyun.domain", "must not be empty")
+			}
+			if c.DDNS.Aliyun.Record == "" {
+				return invalidField("ddns.aliyun.record", "must not be empty")
 			}
 		case "custom":
-			if c.DDNS.Custom == nil || c.DDNS.Custom.URL == "" {
-				return errors.New("ddns.custom requires url")
+			if c.DDNS.Custom == nil {
+				return invalidField("ddns.custom", "provider configuration is required")
+			}
+			if c.DDNS.Custom.URL == "" {
+				return invalidField("ddns.custom.url", "must not be empty")
 			}
 		default:
-			return errors.New("ddns.provider must be one of: cloudflare, duckdns, aliyun, custom")
+			return invalidField("ddns.provider", "must be one of: cloudflare, duckdns, aliyun, custom")
 		}
 	}
 	return nil

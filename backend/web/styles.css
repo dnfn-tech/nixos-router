@@ -826,3 +826,7 @@ td details > summary {
     display: inline-flex;
   }
 }
+
+/* Server validation shares the existing form layout and accessible help text. */
+.form-row [aria-invalid="true"] { border-color: var(--error); }
+.form-row .field-error { color: var(--error); }

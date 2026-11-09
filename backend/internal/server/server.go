@@ -191,7 +191,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.routes(mux)
-	h := s.wrapAuth(mux)
+	h := s.wrapAuth(s.limitAPIBody(mux))
 	h = s.wrapCSRF(h)
 	return s.wrapCORS(h)
 }
@@ -247,7 +247,7 @@ func (s *Server) wrapCSRF(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		http.Error(w, "CSRF check failed: Origin not allowed", http.StatusForbidden)
+		apiHTTPError(w, "CSRF check failed: Origin not allowed", http.StatusForbidden)
 	})
 }
 
@@ -262,6 +262,7 @@ func (s *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	if status >= 400 { v = normalizeAPIError(status, v) }
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
@@ -359,7 +360,7 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only static for non-API paths
 	if strings.HasPrefix(r.URL.Path, "/api/") {
-		http.NotFound(w, r)
+		apiHTTPError(w, "not found", http.StatusNotFound)
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/")
@@ -490,12 +491,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// accept either full config object or { "config": { ... } }
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			apiHTTPError(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		newCfg, err := config.DecodeDocument(body)
 		if err != nil {
-			http.Error(w, "invalid configuration JSON", http.StatusBadRequest)
+			writeConfigError(w, err)
 			return
 		}
 		s.cfgMu.Lock()
@@ -506,14 +507,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// Preserve secrets if placeholders or empty are provided
 		newCfg = s.mergeSecrets(s.cfg, newCfg)
 		if err := newCfg.Validate(); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"errors": []string{err.Error()},
-			})
+			writeConfigError(w, err)
 			return
 		}
 		// persist
 		if err := s.saveConfigLocked(w, &newCfg); err != nil {
-			http.Error(w, "failed to save config", http.StatusInternalServerError)
+			apiHTTPError(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
 		// set new in-memory copy
@@ -529,7 +528,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			"applied": false,
 		})
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -851,7 +850,7 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 		// PUT /api/v1/plugins/{id}
 		id := strings.TrimPrefix(r.URL.Path, "/api/v1/plugins/")
 		if id == "" || strings.Contains(id, "/") {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			apiHTTPError(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		var body struct {
@@ -860,7 +859,7 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 		}
 		data, readErr := io.ReadAll(r.Body)
 		if readErr != nil || config.DecodeStrictJSON(data, &body) != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			apiHTTPError(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		s.cfgMu.Lock()
@@ -883,7 +882,7 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 		cfg.Plugins[id] = cur
 		// persist
 		if err := s.saveConfigLocked(w, &cfg); err != nil {
-			http.Error(w, "failed to save config", http.StatusInternalServerError)
+			apiHTTPError(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
 		s.cfg = cfg
@@ -894,13 +893,13 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 	cfg := s.configSnapshot()
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Prefer a known leases file; else stub from static leases; else empty
@@ -984,7 +983,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Identify MAC from path or query
@@ -993,7 +992,7 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 		id = r.URL.Query().Get("mac")
 	}
 	if id == "" {
-		http.Error(w, "missing client id (mac)", http.StatusBadRequest)
+		apiHTTPError(w, "missing client id (mac)", http.StatusBadRequest)
 		return
 	}
 	// URL-decoding for path mac
@@ -1005,7 +1004,7 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 	}
 	data, readErr := io.ReadAll(r.Body)
 	if readErr != nil || config.DecodeStrictJSON(data, &body) != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		apiHTTPError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	s.cfgMu.Lock()
@@ -1052,11 +1051,11 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 	}
 	// persist
 	if err := cfg.Validate(); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": []string{err.Error()}})
+		writeConfigError(w, err)
 		return
 	}
 	if err := s.saveConfigLocked(w, &cfg); err != nil {
-		http.Error(w, "failed to save config", http.StatusInternalServerError)
+		apiHTTPError(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
 	s.cfg = cfg
@@ -1066,7 +1065,7 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWifiCaps(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", 405)
+		apiHTTPError(w, "method not allowed", 405)
 		return
 	}
 	if s.managedRuntime != nil {
@@ -1089,7 +1088,7 @@ func (s *Server) handleWifiCaps(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// forward to /session create
@@ -1106,7 +1105,7 @@ func keysOf(m map[string]interface{}) []string {
 
 func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	user, _, ok := s.getSession(r)
@@ -1119,7 +1118,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		NewPassword     string `json:"newPassword"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		apiHTTPError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(body.NewPassword) == "" || len(body.NewPassword) < 8 {
@@ -1129,7 +1128,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	// verify current
 	hash, err := s.db.GetUserPasswordHash(user)
 	if err != nil || hash == "" {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.CurrentPassword)) != nil {
@@ -1139,11 +1138,11 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	// update
 	newHash, err := bcrypt.GenerateFromPassword([]byte(body.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	if err := s.db.UpdateUserPassword(user, string(newHash)); err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	// invalidate other sessions
@@ -1436,7 +1435,7 @@ func (s *Server) rollbackToLastGood(genDir string) []string {
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	limit := 20
@@ -1447,7 +1446,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs, err := s.db.ListJobs(limit)
 	if err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	items := make([]map[string]interface{}, 0, len(jobs))
@@ -1473,7 +1472,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	limit := 50
@@ -1503,7 +1502,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Always return JSON bundle of config for v1
@@ -1511,7 +1510,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	cfg, err := config.LoadFromFile(s.cfgPath)
 	s.cfgMu.RUnlock()
 	if err != nil {
-		http.Error(w, "failed to load config", http.StatusInternalServerError)
+		apiHTTPError(w, "failed to load config", http.StatusInternalServerError)
 		return
 	}
 	filename := "nixos-router-backup-" + time.Now().UTC().Format("20060102") + ".json"
@@ -1527,7 +1526,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Try multipart first
@@ -1536,19 +1535,19 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		if err := r.ParseMultipartForm(10 << 20); err != nil { // 10MB
-			http.Error(w, "bad multipart form", http.StatusBadRequest)
+			apiHTTPError(w, "bad multipart form", http.StatusBadRequest)
 			return
 		}
 		file, _, err := r.FormFile("file")
 		if err != nil {
-			http.Error(w, "missing file", http.StatusBadRequest)
+			apiHTTPError(w, "missing file", http.StatusBadRequest)
 			return
 		}
 		defer file.Close()
 		data, _ := io.ReadAll(file)
 		newCfg, err = config.DecodeDocument(data)
 		if err != nil {
-			http.Error(w, "invalid JSON in backup", http.StatusBadRequest)
+			writeConfigError(w, err)
 			return
 		}
 	} else {
@@ -1556,7 +1555,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		newCfg, err = config.DecodeDocument(body)
 		if err != nil {
-			http.Error(w, "invalid configuration JSON", http.StatusBadRequest)
+			writeConfigError(w, err)
 			return
 		}
 	}
@@ -1568,11 +1567,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	// Secret-aware merge to preserve placeholders if present
 	newCfg = s.mergeSecrets(s.cfg, newCfg)
 	if err = newCfg.Validate(); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": []string{err.Error()}})
+		writeConfigError(w, err)
 		return
 	}
 	if err := s.saveConfigLocked(w, &newCfg); err != nil {
-		http.Error(w, "failed to save config", http.StatusInternalServerError)
+		apiHTTPError(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
 	s.cfg = newCfg
@@ -1589,7 +1588,7 @@ func (s *Server) rebootAllowed() bool {
 
 func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if !s.rebootAllowed() {
@@ -1608,21 +1607,21 @@ func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
 	if id == "" {
-		http.NotFound(w, r)
+		apiHTTPError(w, "not found", http.StatusNotFound)
 		return
 	}
 	j, ok, err := s.db.GetJob(id)
 	if err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	if !ok {
-		http.NotFound(w, r)
+		apiHTTPError(w, "not found", http.StatusNotFound)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -1645,7 +1644,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if s.managedRuntime != nil {
@@ -1682,7 +1681,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		jobMode = "generate+reload"
 	}
 	if err := s.db.CreateJob(jid, "apply", fmt.Sprintf(`{"mode":%q,"configRevision":%q}`, jobMode, cfg.Revision)); err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	if s.applyReload {
@@ -2230,11 +2229,11 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		}
 		var c creds
 		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			apiHTTPError(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		if strings.TrimSpace(c.Username) == "" || c.Password == "" {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			apiHTTPError(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		hash, err := s.db.GetUserPasswordHash(c.Username)
@@ -2252,7 +2251,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.resetLoginFail(r)
 		sid := newSessionID()
 		if err := s.db.CreateSession(sid, c.Username, defaultSessionTTL); err != nil {
-			http.Error(w, "server error", http.StatusInternalServerError)
+			apiHTTPError(w, "server error", http.StatusInternalServerError)
 			return
 		}
 		exp := time.Now().Add(defaultSessionTTL)
@@ -2289,7 +2288,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.db.AddAudit("session", "logout", "by cookie")
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 

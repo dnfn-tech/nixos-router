@@ -141,6 +141,52 @@
       .split(/[\n,，]+/)
       .map((s) => s.trim())
       .filter(Boolean);
+  function objectPath(root, target, prefix = "") {
+    if (root === target) return prefix;
+    if (!root || typeof root !== "object") return null;
+    for (const [key, value] of Object.entries(root)) {
+      if (!value || typeof value !== "object") continue;
+      const found = objectPath(value, target, prefix ? `${prefix}.${key}` : key);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  function clearFieldError(input) {
+    const errorId = `${input.id}-error`;
+    document.getElementById(errorId)?.remove();
+    input.removeAttribute("aria-invalid");
+    const descriptions = (input.getAttribute("aria-describedby") || "")
+      .split(/\s+/).filter((id) => id && id !== errorId);
+    if (descriptions.length) input.setAttribute("aria-describedby", descriptions.join(" "));
+    else input.removeAttribute("aria-describedby");
+  }
+  function showFieldErrors(errors = {}) {
+    const controls = [...document.querySelectorAll("#config-form [data-config-path]")];
+    controls.forEach(clearFieldError);
+    let first;
+    const hidden = [];
+    for (const [path, message] of Object.entries(errors)) {
+      if (typeof message !== "string") continue;
+      const input = controls.filter((el) => path === el.dataset.configPath || path.startsWith(`${el.dataset.configPath}.`))
+        .sort((a, b) => b.dataset.configPath.length - a.dataset.configPath.length)[0];
+      if (!input || !input.getClientRects().length || input.disabled) {
+        hidden.push(`${path}: ${message}`);
+        continue;
+      }
+      const errorId = `${input.id}-error`;
+      let detail = document.getElementById(errorId);
+      if (!detail) {
+        detail = node("p", { id: errorId, class: "help field-error" });
+        input.closest(".form-row").append(detail);
+        input.setAttribute("aria-describedby", [input.getAttribute("aria-describedby"), errorId].filter(Boolean).join(" "));
+      }
+      detail.textContent += `${detail.textContent ? "；" : ""}${message}`;
+      input.setAttribute("aria-invalid", "true");
+      first ||= input;
+    }
+    first?.focus();
+    return hidden.length ? `另有配置字段需要检查：${hidden.join("；")}` : "";
+  }
   function field(data, path, label, options = {}) {
     const id = `field-${++fieldId}`,
       type = options.type || "text";
@@ -155,6 +201,9 @@
       options.choices.forEach(([value, title]) =>
         input.append(node("option", { value }, title)),
       );
+    const relative = state.section ? objectPath(state.section.data, data) : null;
+    const configPath = options.configPath ?? (relative !== null ? [state.section.path, relative, path].filter(Boolean).join(".") : null);
+    if (configPath) input.dataset.configPath = configPath;
     let value = get(data, path);
     if (value == null && (options.default != null || options.choices)) {
       value = options.default ?? options.choices[0][0];
@@ -203,6 +252,7 @@
     input.addEventListener(
       type === "checkbox" || options.choices ? "change" : "input",
       () => {
+        clearFieldError(input);
         const next =
           type === "checkbox"
             ? input.checked
@@ -356,6 +406,8 @@
             `请求失败（HTTP ${response.status}）`,
         );
         error.status = response.status;
+        error.code = data?.code;
+        error.fieldErrors = data?.fieldErrors && typeof data.fieldErrors === "object" && !Array.isArray(data.fieldErrors) ? data.fieldErrors : {};
         throw error;
       }
       if (raw) return response;
@@ -509,6 +561,8 @@
     }
     const section = state.section,
       candidate = clone(section.data);
+    let rejected;
+    showFieldErrors();
     state.busy = true;
     syncActions();
     try {
@@ -524,11 +578,16 @@
       feedback("配置已保存，尚未生成或应用。", "good");
       return true;
     } catch (e) {
+      rejected = e;
       feedback(`保存失败：${e.message}`, "error");
       return false;
     } finally {
       state.busy = false;
       syncActions();
+      if (rejected) {
+        const hidden = showFieldErrors(rejected.fieldErrors);
+        if (hidden) feedback(`保存失败：${rejected.message}；${hidden}`, "error");
+      }
     }
   }
   function resultMessage(result) {
