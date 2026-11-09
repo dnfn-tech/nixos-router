@@ -1,102 +1,57 @@
-# 实现现状（v1 概览）
+# 实现现状与验收缺口
 
-状态：进行中（M14），默认“仅生成、不热更/不重启”。工作基于 `main`。
+核对日期：2026-11-09。源码基线：`2b301dabc636a03d58e764ca173d4af1afcffe14`（PR #16）。本文描述该版本的能力与证据范围，不等同于最新 main、运行中的本地预览或实体 gw 状态。
 
-## 已实现（M1–M11 进展）
-- 配置 schema + 校验：WAN/LAN/DHCP/静态租约、DNS、WiFi（guest/isolate）、防火墙（NAT、端口转发、blockedMacs）、SSH、DDNS（cloudflare/duckdns/aliyun/custom）、QoS、Parental、IPv6
-- 只读/可写 API：`GET/PUT /api/v1/config`（机密合并）、健康检查、状态、导航、插件、客户端、作业、审计
-- 会话鉴权：Cookie（HttpOnly，SameSite=Lax）、登录/查看/登出、轻量限速、密码修改
-- 备份/恢复：JSON 打包下载，恢复（仅保存，不 apply）
-- 生成器（generate-only）：dnsmasq/nftables/hostapd 及 IPv6 注记，插件配置写入 `generated/plugins/`
-- apply 作业：串行队列、生成片段、（可选）reload 钩子；默认 generate-only
-- Nix 接线：flake + NixOS 模块（`applyReload`/`allowReboot` 默认 false）
-- CI：GitHub Actions 运行 `backend` 下 Go 测试
-- （M10）插件编排骨架：当 `applyReload=true` 时，针对已知插件（mihomo/tailscale/zerotier）按启用状态尝试 `systemctl try-reload-or-restart` 或 `try-stop`，缺失单元不致命、记录 notes；VLAN 仅注记
-- （M10）生成的插件片段内写明可能关联的 unit 名称与 reload 策略注释
-- （M11）状态增强：`GET /api/v1/status` 增加接口实时信息（基于 `/sys/class/net` 的链路 up/down、可读速率/双工、RX/TX 字节计数与基于内存样本的速率估算）、`sources` 源标注（sysfs/stub）、WiFi 源为 stub；`/api/v1/clients` 增补 `lastSeen`（来自租约到期的近似）
-- （M11）生成器增强（仍默认不执行）：
-  - Parental：当 `parental.enable=true` 时，生成 `generated/parental.nft.fragment`，包含 `set blocked_macs` 与 `chain input` 引用（时间表 schedule 以注释保真，未强制执行）
-  - QoS：当 `qos.enable=true` 时，生成可复用脚本 `generated/qos.sh`（HTB 上行整形 + ingress 简化限速），并保留 `qos.conf.fragment` 注记；新增运行态开关 `applyTrafficControl`（默认 false，且需 `applyReload=true` 才可能执行）
-- （M11）前端：总览页展示新实时字段（速率/双工、累计与速率估算），缺省优雅降级；同步 `web/` 与 `backend/web/` 的嵌入资源
-  
-## 新增（M12）
-- NixOS 模块首个落地就绪：
-  - 新增 `applyTrafficControl`（默认 false）接线到后端 CLI/env
-  - 新增 `privilegedApply`（默认 false）：仅在需要运行态动作时显式提权到 root；默认保持 `DynamicUser` 沙盒
-  - 可选 `openFirewall`（默认 false）：为 HTTP 端口打开 TCP（简单全局开启；更细的 LAN 约束请由操作者在防火墙中实现或将 `address` 绑定到 LAN IP）
-  - 可选 `consumeGenerated`（默认 false）：当启用时，为 `dnsmasq` 追加包含 `generated/dnsmasq.conf.fragment` 的 `extraConfig`（保守默认关闭，避免无意更改现网）
-- 后端参数对齐：支持 `--apply-traffic-control` 与 `NIXOS_ROUTER_APPLY_TRAFFIC_CONTROL`
-- 文档：新增 `docs/landing.md`（首次落地指南）
+当前具备显式启用的 IPv4 单 LAN managed 网关实现；**完整家用路由目标仍未完成**。基础候选的通过不能替代完整设计的 A01–A14 验收。完整范围见 [已确认设计](superpowers/specs/2026-10-15-usable-home-router-design.md)，首轮硬件候选范围见 [候选设计](superpowers/specs/2026-10-28-gw-readiness-design.md)。
 
-## 有意延后（后续迭代）
-- 更完整的守护进程联动与状态回传（当前为保守的 best-effort）
-- QoS/Parental 的实时内核/服务级执行与回读（当前仅注记/可选执行脚本）
-- 更丰富的实时状态：接口速率、信号质量、流量统计等
-- flake `vendorHash` 固定：在可用 nix 构建环境中计算（见下）
+本仓库负责通用模块、运行引擎、API、Web 和隔离测试。实际网口、地址、无线国家/信道、密钥和迁移安排在 nixos-home 集成时配置；这些专用配置不列为本仓库缺陷。
 
-## 新增（M13）
-- 后端状态增强：`GET /api/v1/status` 增加守护进程/插件 unit 状态（best-effort）：
-  - 核心：`dnsmasq.service`、`hostapd.service`、`nftables.service`
-  - 插件：`mihomo.service`、`tailscaled.service`、`headscale.service`（当 Tailscale 为 headscale 模式）与 `zerotier-one.service`
-  - 当存在 `systemctl` 时，逐个查询 `is-active` 并映射为 `{active|inactive|failed|unknown|missing}`；当缺失 `systemctl` 时，来源标记为 `stub`，状态优雅降级为 `unknown`
-  - `sources.units` 增补来源标记：`systemctl|stub`
-- 前端总览：新增“守护进程/插件状态”卡片，按常见顺序展示，缺省优雅降级
-- 测试：新增针对 systemctl 缺失与状态映射的单测，覆盖核心与插件单元
-- flake 细化：为 `buildGoModule` 指定 `modRoot = \"./backend\"`（仅路径修正，便于后续 vendor 计算）
+## 运行模式
 
-## 新增（M14）
-- nixpkgs 升级：将 flake 的 `inputs.nixpkgs` 从 `nixos-24.05` 升至可提供 Go ≥ 1.26 的通道（当前采用 `nixos-unstable` 以满足 `backend/go.mod` 的 `go 1.26` 要求）。
-- 构建与 vendorHash：已固定 `vendorHash = "sha256-MM1ODEBButuG1Yalmyxv1mkJmc4Va4tclJpq1q0IAcc="`，并将 flake.lock 锁定到 `nixpkgs-unstable`；已在私有 worker 上验证 `nix build .#routerd` 成功。
-- 安全与模块默认行为未改变：仍为“仅生成”，`applyReload=false`、`applyTrafficControl=false`、`privilegedApply=false`、`openFirewall=false`。
-- 测试：新增 NixOS VM 多节点 flake check（`checks.x86_64-linux.vm-router`），并接入 GitHub Actions。详见 `docs/testing.md`。
+| 模式 | 含义 | 不能据此宣称 |
+|---|---|---|
+| 默认 generate-only | 保存配置、生成文件，适合非特权 Web/API 预览 | 已修改网卡、服务或客户端网络 |
+| 旧运行开关 | `applyReload` / `consumeGenerated` / `privilegedApply` 控制旧片段消费路径 | 等同于 managed 的独立网络生命周期 |
+| 显式 managed | routerd 管理授权接口及专属协议服务，与其他通用网络管理器互斥 | 所有 schema 字段和插件均支持运行 |
 
-## 默认安全策略
-- 默认不执行 reload/restart（`applyReload=false`），保守生成
-- 默认不执行 `tc`（`applyTrafficControl=false`），即使生成了 `qos.sh`
-- 重启接口默认禁用（需显式 `allowReboot`/环境变量开启）
-- 仅 LAN 暴露 UI/API（设计目标）
+接入和所有权要求见 [接入指南](landing.md)。保存草稿与应用分离；managed 的应用以异步作业最终结果为准，WAN 等待 DHCP 租约也不等于互联网可达。
 
-## Nix vendorHash（M10/M11）
-- CI 容器内暂不可用 nix-daemon，无法在此环境直接计算 vendorHash
-- 在本地/有 nix 的环境执行：
-  - `./scripts/compute-vendor-hash.sh` 打印建议哈希
-  - `./scripts/compute-vendor-hash.sh --apply` 将自动更新 `flake.nix` 的 `vendorHash`
-- 之后 `nix build .#routerd` 应可成功；若依然失败，请将构建输出中的 `got: sha256-...` 替换进 `flake.nix`
+## 当前实现与证据入口
 
-## Nix vendorHash（M13 进展）
-- 注：自 M14 起已固定 vendorHash（见下文“已固定”），本节为历史记录。
-- 当前 `nixpkgs-24.05` 的 Go 工具链为 1.22.x，而本仓库需要 Go ≥1.26（`backend/go.mod`）：
-  - 在该环境下 `scripts/compute-vendor-hash.sh` 会于编译前失败，无法输出有效 `vendorHash`
-  - 本迭代不提升 nixpkgs 固定，也不“猜测”哈希：`flake.nix` 仍保持 `vendorHash = lib.fakeSha256`
-- 建议在具备 Go ≥1.26 的 Nix 环境（或较新的 nixpkgs）中执行：
-  - `./scripts/compute-vendor-hash.sh --apply`
-- 之后提交独立 PR 锁定 vendor 缓存
+下表列出实现和测试覆盖入口。测试文件存在不表示某个提交已通过；集成时必须核对所选 SHA 的 CI 结果，并按 [测试说明](testing.md) 复验。
 
-## Nix vendorHash（M14 已固定）
-- 已固定：`vendorHash = "sha256-MM1ODEBButuG1Yalmyxv1mkJmc4Va4tclJpq1q0IAcc="`；flake.lock 已锁定 `nixpkgs-unstable`；已在私有 worker 上验证 `nix build .#routerd` 成功。
-- 如后续依赖变更需重算 vendor：请在有 Nix 的主机执行 `./scripts/compute-vendor-hash.sh --apply` 并提交；随后 `nix build .#routerd` 应继续成功。
+| 范围 | 当前实现 | 验证入口及边界 |
+|---|---|---|
+| 接口所有权 | 有线/WiFi 显式授权；配置期和运行前拒绝冲突；未知桥拒绝接管 | `tests/module-managed.nix`、`tests/module-apply.nix`、`backend/internal/managed/manager_test.go` |
+| IPv4 WAN/LAN | DHCP/静态 WAN、单桥、多有线成员、DHCP 池/静态租约、DNS | `tests/managed-router.py`：API 修改后检查客户端实际行为 |
+| 防火墙 | 专属 nft 表、NAT、DNAT 增删、转发 MAC 阻断；LAN-only Web/宿主 SSH 端口保护覆盖 IPv4/IPv6 | 同一有线 VM；IPv6 管理面隔离不表示支持 IPv6 路由；MAC 转发阻断不表示同桥二层隔离 |
+| 应用与恢复 | 不可变候选、串行作业、last-good、失败恢复、重启恢复、坏草稿诊断 | 有线 VM 的失败注入/重启/改址；不增加 LAN 改址倒计时或超时自动回滚 |
+| 无线 | 显式单 AP、WPA2、独立 hostapd、检测及受支持信道校验 | `tests/managed-wifi.py` 使用 mac80211_hwsim 真实认证、租约、关闭/重开；不证明实体芯片/射频性能 |
+| Web/API | 同源登录、保存/重读、异步应用反馈、状态来源与能力限制、桌面/移动布局 | 两个 `tests/web-*.cjs`；真实临时 API 与注入响应的边界见测试说明；UI 模拟不作为网络证据 |
+| 系统/SSH | managed 下 SSH 和系统身份由宿主 NixOS 管理；有配置备份/恢复及账户操作 | Web/API 测试；不能宣称已实现完整设计中的所有系统/SSH 运行修改 |
 
-## 新增（M15）
-- Apply 闭环（可选、默认安全）：
-  - 新增运行期开关：
-    - `--consume-generated` / `NIXOS_ROUTER_CONSUME_GENERATED=1`：尝试“消费”生成片段（当前包括以 `nft -f` 直接应用 `nftables.nft.fragment`；dnsmasq/hostapd 仍依赖 NixOS 模块将 `generated/` 片段纳入主配置）
-    - `--privileged-apply` / `NIXOS_ROUTER_PRIVILEGED_APPLY=1`：允许运行态动作（`nft`/`tc` 等）；默认关闭
-    - `--apply-traffic-control`：在 `--apply-reload` 且 `--privileged-apply` 时尝试执行 `generated/qos.sh`（失败仅记录 notes）
-  - Apply 流程（显式启用 `--apply-reload` 后）：
-    1) validate + 生成至 `${stateDir}/generated/`
-    2) 若启用 `consumeGenerated`：先尝试直接应用（当前为 `nft -f`）；失败视为作业失败
-    3) reload 核心单元（dnsmasq/hostapd，未直接应用 nft 时还包括 nftables）与插件编排（best-effort）；reload 失败视为作业失败
-    4) 成功后将 `generated/` 快照到 `${stateDir}/revisions/<rev>/`，并更新 `${stateDir}/last-good.rev` 指针与 `${stateDir}/last-good.json`
-  - 失败与回滚：
-    - 在消费或 reload 任一步骤失败时，尝试将 `generated/` 回滚为 `${stateDir}/revisions/$(cat last-good.rev)/`，并在 consumeGenerated 与 privilegedApply 均开启时以 `nft -f` 重新加载 last-good；随后 best-effort reload 核心单元
-    - 作业状态标记为 `failed`，审计包含失败原因与回滚说明
-  - 默认值不变：`applyReload=false`、`consumeGenerated=false`、`applyTrafficControl=false`、`privilegedApply=false`，维持生产安全默认
+源码入口：[managed 引擎](../backend/internal/managed/manager.go)、[配置校验和渲染](../backend/internal/managed/render.go)、[managed 模块](../modules/managed.nix)、[基础模块](../modules/default.nix)。
 
-## WebUI P0（机柜台）
-- 布局对齐 [MoCI 演示](https://hudsongraeme.github.io/MoCI/)：顶栏主导航（总览 / 网络 / 服务 / 系统 / 高级），其下分区 Tab；总览为互联网状态 Hero、下载/上传/设备指标和 Stat 卡片。深色玻璃、等宽小节标题、状态色绿/黄/红。未移植 MoCI 源码或 ubus。
-- 业务页仍走原 hash 与 `/api/v1`。高级（QoS、家长控制、DDNS、IPv6）标 Soon。
-- 保存、撤销、应用留在顶栏：保存走既有 `PUT /api/v1/config`（或插件 PUT），应用走 `POST /api/v1/apply`。系统页不再单独放生成按钮。
-- 视口 ≤768px：主导航改为顶栏下拉，Apply 操作仍留在顶栏。`web/` 与 `backend/web/` 保持同步。
+## 尚未完成的通用工作
 
-- 审查修复：nft 片段使用专属表并在单事务内替换；直接消费后跳过 nftables 单元 reload。NixOS 模块传递两个后端开关并提供 nft/tc PATH，dnsmasq 接线使用当前 nixpkgs 的 settings.conf-file。
-- 验证覆盖：32 组运行态开关/失败组合、隔离网络命名空间内的真实 nft 原子替换/删除/回滚、NixOS 模块默认与显式启用配置评估。
+这些项目继续追踪，不因页面禁用或后端拒绝而视为完成。
+
+| 项目 | 当前差距 | 完成所需证据 |
+|---|---|---|
+| API 与特权执行隔离 | managed 设置 `privilegedApply=true`，基础模块因此以 root 运行 API；尚未满足完整设计第 5 节 | 低权限 API、独立受限执行器；对端认证、接口/路径/动作授权的负向测试；迁移后重跑真实网络及恢复测试 |
+| PPPoE | managed 校验明确拒绝 | 模拟接入服务器上的拨号、断线重拨、凭据失败、真实出口 NAT |
+| IPv6 路由 | managed 拒绝启用 IPv6/RA/PD | 上游获取/PD、LAN 地址与路由、双栈流量和管理隔离 |
+| 多 AP/访客 | managed 拒绝访客/不支持组合 | 能力裁剪与真实无线客户端；访客二层及三层隔离、禁用清理 |
+| QoS/家长控制/DDNS/UPnP | managed 拒绝启用 | 吞吐/时间规则/协议更新/映射创建撤销，含失败路径和停用清理 |
+| 可选插件 | managed 拒绝启用；旧生成器或服务钩子不能证明完整生命周期 | 按完整设计第 7 节逐个验证启用、配置、生效、失败、禁用及 overlay 信任边界 |
+| 其余完整设计契约 | A01–A14 尚无全部完成证据；配置版本/并发、系统操作等须逐项审计 | 对应源码、真实 API/浏览器、部署和网络证据，不能仅靠基础候选测试推断 |
+
+实体 gw 测试仍须用户验收后决定；尚未执行。服务权限拆分属于通用框架实现工作，与提供 gw 专用配置无关。
+
+## 本次核实的 CI 与历史记录
+
+PR #16 的 `2b301da`：Go Tests [42586226383](https://github.com/dnfn-tech/nixos-router/actions/runs/42586226383) 和 Browser Tests [42586226369](https://github.com/dnfn-tech/nixos-router/actions/runs/42586226369) 已通过。NixOS VM Tests [42586226292](https://github.com/dnfn-tech/nixos-router/actions/runs/42586226292) 在本次记录时已通过模块契约步骤，三个 VM check 的构建步骤仍运行；不得将该记录解读为 VM 已通过。后续状态以该 run 与对应 SHA 为准。
+
+- [M1–M15 历史实现记录](history/implementation-status-m1-m15.md)：保留阶段设计与旧验证描述，不再作为当前能力入口。
+- [2026-10-28 历史候选报告](gw-readiness.md)：记录 `854fe60` 的本地构建、VM 和预览结果，不代表当前分支制品。
+- [可复现测试命令](testing.md)：Go、模块、浏览器和 VM 验证。
