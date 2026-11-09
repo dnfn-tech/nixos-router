@@ -46,6 +46,23 @@ in {
       ];
     }; };
   in assert sshCfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22,2223,2224"; true;
+  wifiOwnership = let
+    radio = { services.nixos-router.backend.managed.wifiInterface = "wlan0"; };
+    address = { address = "192.168.99.1"; prefixLength = 24; };
+    checkRejected = extra: let c = evaluate (lib.recursiveUpdate radio extra); in
+      assert lib.any (a: !a.assertion && lib.hasInfix "managed interfaces" a.message) c.assertions; true;
+    checkAllowed = extra: assert failures (evaluate extra) == []; true;
+  in {
+    staticRejected = checkRejected { networking.interfaces.wlan0.ipv4.addresses = [ address ]; };
+    dhcpRejected = checkRejected { networking.interfaces.wlan0.useDHCP = true; };
+    unmanagedRadioAllowed = checkAllowed (lib.recursiveUpdate radio { networking.interfaces.wlan9.ipv4.addresses = [ address ]; });
+    emptyRadioAllowed = checkAllowed {};
+    cleanRadioAllowed = checkAllowed radio;
+    previewAllowed = checkAllowed (lib.recursiveUpdate radio {
+      services.nixos-router.backend.managed.enable = lib.mkForce false;
+      networking.interfaces.wlan0.ipv4.addresses = [ address ];
+    });
+  };
   conflictRejected = map (extra: assert failures (evaluate extra) != []; true) [
     {networking.networkmanager.enable = true;}
     {systemd.network.enable = true;}
