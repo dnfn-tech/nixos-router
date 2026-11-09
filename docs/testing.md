@@ -39,7 +39,7 @@ nix run .#checks.x86_64-linux.vm-router.driverInteractive
 
 ## CI
 
-GitHub Actions 使用 `cachix/install-nix-action` 运行 `vm-router`、`vm-managed-router`、`vm-managed-wifi` 三个 check，并评估两个模块契约。运行前检查并开放 `/dev/kvm`，因为旧 `vm-router` 仍要求 KVM。宿主没有 KVM 设备或设备不可读写时直接失败，需要改用支持 KVM 的 runner。
+GitHub Actions 使用 `cachix/install-nix-action` 运行 `vm-router`、`vm-privsep`、`vm-managed-router`、`vm-managed-wifi` 四个 check，并评估两个模块契约。运行前检查并开放 `/dev/kvm`，因为旧 `vm-router` 仍要求 KVM。宿主没有 KVM 设备或设备不可读写时直接失败，需要改用支持 KVM 的 runner。
 
 ## 保存与应用反馈的浏览器回归
 
@@ -81,7 +81,8 @@ generate-only 的页面/容器检查不能作为网关网络验收。新的 mana
 # 在仓库根执行；path: 包含尚未提交的新测试文件。
 nix eval --impure --json --file tests/module-managed.nix
 nix eval --impure --json --file tests/module-apply.nix
-nix build --keep-going "path:$PWD#checks.x86_64-linux.vm-managed-router" \
+nix build --keep-going "path:$PWD#checks.x86_64-linux.vm-privsep" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-router" \
   "path:$PWD#checks.x86_64-linux.vm-managed-wifi" -L
 
 # 后端全部逻辑与竞态检查。
@@ -107,3 +108,8 @@ ROUTERD_TEST_BINARY=/tmp/routerd-web-test npm --prefix tests run test:web
 ```
 
 Linux 上安装浏览器系统依赖可能需要管理员权限。已有浏览器的环境可跳过安装步骤并设置 `CHROMIUM_PATH`；CI 安装锁定 Playwright 对应的 Chromium。测试后端只监听 loopback，状态和账户均在临时目录中；不会访问实体路由器。模块断言覆盖受管无线 IPv4/DHCP 冲突，同时允许未受管无线接口和预览部署。
+
+
+### 分权与旧状态迁移 VM
+
+`vm-privsep` 使用真实不同 UID 的 API/executor 服务，先构造旧账户、会话、草稿和独立 last-good，再启动新模块验证迁移。检查 API 有效 capabilities 为零、不能读取或写入 root 运行目录、root peer 不能冒充 API、未知 RPC/路径参数被拒绝；暂停真实 dnsmasq 应用步骤后强杀 API，验证原编号仍能查询执行器完成结果。另验证重复初始化不覆盖新草稿、坏 last-good 阻止就绪及 API 启动。该 VM 不证明完整客户端转发或真实无线设备；有线/WiFi VM 仍须单独通过。

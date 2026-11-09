@@ -36,7 +36,7 @@ def apply(config, success=True):
             continue  # LAN activation may interrupt this read; never repeat POST.
         assert rc == 0, (rc, raw)
         result = json.loads(raw)
-        if result["status"] != "running":
+        if result["status"] in ("success", "failed"):
             assert (result["status"] == "success") == success, result
             payload = json.loads(result["payload"]) if isinstance(result["payload"], str) else result["payload"]
             if success:
@@ -196,7 +196,8 @@ candidate["lan"]["ports"] = ["eth2", "eth3"]
 api("PUT", "/config", candidate)
 interrupted_job = api("POST", "/apply")["jobId"]
 router.wait_until_succeeds("test -e /run/activation-paused && test $(basename $(readlink /sys/class/net/eth3/master)) = br-lan", timeout=60)
-router.succeed("systemctl kill --kill-whom=all --signal=SIGKILL nixos-router-backend.service")
+router.succeed("systemctl kill --kill-whom=all --signal=SIGKILL nixos-router-executor.service")
+router.wait_for_unit("nixos-router-executor.service", timeout=180)
 client.wait_until_succeeds("curl -fsS http://192.168.50.1:8080/api/v1/health", timeout=90)
 router.succeed("test ! -e /sys/class/net/eth3/master")
 assert router.succeed("sha256sum /var/lib/nixos-router/managed/last-good.json").split()[0] == last_good_hash
@@ -217,14 +218,16 @@ router.wait_for_unit("nixos-router-backend.service")
 client.wait_until_succeeds("ping -c1 -W2 192.168.50.1")
 router.fail("ip -4 addr show br-lan | grep 192.168.77.1")
 client.succeed("ping -c1 -W2 10.0.0.1")
-# Abrupt daemon death also restores last-good, not the saved draft.
-router.succeed("systemctl kill --kill-whom=main --signal=SIGKILL nixos-router-backend.service")
-router.wait_for_unit("nixos-router-backend.service", timeout=90)
+# Abrupt executor death restores last-good, not the saved draft.
+router.succeed("systemctl kill --kill-whom=main --signal=SIGKILL nixos-router-executor.service")
+router.wait_for_unit("nixos-router-executor.service", timeout=180)
 client.wait_until_succeeds("curl -fsS http://192.168.50.1:8080/api/v1/health")
 router.fail("ip -4 addr show br-lan | grep 192.168.77.1")
-client.succeed("ping -c1 -W2 10.0.0.1")
+# READY means restored services; the restarted DHCP client may still be acquiring
+# its lease. Require real forwarding to recover within a bounded interval.
+client.wait_until_succeeds("ping -c1 -W2 10.0.0.1", timeout=90)
 # Even syntactically corrupt draft files must not prevent last-good recovery.
-router.succeed("printf '{broken' > /var/lib/nixos-router/config.json; systemctl restart nixos-router-backend")
+router.succeed("printf '{broken' > /var/lib/nixos-router-api/config.json; systemctl restart nixos-router-backend")
 router.wait_for_unit("nixos-router-backend.service")
 client.wait_until_succeeds("curl -fsS http://192.168.50.1:8080/api/v1/health | grep startupWarning")
 client.succeed("ping -c1 -W2 10.0.0.1")

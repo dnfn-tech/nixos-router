@@ -38,6 +38,7 @@
       checks."x86_64-linux" = let
         pkgs = import nixpkgs { system = "x86_64-linux"; };
       in {
+        vm-privsep = pkgs.testers.runNixOSTest (import ./tests/vm-privsep.nix { inherit pkgs self; });
         vm-managed-wifi = pkgs.testers.runNixOSTest (import ./tests/vm-managed-wifi.nix { inherit pkgs self; });
         vm-managed-router = pkgs.testers.runNixOSTest (import ./tests/vm-managed-router.nix { inherit pkgs self; });
         vm-router = pkgs.testers.runNixOSTest {

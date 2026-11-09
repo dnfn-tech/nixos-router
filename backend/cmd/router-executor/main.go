@@ -25,9 +25,9 @@ import (
 )
 
 type options struct {
-	stateDir, socket, bootstrap, apiUser, interfaces, wifi, country string
-	port                                                            int
-	sshPorts                                                        []int
+	stateDir, socket, bootstrap, apiUser, interfaces, wifi, country, prepareAPI string
+	port                                                                        int
+	sshPorts                                                                    []int
 }
 
 func parseOptions(args []string) (options, error) {
@@ -35,6 +35,7 @@ func parseOptions(args []string) (options, error) {
 	var ports string
 	fs := flag.NewFlagSet("router-executor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	fs.StringVar(&o.prepareAPI, "prepare-api-state", "", "Initialize or migrate the API state directory offline, then exit")
 	fs.StringVar(&o.stateDir, "state-dir", "", "Private executor state directory, provisioned by supervisor")
 	fs.StringVar(&o.socket, "socket", "", "Unix socket in a root-owned, supervisor-provisioned directory")
 	fs.StringVar(&o.bootstrap, "bootstrap", "", "Private initial config; only used without last-good")
@@ -54,6 +55,9 @@ func parseOptions(args []string) (options, error) {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
 			return o, errors.New("clean absolute paths required")
 		}
+	}
+	if o.prepareAPI != "" && (!filepath.IsAbs(o.prepareAPI) || filepath.Clean(o.prepareAPI) != o.prepareAPI) {
+		return o, errors.New("clean absolute API state path required")
 	}
 	if o.port < 1 || o.port > 65535 {
 		return o, errors.New("invalid management port")
@@ -91,6 +95,9 @@ func run(o options) error {
 	gid, err := strconv.ParseUint(account.Gid, 10, 32)
 	if err != nil || gid == 0 {
 		return errors.New("API group must be non-root")
+	}
+	if o.prepareAPI != "" {
+		return privsep.PrepareAPIState(o.stateDir, o.prepareAPI, o.bootstrap, uint32(uid), int(gid))
 	}
 	if err = privsep.CheckState(o.stateDir, 0); err != nil {
 		return err

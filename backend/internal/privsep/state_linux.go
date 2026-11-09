@@ -50,7 +50,11 @@ func CheckState(dir string, uid uint32) error {
 		// group is allowed here, inside the otherwise private managed directory.
 		control := rel == "managed/hostapd-control" || filepath.Dir(rel) == "managed/hostapd-control"
 		rootControl := control && uid == 0 && st.Gid == 0
-		if info.Mode().Perm()&0077 != 0 && !(rootControl && info.Mode().Perm()&0007 == 0) {
+		// dnsmasq creates read-only metadata with mode 0644 even under a
+		// restrictive service umask. The private parent still prevents API
+		// access. Never extend this exception to configs or writable files.
+		protocolMetadata := (rel == "dnsmasq.leases" || rel == "managed/dnsmasq.pid") && info.Mode().IsRegular() && info.Mode().Perm()&0133 == 0
+		if info.Mode().Perm()&0077 != 0 && !protocolMetadata && !(rootControl && info.Mode().Perm()&0007 == 0) {
 			return fmt.Errorf("state is not private: %s", path)
 		}
 		if info.IsDir() {

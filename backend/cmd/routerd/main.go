@@ -116,6 +116,9 @@ func main() {
 			}
 			runtime = remote
 			// Executor jobs outlive this API. Do not interrupt them on restart.
+			if e = database.InterruptLegacyRunningJobs(); e != nil {
+				log.Fatalf("recover legacy job state: %v", e)
+			}
 		} else {
 			_, portText, e := net.SplitHostPort(*addr)
 			if e != nil {

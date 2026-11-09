@@ -48,17 +48,18 @@ type appliedResponse struct {
 	Available bool          `json:"available"`
 }
 type Executor struct {
-	runtime  Runtime
-	db       *sql.DB
-	lock     *os.File
-	mu       sync.Mutex
-	busy     bool
-	closing  bool
-	fault    error
-	workers  sync.WaitGroup
-	http     *http.Server
-	once     sync.Once
-	closeErr error
+	runtime    Runtime
+	db         *sql.DB
+	lock       *os.File
+	legacyLock *os.File
+	mu         sync.Mutex
+	busy       bool
+	closing    bool
+	fault      error
+	workers    sync.WaitGroup
+	http       *http.Server
+	once       sync.Once
+	closeErr   error
 }
 
 // OpenExecutor opens a private journal under an already provisioned executor
@@ -71,6 +72,16 @@ func OpenExecutor(dir string, runtime Runtime) (*Executor, error) {
 	if err := checkParent(path, uint32(os.Geteuid())); err != nil {
 		return nil, err
 	}
+	legacyLock, err := lockStateFile(filepath.Join(dir, "daemon.lock"))
+	if err != nil {
+		return nil, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			legacyLock.Close()
+		}
+	}()
 	lock, err := os.OpenFile(filepath.Join(dir, "executor.lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, err
@@ -84,7 +95,8 @@ func OpenExecutor(dir string, runtime Runtime) (*Executor, error) {
 		lock.Close()
 		return nil, err
 	}
-	return &Executor{runtime: runtime, db: db, lock: lock}, nil
+	success = true
+	return &Executor{runtime: runtime, db: db, lock: lock, legacyLock: legacyLock}, nil
 }
 
 // Serve accepts only a listener created by Listen, preventing accidental TCP
@@ -116,6 +128,7 @@ func (e *Executor) Close() error {
 		e.workers.Wait()
 		e.closeErr = e.db.Close()
 		e.lock.Close()
+		e.legacyLock.Close()
 	})
 	return e.closeErr
 }

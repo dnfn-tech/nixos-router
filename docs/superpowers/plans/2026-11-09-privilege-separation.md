@@ -42,21 +42,21 @@ socket 初始权限 0600；不同 UID 的访问权限由后续特权 daemon 在�
 - [x] 执行器独占 managed.Manager；apply 保持有界串行任务和持久化结果，连接断开不取消或重复网络事务。API 重启可按任务 ID 查询；ID 内容绑定避免重复 ID 换配置。
 - [x] 真 socket 集成验证未知动作/超大消息/非法配置/未授权接口被拒绝，合法调用保留结果与恢复错误；模拟仅限系统 runner。
 - [x] 独立执行器接受受信启动参数、私有状态目录和 bootstrap；恢复前拒绝不可信状态子树。
-- [ ] 在 NixOS 接线中实际分离 root 状态目录与低权限 API 目录（Task 3），并完成不同 UID 与服务重启验证（Task 4）。
+- [x] 在 NixOS 接线中实际分离 root 状态目录与低权限 API 目录（Task 3），并完成不同 UID 与服务重启验证（Task 4）。
 
 ## 3. API、模块与升级
 
 文件：`backend/cmd/routerd/main.go`、`backend/internal/server/managed.go`、`modules/default.nix`、`modules/managed.nix`、模块与启动测试。
 
-- [ ] 用 RPC client 替换 API 内的 manager 初始化；API 无 root、CAP_NET_ADMIN 或任意 systemctl 权限。
-- [ ] 状态、无线能力、租约等必要只读数据经受限查询/快照提供；失败明确 unavailable。
-- [ ] 定义 systemd 服务用户、私有运行目录、socket 授权、启动顺序；引导密钥通过受控方式供账户初始化。
-- [ ] 旧布局迁移测试证明账户/草稿/last-good 保留，symlink 和不可信运行文件拒绝；损坏草稿恢复契约继续有效。
+- [x] 用 RPC client 替换 API 内的 manager 初始化；API 无 root、CAP_NET_ADMIN 或任意 systemctl 权限。
+- [x] 状态、无线能力、租约等必要只读数据经受限查询/快照提供；失败明确 unavailable。
+- [x] 定义 systemd 服务用户、私有运行目录、socket 授权、启动顺序；引导密钥通过受控方式供账户初始化。
+- [x] 旧布局迁移测试证明账户/草稿/last-good 保留，symlink 和不可信运行文件拒绝；损坏草稿恢复契约继续有效。
 
 ## 4. 完整验证与交付
 
-- [ ] 全量 Go/race、浏览器、Nix 模块；新 VM 断言 API UID 非 0、非法客户端不能执行、API 无法篡改 root 状态。
-- [ ] 原 wired/wifi VM 全量通过，追加 API/执行器独立崩溃及连接中断场景，不预设被测路由行为。
+- [x] 全量 Go、定向 race（完整 server race 超时限制见记录）、浏览器、Nix 模块；新 VM 断言 API UID 非 0、非法客户端不能执行、API 无法篡改 root 状态。
+- [x] 原 wired/wifi VM 全量通过，追加 API/执行器独立崩溃及连接中断场景，不预设被测路由行为。
 - [ ] 独立代码审查、更新接入指南/完成度文档，提交 PR。未经用户同意不合并或实施 gw。
 
 ## Task 1 验证记录
@@ -102,3 +102,36 @@ socket 初始权限 0600；不同 UID 的访问权限由后续特权 daemon 在�
 - `nix eval --impure --json --file tests/module-managed.nix` 全部断言通过；这里仍验证原服务布局，不等同于完成分权部署。
 - `nix build .#routerd --no-link --print-out-paths` 成功，产物为 `/nix/store/45fvh4j0h9vrn3qhz2yrwlv6zcc4mjj4-routerd-0.1.0`，包含 routerd 和 router-executor。未切换 NixOS 系统或启动此包服务。
 - 最新后端配合独立临时状态运行 `npm run test:web`：34/34 通过；`go vet` 定向包通过。现有浏览器用例验证兼容性，不替代待补的真实分权服务/跨 UID VM 验证。
+
+### Task 3 服务布局决策
+
+Ruling: 保留 `backend.stateDir` 作为 root executor 的原运行目录，新增默认 `${stateDir}-api` 作为 API 私有目录，只首次复制账户数据库/SQLite 恢复文件及草稿。这样 managed generations 中已有绝对路径不变，last-good 和协议服务不需要搬迁；若误判原目录可信，可能继承不可信 root 状态，因此迁移先校验归属、权限、文件类型和旧 daemon/executor 锁。API 目录发布后不再从旧副本覆盖，root 标记记录布局，未知既有目标拒绝采用。该决策不迁移 gw 网口配置。
+
+### Task 3/4 服务拆分与升级验证
+
+- NixOS 以静态 `nixos-router-api` 账户运行 HTTP API，清空 capabilities；root executor 独占原 stateDir，API 使用独立 apiStateDir。state-init 使用受控 credentials 和一次性复制迁移，不移动含绝对路径的运行代际。
+- 迁移校验所有权、目录模式、文件类型与硬链接，并持有旧 daemon 与 executor 锁；保留原账户/会话/草稿及 SQLite WAL，不重复覆盖已经发布的 API 状态。发布记录缺失或路径/身份变化均拒绝自动接管。
+- 首次真实分权 VM 暴露 dnsmasq 元数据默认 0644 导致重启校验失败；仅对固定租约/PID 文件允许只读权限，仍要求私有父目录、受信所有者、单链接且不可被其他账户写入。负向回归及第二次专用 VM 通过（`/nix/store/zgyfyf29znnlbz73yya0nax920wzjb1c-vm-test-run-vm-privsep`）。
+- 独立整分支审查发现迁移旧 running 作业不会结束；新增启动恢复只终结未标记 executor 的旧 apply，明确 interrupted 与 rollback unknown。新 executor 作业保持 running，继续按原 ID 对账。回归先编译失败再通过；VM 夹具追加旧作业迁移断言。
+- 总览状态与客户端页统一读取 executor 租约快照，空租约与观察失败分开；总览最后作业也进行结果对账。
+- 最新全量 Go 与 vet 已通过；最终 race、浏览器及三项 managed VM 回归尚在运行。本记录不是上述检查已全部通过的声明。
+
+- VM WiFi 回归发现 hostapd 已 AP-ENABLED，但 executor 的 hostapd_cli 回包 socket 位于隔离的临时目录，导致就绪观察超时；改用 `-s` 将客户端 socket 放在同一受保护控制目录。修复后全量 Go/vet 通过，四项 VM 正在复验。
+- 有线 VM 的执行器重启测试在 DHCP 尚未取得租约时立即 ping 失败；改为有界等待真实转发恢复，不将 READY/HTTP 健康等同于 WAN 可用。
+- 浏览器首轮 33/34：100ms 加速超时可先于 Playwright 路由回调执行，原断言误把回调次数当 fetch 次数。改为统计实际 fetch/abort、保留 30 次上限及不重提应用断言；定向 2/2 和完整 34/34 均通过。
+- 最新 Nix module-managed/module-apply 所有断言为 true。db/privsep/两个入口 race 通过；完整 server race 在 bcrypt 中达到 10 分钟上限，不能报告全量 race 通过。随后 Remote API 定向 race（119.335s）及 managed race（6.820s）通过。
+
+### 最终本地验证
+
+修复后四项 VM 同一次 `nix build --keep-going --max-jobs 1` 退出 0：
+
+| 检查 | 耗时 | 输出 |
+|---|---|---|
+| WiFi | 162.91s | `/nix/store/ac8x6qvn8nj94y0dbq4ni18izznfr71w-vm-test-run-managed-wifi` |
+| 有线 managed | 219.55s | `/nix/store/py2k64arm7ngxh70wn0f1dxkx1bxmmk6-vm-test-run-vm-managed-router` |
+| 分权迁移 | 46.82s | `/nix/store/xfflmigsjz9drqha0d9idmmkg9zg6206-vm-test-run-vm-privsep` |
+| 旧模式 | 43.16s | `/nix/store/8xgyl3lrqisnlkq4jkflcsjiky8iy5xn-vm-test-run-vm-router` |
+
+本地原始日志：`/tmp/router-privsep-vm-final.log`；此前失败保留在 `/tmp/router-privsep-vm-all.log`。完整 Go/vet、两组模块求值、浏览器 34/34 及上述定向 race 均通过；完整 server race 超时不计作通过。独立整分支审查的旧作业问题已修复，并由 db 回归及本轮迁移 VM 验证。
+
+Ruling 的成本为增加独立 API 状态目录和一次性迁移标记；收益是保留原运行代际的绝对路径，不扩大 API 对 root 状态的写权限。实际设备配置继续由 nixos-home 提供；未实施实体 gw。

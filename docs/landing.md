@@ -60,6 +60,18 @@
 
 启用 WiFi 时提供独立 `wifiInterface`、一个启用的 WPA2 AP、合法国家/非DFS信道和运行时密钥。当前配置不支持 WPA3、WiFi 6/7 参数、访客/多AP、IPv6路由、PPPoE等高级能力；不要把宿主已有能力视为被框架自动保留。
 
+## managed 权限与升级布局
+
+managed 使用 `nixos-router-backend`（静态用户 `nixos-router-api`，无 capabilities）和独立 root `nixos-router-executor`。后者仅监听受保护 Unix socket，通过内核 UID 认证，只接收配置级请求。执行器恢复 last-good 后报告就绪，API 再连接；不再为 managed API 开启旧的 `applyReload` / `privilegedApply` 开关。当前不提供重启 RPC，`allowReboot` 必须保持关闭。
+
+- `backend.stateDir`（默认 `/var/lib/nixos-router`）继续保存 root 私有运行状态、last-good 和执行器作业日志；原 generations 内的绝对路径不移动。
+- `managed.apiStateDir` 默认 `${stateDir}-api`，保存 API 账户/会话数据库、草稿和 API 作业。两目录不能互相包含；其父目录须预先存在且由 root 保护。
+- `nixos-router-state-init` 首次离线复制旧账户数据库及 SQLite WAL/恢复文件、草稿，源数据保留。检查旧 daemon/executor 锁、文件归属和权限，拒绝 symlink、hardlink、未知既有目标和不可信配置。迁移成功后不再用旧副本覆盖 API 数据；已发布目录丢失会拒绝自动复活旧账户。
+- bootstrap 和初始密码通过 systemd `LoadCredential` 传递，不需要将 root 密钥文件改为 API 可读。自定义 `package` 必须同时提供 `routerd` 和 `router-executor`。
+- API 重启不触发网络恢复，也不取消执行器已接受的作业；执行器重启从 last-good 恢复。按原编号查询结果；执行器未找到编号时显示 unknown，不自动重放。租约读取失败明确不可用，不能视为空客户端列表。
+
+升级旧 managed 服务时必须让旧 API 停止后再初始化；若锁仍被占用，启动会明确失败。不要手工递归 chown 原 root 运行目录，也不要用旧 API 数据覆盖已迁移目录。普通重启 API 使用 `systemctl restart nixos-router-backend`；需要恢复运行配置时重启 `nixos-router-executor`，这可能中断网络，应在集成维护窗口处理。
+
 ## 生命周期与验证边界
 
 - 首次启动仅在 `config.json` 缺失时复制 bootstrap；后续编辑保存为草稿，必须显式 Apply。

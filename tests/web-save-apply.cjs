@@ -1204,8 +1204,10 @@ for (const persistent of [false, true]) {
         window.setTimeout = (fn, ms, ...args) => timeout(fn, ms === 1000 ? 10 : ms === 5000 ? 100 : ms, ...args);
         const nativeFetch = window.fetch;
         window.jobTimeoutAborts = 0;
+        window.jobFetchAttempts = 0;
         window.fetch = (url, options) => {
           if (String(url).includes("/api/v1/jobs/timeout-test")) {
+            window.jobFetchAttempts++;
             options.signal.addEventListener("abort", () => window.jobTimeoutAborts++, { once: true });
           }
           return nativeFetch(url, options);
@@ -1213,8 +1215,20 @@ for (const persistent of [false, true]) {
       });
       await waitAction(page, "#apply-run");
       assert.equal(posts, 1, "polling must never resubmit Apply");
-      assert.equal(reads, persistent ? 30 : 2);
-      assert.equal(await page.evaluate(() => window.jobTimeoutAborts), persistent ? 30 : 1);
+      const attempts = await page.evaluate(() => window.jobFetchAttempts);
+      const aborts = await page.evaluate(() => window.jobTimeoutAborts);
+      // Under load a 100 ms abort can fire before Playwright receives the
+      // routed request. Count the browser's actual fetch attempts and signals,
+      // not only requests that happened to reach the interception callback.
+      assert.ok(reads > 0 && reads <= attempts, `routed ${reads}, attempted ${attempts}`);
+      if (persistent) {
+        assert.equal(attempts, 30);
+        assert.equal(aborts, 30);
+      } else {
+        assert.ok(reads >= 2, `response eventually delivered after ${reads} requests`);
+        assert.ok(attempts >= 2 && attempts <= 30);
+        assert.equal(aborts, attempts - 1);
+      }
       const message = await page.locator("#apply-msg").innerText();
       const job = await page.evaluate(() => sessionStorage.getItem("router-apply-job"));
       if (persistent) {

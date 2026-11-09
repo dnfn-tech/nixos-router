@@ -156,7 +156,8 @@ try:
         associated()
         acquire_lease()
         api("PUT", "/config", disabled)  # Save only, deliberately do not apply.
-        machine.succeed("systemctl restart nixos-router-backend.service")
+        machine.succeed("systemctl restart nixos-router-executor.service")
+        machine.wait_for_unit("nixos-router-executor.service")
         machine.wait_until_succeeds("curl -fsS http://127.0.0.1:8080/api/v1/healthz")
         associated()
         acquire_lease()
@@ -165,8 +166,8 @@ try:
     with subtest("Full VM reboot restores applied AP and WPA2/DHCP software chain"):
         machine.reboot()
         machine.wait_for_unit("nixos-router-backend.service")
-        # Type=simple marks routerd active before startup Restore finishes. The
-        # HTTP listener is created only after Restore, so health is the gate.
+        # The executor notifies readiness after Restore; HTTP availability also
+        # proves the independent API has connected to that restored runtime.
         machine.wait_until_succeeds("curl -fsS http://127.0.0.1:8080/api/v1/healthz")
         machine.wait_for_unit("nixos-router-hostapd.service")
         login()
@@ -175,7 +176,7 @@ try:
         associated()
         acquire_lease()
 finally:
-    machine.execute("journalctl -u nixos-router-backend -u nixos-router-hostapd -u nixos-router-dnsmasq -u wifi-test-station --no-pager > /root/managed-wifi-journal.log")
+    machine.execute("journalctl -u nixos-router-backend -u nixos-router-executor -u nixos-router-hostapd -u nixos-router-dnsmasq -u wifi-test-station --no-pager > /root/managed-wifi-journal.log")
     machine.execute("iw dev > /root/managed-wifi-radio.log; ip netns exec station iw dev >> /root/managed-wifi-radio.log")
     machine.copy_from_machine("/root/managed-wifi-journal.log")
     machine.copy_from_machine("/root/managed-wifi-radio.log")

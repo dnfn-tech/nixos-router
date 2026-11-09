@@ -76,8 +76,8 @@ in {
     # These are only isolated physical-interface substitutes. The setup creates
     # no AP, bridge, address, DHCP server or route: routerd must create those.
     systemd.services.wifi-test-links = {
-      before = [ "nixos-router-backend.service" ];
-      requiredBy = [ "nixos-router-backend.service" ];
+      before = [ "nixos-router-executor.service" ];
+      requiredBy = [ "nixos-router-executor.service" ];
       after = [ "systemd-modules-load.service" ];
       path = [ pkgs.iproute2 pkgs.iw pkgs.systemd pkgs.kmod ];
       serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };

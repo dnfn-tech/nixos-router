@@ -642,7 +642,10 @@ func (m *Manager) waitAPReady(ctx context.Context) error {
 	defer tick.Stop()
 	var lastErr error
 	for {
-		out, e := m.run(ctx, "hostapd_cli", "-p", filepath.Join(m.base(), "hostapd-control"), "-i", m.opts.WiFiInterface, "status")
+		// The executor has a private /tmp namespace. Put the client's reply
+		// socket beside the server socket so hostapd can actually reach it.
+		control := filepath.Join(m.base(), "hostapd-control")
+		out, e := m.run(ctx, "hostapd_cli", "-p", control, "-s", control, "-i", m.opts.WiFiInterface, "status")
 		lastErr = e
 		if e == nil {
 			for _, line := range strings.Split(out, "\n") {

@@ -542,10 +542,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// Stubbed status derived from config
 	lanCIDR := cfg.LAN.IPv4CIDR
-	clientCount := 0
-	if ls := s.readDnsmasqLeases(); len(ls) > 0 {
-		clientCount = len(ls)
-	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	leases, clientsSource, _ := s.leaseSnapshot(ctx)
+	clientCount := len(leases)
 	// Interfaces: best-effort live via sysfs + config roles
 	var interfaces []map[string]interface{}
 	// WAN
@@ -580,10 +580,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		srcs["interfaces"] = "stub"
 	}
 	// Clients source for summary (from leases vs static)
-	clientsSource := "stub"
-	if ls := s.readDnsmasqLeases(); len(ls) > 0 {
-		clientsSource = "leases"
-	}
 	srcs["clients"] = clientsSource
 	// WiFi source (stub for now)
 	srcs["wifi"] = "stub"
@@ -598,6 +594,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if jobs, err := s.db.ListJobs(50); err == nil {
 			for _, j := range jobs {
 				if strings.EqualFold(j.Kind, "apply") {
+					if reconciled, err := s.reconcileRemoteJob(ctx, j); err == nil {
+						j = reconciled
+					} else {
+						j = unknownRemoteJob(j, "unavailable")
+					}
 					// try parse mode from payload ({"mode":"..."})
 					mode := ""
 					if strings.TrimSpace(j.Payload) != "" {
@@ -914,23 +915,12 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		BlockedRuntimeKnown *bool  `json:"blockedRuntimeKnown,omitempty"`
 	}
 	clients := []Client{}
-	source := "stub"
-	var leases []dnsmasqLease
-	observer, remote := s.managedRuntime.(interface {
-		Leases(context.Context) ([]managed.Lease, error)
-	})
-	if remote {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		var err error
-		leases, err = observer.Leases(ctx)
-		if err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"error": "leases_unavailable", "source": "unavailable", "clients": clients})
-			return
-		}
-		source = "leases"
-	} else {
-		leases = s.readDnsmasqLeases()
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	leases, source, err := s.leaseSnapshot(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"error": "leases_unavailable", "source": source, "clients": clients})
+		return
 	}
 	if len(leases) > 0 {
 		source = "leases"
@@ -968,7 +958,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 				Blocked: isMacBlocked(cfg, L.MAC),
 			})
 		}
-	} else if !remote {
+	} else if source == "stub" {
 		// From static leases fallback
 		for _, sl := range cfg.LAN.StaticLeases {
 			clients = append(clients, Client{IP: sl.IP, MAC: sl.MAC, Hostname: sl.Hostname, Source: "static", Blocked: isMacBlocked(cfg, sl.MAC)})

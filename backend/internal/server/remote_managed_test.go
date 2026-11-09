@@ -324,3 +324,44 @@ func TestRemoteClientsUseExecutorLeases(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoteStatusUsesLeaseSnapshotAndReconcilesApply(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		data   []string
+		source string
+	}{
+		{"missing", nil, "unavailable"}, {"empty", []string{""}, "leases"},
+		{"live", []string{"0 aa:bb:cc:dd:ee:ff 192.168.1.2 laptop *\n"}, "leases"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, cookies, cleanup := setupApplyEnv(t, true)
+			defer cleanup()
+			s.managedRuntime = remoteClient(t, tc.data...)
+			if err := s.db.CreateJob("unaccepted", "apply", `{"executor":true}`); err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", "/api/v1/status", nil)
+			for _, cookie := range cookies {
+				r.AddCookie(cookie)
+			}
+			s.Handler().ServeHTTP(w, r)
+			var body struct {
+				Sources   map[string]string `json:"sources"`
+				LastApply struct {
+					Status string `json:"status"`
+				} `json:"lastApply"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != 200 || body.Sources["clients"] != tc.source {
+				t.Fatalf("stale local lease summary: %d %s", w.Code, w.Body.String())
+			}
+			if body.LastApply.Status != "unknown" {
+				t.Fatalf("unreconciled apply summary: %s", w.Body.String())
+			}
+		})
+	}
+}

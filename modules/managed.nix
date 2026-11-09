@@ -2,6 +2,13 @@
 let
   cfg = config.services.nixos-router.backend;
   m = cfg.managed;
+  socket = "/run/nixos-router-executor/control.sock";
+  executorArgs = [ "${cfg.effectivePackage}/bin/router-executor"
+    "--state-dir" cfg.stateDir "--socket" socket "--api-user" "nixos-router-api"
+    "--bootstrap" "%d/bootstrap" "--interfaces" (lib.concatStringsSep "," m.interfaces)
+    "--wifi-interface" m.wifiInterface "--country-code" m.countryCode
+    "--management-port" (toString port)
+    "--ssh-ports" (lib.concatMapStringsSep "," toString sshPorts) ];
   # ListenAddress may bind a port absent from the global Port directives.
   # Preserve every host SSH listener when optional WAN filtering is disabled.
   sshPorts = lib.unique (config.services.openssh.ports
@@ -46,6 +53,7 @@ let
   '';
 in {
   options.services.nixos-router.backend.managed = {
+    apiStateDir = lib.mkOption { type = lib.types.path; default = "${cfg.stateDir}-api"; description = "Separate low-privilege API state. Migrated once from stateDir; must not overlap the private executor directory."; };
     enable = lib.mkEnableOption "explicit ownership of router interfaces (hardware-test candidate)";
     interfaces = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; description = "Explicit allowlist including physical wired WAN and LAN members. Never include a management/control interface owned elsewhere."; };
     wifiInterface = lib.mkOption { type = lib.types.str; default = ""; description = "Explicit physical AP interface, separate from the wired interfaces allowlist."; };
@@ -55,6 +63,8 @@ in {
   };
   config = lib.mkIf (cfg.enable && m.enable) {
     assertions = [
+      { assertion = m.apiStateDir != cfg.stateDir && !(lib.hasPrefix "${cfg.stateDir}/" m.apiStateDir) && !(lib.hasPrefix "${m.apiStateDir}/" cfg.stateDir); message = "nixos-router API and executor state directories must not overlap."; }
+      { assertion = !cfg.allowReboot; message = "nixos-router managed API does not yet support a privileged reboot RPC; leave allowReboot disabled."; }
       { assertion = m.interfaces != []; message = "nixos-router managed mode requires an explicit interface allowlist."; }
       { assertion = m.bootstrapConfigFile != ""; message = "nixos-router managed mode requires an explicit bootstrapConfigFile."; }
       { assertion = !cfg.dev; message = "nixos-router managed mode forbids unauthenticated dev mode."; }
@@ -65,31 +75,87 @@ in {
       { assertion = lib.all (name: let i = config.networking.interfaces.${name} or {}; in (i.ipv4.addresses or []) == [] && (i.useDHCP or false) != true) (m.interfaces ++ lib.optional (m.wifiInterface != "") m.wifiInterface); message = "nixos-router managed interfaces must not have NixOS-managed addresses or DHCP clients."; }
     ];
     services.nixos-router.backend = {
-      applyReload = true;
-      privilegedApply = true;
+      applyReload = lib.mkForce false;
+      privilegedApply = lib.mkForce false;
+      applyTrafficControl = lib.mkForce false;
       consumeGenerated = lib.mkForce false;
     };
     boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
+    users.groups.nixos-router-api = {};
+    users.users.nixos-router-api = { isSystemUser = true; group = "nixos-router-api"; };
+    systemd.services.nixos-router-state-init = {
+      description = "Prepare private router API state without moving runtime configuration";
+      before = [ "nixos-router-executor.service" "nixos-router-backend.service" ];
+      after = [ "local-fs.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "root";
+        UMask = "0077";
+        LoadCredential = [ "bootstrap:${m.bootstrapConfigFile}" ];
+        ExecStart = lib.escapeShellArgs (executorArgs ++ [ "--prepare-api-state" m.apiStateDir ]);
+      };
+    };
+    systemd.services.nixos-router-executor = {
+      description = "Privileged router network executor";
+      wantedBy = [ "multi-user.target" ];
+      requires = [ "nixos-router-state-init.service" ];
+      after = [ "local-fs.target" "nixos-router-state-init.service" ];
+      before = [ "nixos-router-backend.service" ];
+      path = [ pkgs.systemd pkgs.nftables pkgs.iproute2 pkgs.busybox pkgs.dnsmasq pkgs.hostapd pkgs.iw ];
+      environment.NIXOS_ROUTER_MANAGED_SSH_PORTS = lib.concatMapStringsSep "," toString sshPorts;
+      serviceConfig = {
+        Type = "notify";
+        NotifyAccess = "main";
+        User = "root";
+        UMask = "0077";
+        RuntimeDirectory = "nixos-router-executor";
+        RuntimeDirectoryMode = "0700";
+        LoadCredential = [ "bootstrap:${m.bootstrapConfigFile}" ];
+        ExecStart = lib.escapeShellArgs executorArgs;
+        Restart = "on-failure";
+        RestartSec = 2;
+        TimeoutStartSec = 360;
+        TimeoutStopSec = 360;
+        PrivateTmp = true;
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = [ cfg.stateDir "/run/nixos-router-executor" ];
+      };
+    };
     systemd.services.nixos-router-backend = {
-      after = lib.mkForce [ "local-fs.target" ];
-      path = [ pkgs.busybox pkgs.dnsmasq pkgs.hostapd pkgs.iw ];
-      preStart = ''
-        install -d -m 0700 ${lib.escapeShellArg cfg.stateDir}
-        if ! test -e ${lib.escapeShellArg "${cfg.stateDir}/config.json"}; then
-          install -m 0600 ${lib.escapeShellArg m.bootstrapConfigFile} ${lib.escapeShellArg "${cfg.stateDir}/config.json"}
-        fi
-      '';
+      after = lib.mkForce [ "nixos-router-executor.service" "nixos-router-state-init.service" ];
+      requires = [ "nixos-router-state-init.service" ];
+      wants = [ "nixos-router-executor.service" ];
+      path = [ pkgs.iproute2 pkgs.iw ];
       environment = {
         NIXOS_ROUTER_MANAGED = "1";
-        NIXOS_ROUTER_MANAGED_INTERFACES = lib.concatStringsSep "," m.interfaces;
-        NIXOS_ROUTER_MANAGED_SSH_PORTS = lib.concatMapStringsSep "," toString sshPorts;
+        NIXOS_ROUTER_EXECUTOR_SOCKET = socket;
         NIXOS_ROUTER_WIFI_INTERFACE = m.wifiInterface;
-        NIXOS_ROUTER_COUNTRY_CODE = m.countryCode;
-        NIXOS_ROUTER_MANAGEMENT_PORT = toString port;
-        NIXOS_ROUTER_ADMIN_PASSWORD_FILE = m.adminPasswordFile;
-        NIXOS_ROUTER_DNSMASQ_LEASES = "${cfg.stateDir}/dnsmasq.leases";
+        NIXOS_ROUTER_ADMIN_PASSWORD_FILE = if m.adminPasswordFile == "" then "" else "%d/admin-password";
       };
-      serviceConfig.UMask = "0077";
+      serviceConfig = {
+        User = "nixos-router-api";
+        Group = "nixos-router-api";
+        DynamicUser = lib.mkForce false;
+        StateDirectory = lib.mkForce [];
+        UMask = "0077";
+        NoNewPrivileges = true;
+        CapabilityBoundingSet = [];
+        AmbientCapabilities = lib.mkForce [];
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+        RestrictSUIDSGID = true;
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+        ReadWritePaths = [ m.apiStateDir ];
+        LoadCredential = lib.optional (m.adminPasswordFile != "") "admin-password:${m.adminPasswordFile}";
+      };
     };
     systemd.services.nixos-router-wan = {
       description = "routerd dedicated WAN DHCP protocol client";

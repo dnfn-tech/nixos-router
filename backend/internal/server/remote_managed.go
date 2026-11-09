@@ -85,3 +85,22 @@ func unknownRemoteJob(j db.Job, reason string) db.Job {
 	j.Payload = string(body)
 	return j
 }
+
+// Both the client list and overview must use the same observer after privilege
+// separation. An executor read failure is never an empty measured client list.
+func (s *Server) leaseSnapshot(ctx context.Context) ([]managed.Lease, string, error) {
+	if observer, ok := s.managedRuntime.(interface {
+		Leases(context.Context) ([]managed.Lease, error)
+	}); ok {
+		leases, err := observer.Leases(ctx)
+		if err != nil {
+			return nil, "unavailable", err
+		}
+		return leases, "leases", nil
+	}
+	leases := s.readDnsmasqLeases()
+	if len(leases) > 0 {
+		return leases, "leases", nil
+	}
+	return leases, "stub", nil
+}

@@ -64,3 +64,36 @@ func TestCheckStateAllowsOwnedGenerationPointer(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCheckStateAllowsReadOnlyProtocolMetadataOnly(t *testing.T) {
+	state := filepath.Dir(socketPath(t))
+	if err := os.Mkdir(filepath.Join(state, "managed"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dnsmasq.leases", "managed/dnsmasq.pid"} {
+		path := filepath.Join(state, name)
+		if err := os.WriteFile(path, []byte("protocol metadata"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := CheckState(state, uint32(os.Geteuid())); err != nil {
+		t.Fatalf("private parent already protects read-only protocol files: %v", err)
+	}
+	for _, tc := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{"dnsmasq.leases", 0666}, {"managed/dnsmasq.pid", 0664}, {"managed/last-good.json", 0644},
+	} {
+		path := filepath.Join(state, tc.path)
+		os.WriteFile(path, []byte("untrusted"), 0600)
+		os.Chmod(path, tc.mode)
+		if err := CheckState(state, uint32(os.Geteuid())); err == nil {
+			t.Fatalf("unsafe mode accepted: %s", tc.path)
+		}
+		os.Chmod(path, 0600)
+	}
+}

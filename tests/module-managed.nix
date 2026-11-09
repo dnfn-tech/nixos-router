@@ -22,18 +22,28 @@ let
   failures = c: lib.filter (a: !a.assertion) c.assertions;
 in {
   integrated = assert lib.assertMsg (failures cfg == []) (lib.concatMapStringsSep "\n" (a:a.message) (failures cfg));
-    assert cfg.services.nixos-router.backend.applyReload;
-    assert cfg.services.nixos-router.backend.privilegedApply;
+    assert !cfg.services.nixos-router.backend.applyReload;
+    assert !cfg.services.nixos-router.backend.privilegedApply;
     assert !cfg.services.nixos-router.backend.consumeGenerated;
     assert cfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MANAGED == "1";
-    assert cfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22";
+    assert cfg.systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22";
     assert cfg.systemd.services.nixos-router-dnsmasq.serviceConfig.Type == "forking";
     assert builtins.hasAttr "nixos-router-wan" cfg.systemd.services;
     assert builtins.hasAttr "nixos-router-dnsmasq" cfg.systemd.services;
     assert builtins.hasAttr "nixos-router-hostapd" cfg.systemd.services;
     assert cfg.networking.firewall.allowedTCPPorts == [];
+    assert cfg.systemd.services.nixos-router-backend.serviceConfig.User == "nixos-router-api";
+    assert cfg.systemd.services.nixos-router-backend.serviceConfig.CapabilityBoundingSet == [];
+    assert cfg.systemd.services.nixos-router-backend.serviceConfig.NoNewPrivileges;
+    assert cfg.systemd.services.nixos-router-executor.serviceConfig.User == "root";
+    assert cfg.systemd.services.nixos-router-executor.serviceConfig.Type == "notify";
+    assert cfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_STATE_DIR == "/var/lib/nixos-router-api";
+    assert cfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_EXECUTOR_SOCKET == "/run/nixos-router-executor/control.sock";
+    assert lib.elem "nixos-router-executor.service" cfg.systemd.services.nixos-router-backend.after;
+    assert lib.elem "nixos-router-state-init.service" cfg.systemd.services.nixos-router-executor.requires;
+    assert !lib.hasInfix "--apply-reload" cfg.systemd.services.nixos-router-backend.serviceConfig.ExecStart;
     true;
-  hostSSHPorts = assert (evaluate { services.openssh.ports = [ 22 2223 ]; }).systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22,2223"; true;
+  hostSSHPorts = assert (evaluate { services.openssh.ports = [ 22 2223 ]; }).systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22,2223"; true;
   hostSSHListenPorts = let
     sshCfg = evaluate { services.openssh = {
       ports = [ 22 2223 ];
@@ -45,7 +55,7 @@ in {
         { addr = "127.0.0.1"; port = 22; }
       ];
     }; };
-  in assert sshCfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22,2223,2224"; true;
+  in assert sshCfg.systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22,2223,2224"; true;
   wifiOwnership = let
     radio = { services.nixos-router.backend.managed.wifiInterface = "wlan0"; };
     address = { address = "192.168.99.1"; prefixLength = 24; };
@@ -71,6 +81,8 @@ in {
     {services.hostapd.enable = true;}
     {networking.firewall.enable = true;}
     {services.nixos-router.backend.dev = true;}
+    {services.nixos-router.backend.allowReboot = true;}
+    {services.nixos-router.backend.managed.apiStateDir = "/var/lib/nixos-router/api";}
     {services.nixos-router.backend.managed.interfaces = lib.mkForce [];}
   ];
 }

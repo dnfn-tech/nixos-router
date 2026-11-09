@@ -441,3 +441,17 @@ func TestRPCLeaseSnapshot(t *testing.T) {
 		t.Fatal("lease query executed commands")
 	}
 }
+
+func TestExecutorExcludesLegacyDaemon(t *testing.T) {
+	m, _, state := protocolFixture(t, &protocolRunner{})
+	f, err := lockStateFile(filepath.Join(state, "daemon.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	e, err := OpenExecutor(state, m)
+	if err == nil {
+		e.Close()
+		t.Fatal("executor shared state with legacy daemon")
+	}
+}
