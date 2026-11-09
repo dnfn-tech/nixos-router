@@ -262,7 +262,9 @@ func (s *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	if status >= 400 { v = normalizeAPIError(status, v) }
+	if status >= 400 {
+		v = normalizeAPIError(status, v)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
@@ -494,7 +496,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			apiHTTPError(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		newCfg, err := config.DecodeDocument(body)
+		newCfg, clearSecrets, err := decodeConfigWrite(body)
 		if err != nil {
 			writeConfigError(w, err)
 			return
@@ -505,7 +507,17 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Preserve secrets if placeholders or empty are provided
+		newCfg.Plugins, err = config.ResolvePluginSecrets(s.cfg, newCfg.Plugins)
+		if err != nil {
+			writeConfigError(w, err)
+			return
+		}
 		newCfg = s.mergeSecrets(s.cfg, newCfg)
+		newCfg, err = config.ClearSecrets(newCfg, clearSecrets)
+		if err != nil {
+			writeConfigError(w, err)
+			return
+		}
 		if err := newCfg.Validate(); err != nil {
 			writeConfigError(w, err)
 			return
@@ -871,7 +883,12 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 		cur := cfg.Plugins[id]
 		// Merge config with secret-preserve
 		if body.Config != nil {
-			cur.Config = mergePreserveSecretsMap(cur.Config, body.Config)
+			resolved, err := config.ResolvePluginSecrets(s.cfg, map[string]config.PluginConfig{id: {Config: body.Config}})
+			if err != nil {
+				writeConfigError(w, err)
+				return
+			}
+			cur.Config = mergePreserveSecretsMap(cur.Config, resolved[id].Config)
 		}
 		if body.Enabled != nil {
 			cur.Enable = *body.Enabled
@@ -1160,7 +1177,7 @@ func isRedactedOrEmpty(s string) bool {
 func (s *Server) mergeSecrets(oldCfg config.Config, in config.Config) config.Config {
 	out := in
 	// PPPoE password
-	if in.WAN.Mode == "pppoe" && in.WAN.PPPoE != nil {
+	if in.WAN.PPPoE != nil {
 		if isRedactedOrEmpty(in.WAN.PPPoE.Password) && oldCfg.WAN.PPPoE != nil {
 			pp := *in.WAN.PPPoE
 			pp.Password = oldCfg.WAN.PPPoE.Password
@@ -1189,38 +1206,30 @@ func (s *Server) mergeSecrets(oldCfg config.Config, in config.Config) config.Con
 		out.WiFi.APs = aps
 	}
 	// DDNS tokens/secrets
-	if in.DDNS.Provider == oldCfg.DDNS.Provider {
-		switch in.DDNS.Provider {
-		case "cloudflare":
-			if in.DDNS.Cloudflare != nil && oldCfg.DDNS.Cloudflare != nil && isRedactedOrEmpty(in.DDNS.Cloudflare.APIToken) {
-				cc := *in.DDNS.Cloudflare
-				cc.APIToken = oldCfg.DDNS.Cloudflare.APIToken
-				out.DDNS.Cloudflare = &cc
-			}
-		case "duckdns":
-			if in.DDNS.DuckDNS != nil && oldCfg.DDNS.DuckDNS != nil && isRedactedOrEmpty(in.DDNS.DuckDNS.Token) {
-				dd := *in.DDNS.DuckDNS
-				dd.Token = oldCfg.DDNS.DuckDNS.Token
-				out.DDNS.DuckDNS = &dd
-			}
-		case "aliyun":
-			if in.DDNS.Aliyun != nil && oldCfg.DDNS.Aliyun != nil {
-				al := *in.DDNS.Aliyun
-				if isRedactedOrEmpty(al.AccessKey) {
-					al.AccessKey = oldCfg.DDNS.Aliyun.AccessKey
-				}
-				if isRedactedOrEmpty(al.SecretKey) {
-					al.SecretKey = oldCfg.DDNS.Aliyun.SecretKey
-				}
-				out.DDNS.Aliyun = &al
-			}
-		case "custom":
-			if in.DDNS.Custom != nil && oldCfg.DDNS.Custom != nil && isRedactedOrEmpty(in.DDNS.Custom.Token) {
-				cu := *in.DDNS.Custom
-				cu.Token = oldCfg.DDNS.Custom.Token
-				out.DDNS.Custom = &cu
-			}
+	if in.DDNS.Cloudflare != nil && oldCfg.DDNS.Cloudflare != nil && isRedactedOrEmpty(in.DDNS.Cloudflare.APIToken) {
+		cc := *in.DDNS.Cloudflare
+		cc.APIToken = oldCfg.DDNS.Cloudflare.APIToken
+		out.DDNS.Cloudflare = &cc
+	}
+	if in.DDNS.DuckDNS != nil && oldCfg.DDNS.DuckDNS != nil && isRedactedOrEmpty(in.DDNS.DuckDNS.Token) {
+		dd := *in.DDNS.DuckDNS
+		dd.Token = oldCfg.DDNS.DuckDNS.Token
+		out.DDNS.DuckDNS = &dd
+	}
+	if in.DDNS.Aliyun != nil && oldCfg.DDNS.Aliyun != nil {
+		al := *in.DDNS.Aliyun
+		if isRedactedOrEmpty(al.AccessKey) {
+			al.AccessKey = oldCfg.DDNS.Aliyun.AccessKey
 		}
+		if isRedactedOrEmpty(al.SecretKey) {
+			al.SecretKey = oldCfg.DDNS.Aliyun.SecretKey
+		}
+		out.DDNS.Aliyun = &al
+	}
+	if in.DDNS.Custom != nil && oldCfg.DDNS.Custom != nil && isRedactedOrEmpty(in.DDNS.Custom.Token) {
+		cu := *in.DDNS.Custom
+		cu.Token = oldCfg.DDNS.Custom.Token
+		out.DDNS.Custom = &cu
 	}
 	if in.Plugins != nil {
 		out.Plugins = make(map[string]config.PluginConfig, len(in.Plugins))
@@ -1260,11 +1269,7 @@ func mergePreserveSecretsMap(old, in map[string]interface{}) map[string]interfac
 		if okNew {
 			// Only secret fields use empty/redacted as "keep"; ordinary
 			// strings (e.g. controllerUrl) must remain explicitly clearable.
-			key := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(k))
-			secret := false
-			for _, marker := range []string{"password", "passwd", "psk", "secret", "token", "authkey", "privatekey", "accesskey", "apikey"} {
-				secret = secret || strings.Contains(key, marker)
-			}
+			secret := config.IsSecretKey(k)
 			if sv, ok := nv.(string); ok && okOld && secret && isRedactedOrEmpty(sv) {
 				out[k] = ov
 				continue
@@ -1565,6 +1570,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Secret-aware merge to preserve placeholders if present
+	newCfg.Plugins, err = config.ResolvePluginSecrets(s.cfg, newCfg.Plugins)
+	if err != nil {
+		writeConfigError(w, err)
+		return
+	}
 	newCfg = s.mergeSecrets(s.cfg, newCfg)
 	if err = newCfg.Validate(); err != nil {
 		writeConfigError(w, err)

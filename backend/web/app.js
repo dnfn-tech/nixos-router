@@ -126,10 +126,11 @@
       ),
     );
   }
+  const pathParts = (path) => Array.isArray(path) ? path : path.split(".");
   const get = (object, path) =>
-    path.split(".").reduce((v, k) => v?.[k], object);
+    pathParts(path).reduce((v, k) => v?.[k], object);
   function set(object, path, value) {
-    const keys = path.split(".");
+    const keys = pathParts(path);
     let parent = object;
     keys.slice(0, -1).forEach((key) => {
       parent = parent[key] ||= {};
@@ -141,15 +142,43 @@
       .split(/[\n,，]+/)
       .map((s) => s.trim())
       .filter(Boolean);
-  function objectPath(root, target, prefix = "") {
+  function objectSegments(root, target, prefix = []) {
     if (root === target) return prefix;
     if (!root || typeof root !== "object") return null;
     for (const [key, value] of Object.entries(root)) {
       if (!value || typeof value !== "object") continue;
-      const found = objectPath(value, target, prefix ? `${prefix}.${key}` : key);
+      const found = objectSegments(value, target, [...prefix, key]);
       if (found !== null) return found;
     }
     return null;
+  }
+  function objectPath(root, target) {
+    return objectSegments(root, target)?.join(".") ?? null;
+  }
+  function setSecretClear(section, owner, key, selected) {
+    let keys = section.secretClears.get(owner);
+    if (!keys) section.secretClears.set(owner, keys = new Set());
+    if (selected) keys.add(key); else keys.delete(key);
+    if (!keys.size) section.secretClears.delete(owner);
+  }
+  function secretClearChoice(section, owner, key, label, changed = () => {}) {
+    const checkbox = node("input", { type: "checkbox" });
+    checkbox.checked = !!section.secretClears.get(owner)?.has(key);
+    checkbox.addEventListener("change", () => {
+      setSecretClear(section, owner, key, checkbox.checked);
+      changed(checkbox.checked);
+      dirty();
+    });
+    return { checkbox, element: node("label", { class: "secret-clear" }, checkbox, node("span", {}, label)) };
+  }
+  function pendingSecretPaths(section) {
+    const paths = [];
+    for (const [owner, keys] of section.secretClears) {
+      const current = objectSegments(section.data, owner);
+      if (current === null) continue; // deleted collection item
+      for (const key of keys) paths.push([...pathParts(section.path), ...current, key]);
+    }
+    return paths;
   }
   function clearFieldError(input) {
     const errorId = `${input.id}-error`;
@@ -202,7 +231,7 @@
         input.append(node("option", { value }, title)),
       );
     const relative = state.section ? objectPath(state.section.data, data) : null;
-    const configPath = options.configPath ?? (relative !== null ? [state.section.path, relative, path].filter(Boolean).join(".") : null);
+    const configPath = options.configPath ?? (relative !== null ? [...pathParts(state.section.path), relative, ...pathParts(path)].filter(Boolean).join(".") : null);
     if (configPath) input.dataset.configPath = configPath;
     let value = get(data, path);
     if (value == null && (options.default != null || options.choices)) {
@@ -249,6 +278,24 @@
       input.setAttribute("aria-describedby", help.id);
       row.append(help);
     }
+    let clearChoice;
+    if (type === "password" && value && relative !== null) {
+      const section = state.section, keys = pathParts(path);
+      const owner = keys.length === 1 ? data : get(data, keys.slice(0, -1));
+      const key = keys.at(-1), required = input.required;
+      clearChoice = secretClearChoice(section, owner, key, `清空${label}`, (selected) => {
+        input.required = selected ? false : required;
+        input.placeholder = selected ? "保存时清空；取消勾选可保留" : "已设置；留空保留";
+      });
+      if (clearChoice.checkbox.checked) input.required = false;
+      row.append(clearChoice.element);
+      clearChoice.cancel = () => {
+        clearChoice.checkbox.checked = false;
+        setSecretClear(section, owner, key, false);
+        input.required = required;
+        input.placeholder = "已设置；留空保留";
+      };
+    }
     input.addEventListener(
       type === "checkbox" || options.choices ? "change" : "input",
       () => {
@@ -263,6 +310,7 @@
                   ? 0
                   : Number(input.value)
                 : input.value;
+        if (type === "password" && next !== "") clearChoice?.cancel();
         // An empty password retains the existing secret; new credentials start empty.
         if (type !== "password" || next !== "") set(data, path, next);
         else if (!value) set(data, path, "");
@@ -532,7 +580,7 @@
   }
   function beginEditor(cfg, path) {
     const data = clone(get(cfg, path));
-    state.section = { path, data, base: clone(cfg), revision: cfg.revision };
+    state.section = { path, data, base: clone(cfg), revision: cfg.revision, secretClears: new Map() };
     return data;
   }
   function editor(...cards) {
@@ -568,13 +616,18 @@
     try {
       const cfg = clone(section.base);
       set(cfg, section.path, candidate);
-      const result = await api("/api/v1/config", { method: "PUT", body: cfg, revision: section.revision });
+      const clearSecrets = pendingSecretPaths(section);
+      const body = clearSecrets.length ? { config: cfg, clearSecrets } : cfg;
+      const result = await api("/api/v1/config", { method: "PUT", body, revision: section.revision });
       cfg.revision = result.revision;
       section.revision = result.revision;
       section.base = clone(cfg);
       state.configCache = clone(cfg);
       state.pageDirty = false;
       state.pending = true;
+      // Plugin secret references belong to a revision. Rebind the editor to
+      // newly redacted values after saving, including advanced JSON closures.
+      if (clearSecrets.length || Object.keys(cfg.plugins || {}).length) await renderRoute();
       feedback("配置已保存，尚未生成或应用。", "good");
       return true;
     } catch (e) {
@@ -1233,7 +1286,7 @@
     );
   }
   function pluginEditor(id, cfg) {
-    const d = beginEditor(cfg, `plugins.${id}`);
+    const d = beginEditor(cfg, ["plugins", id]);
     d.config ||= {};
     const c = d.config,
       fields = (...defs) => defs.map((args) => field(c, ...args));
@@ -1387,9 +1440,28 @@
         },
         2,
       );
+      const section = state.section;
+      const clearOptions = node("div", { class: "form-row" });
+      const references = (value, path = [], found = []) => {
+        if (!value || typeof value !== "object") return found;
+        for (const [key, item] of Object.entries(value)) {
+          if (typeof item === "string" && item.startsWith("__router_secret_ref_v1_"))
+            found.push({ owner: value, key, ref: item, path: [...path, key] });
+          else references(item, [...path, key], found);
+        }
+        return found;
+      };
+      const drawClearOptions = () => {
+        clearOptions.replaceChildren(...references(d.config).map(({ owner, key, path }) =>
+          secretClearChoice(section, owner, key, `清空密钥：${path.join(".")}`).element));
+      };
+      drawClearOptions();
       input.addEventListener("input", () => {
         dirty();
         try {
+          const selected = new Set(references(d.config)
+            .filter(({ owner, key }) => section.secretClears.get(owner)?.has(key))
+            .map(({ ref }) => ref));
           const value = JSON.parse(input.value, (_, item) =>
             typeof item === "string" && secretRefs.has(item)
               ? clone(secretRefs.get(item))
@@ -1397,7 +1469,16 @@
           );
           if (!value || Array.isArray(value) || typeof value !== "object")
             throw new Error("参数必须是 JSON 对象");
+          const next = references(value);
+          for (const ref of selected) {
+            if (next.filter((item) => item.ref === ref).length > 1)
+              throw new Error("待清空密钥的标记被复制，请撤销清空或删除重复标记");
+          }
+          section.secretClears.clear();
+          for (const { owner, key, ref } of next)
+            if (selected.has(ref)) setSecretClear(section, owner, key, true);
           d.config = value;
+          drawClearOptions();
           input.setCustomValidity("");
         } catch (e) {
           input.setCustomValidity(`参数格式错误：${e.message}`);
@@ -1415,6 +1496,7 @@
             node("label", { for: input.id }, "高级配置（JSON）"),
             input,
           ),
+          clearOptions,
         ),
       );
     }

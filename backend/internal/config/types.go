@@ -463,6 +463,7 @@ func (c *Config) Validate() error {
 // RedactedCopy returns a deep-copied config with secrets masked for safe API output.
 func (c *Config) RedactedCopy() Config {
 	clone := *c
+	clone.Plugins = redactPlugins(*c, nil)
 	if clone.WAN.PPPoE != nil && clone.WAN.PPPoE.Password != "" {
 		pp := *clone.WAN.PPPoE
 		pp.Password = "****"

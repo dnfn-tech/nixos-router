@@ -363,7 +363,8 @@ async function navigate(page, route) {
   );
 }
 async function configOf(context) {
-  return (await (await context.request.get(`${base}/api/v1/config`)).json())
+  // Fixture/verification reads explicitly request real stored secrets; page reads stay redacted.
+  return (await (await context.request.get(`${base}/api/v1/config?redact=0`)).json())
     .config;
 }
 async function putConfig(context, config) {
@@ -1025,6 +1026,11 @@ test("advanced plugin JSON preserves secrets when nested arrays are reordered", 
     assert.equal(result.peers[0].name, "b");
     assert.equal(result.peers[0].token, "secret-b");
     assert.equal(result.peers[1].token, "secret-a");
+    const next = JSON.parse(await input.inputValue());
+    next.label = "saved-twice";
+    await input.fill(JSON.stringify(next));
+    await waitAction(page, "#apply-save");
+    assert.equal((await configOf(context)).plugins.arrayplugin.config.label, "saved-twice");
   } finally {
     await putConfig(context, original);
     await context.close();
@@ -1327,4 +1333,86 @@ test("field validation renders text safely and keeps other errors when editing o
   assert.equal(await page.getByLabel("地址池起始地址",{exact:true}).getAttribute("aria-invalid"),null);
   assert.equal(await page.getByLabel("地址池结束地址",{exact:true}).getAttribute("aria-invalid"),"true");
  } finally {await context.close();}
+});
+
+test("secret clearing is explicit, reversible, and cancelled by a replacement value",async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.plugins ||= {};cfg.plugins.tailscale={enable:false,config:{authKey:"saved-auth-key"}};
+  await putConfig(context,cfg);await navigate(page,"plugins/tailscale");
+  const clear=page.getByLabel("清空认证密钥",{exact:true});
+  assert.equal(await clear.count(),1);
+  await clear.check();await clear.uncheck();await waitAction(page,"#apply-save");
+  assert.equal((await configOf(context)).plugins.tailscale.config.authKey,"saved-auth-key");
+  await clear.check();await page.getByLabel("认证密钥",{exact:true}).fill("replacement-key");
+  assert.equal(await clear.isChecked(),false);await waitAction(page,"#apply-save");
+  assert.equal((await configOf(context)).plugins.tailscale.config.authKey,"replacement-key");
+  await clear.check();await waitAction(page,"#apply-save");
+  assert.equal((await configOf(context)).plugins.tailscale.config.authKey,"");
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("secret clearing follows an array item after deleting its preceding row",async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.wifi.aps=[{ssid:"first",psk:"first-password",enable:false},{ssid:"second",psk:"second-password",enable:false}];
+  await putConfig(context,cfg);await navigate(page,"wifi");
+  const clear=page.getByLabel("清空无线密码",{exact:true});assert.equal(await clear.count(),2);
+  await clear.nth(1).check();await page.getByRole("button",{name:"删除接入点第 1 项",exact:true}).click();
+  assert.equal(await clear.first().isChecked(),true);await waitAction(page,"#apply-save");
+  const saved=(await configOf(context)).wifi.aps;assert.equal(saved.length,1);assert.equal(saved[0].ssid,"second");assert.equal(saved[0].psk ?? "","");
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("secret clearing in advanced JSON follows its reference when rows are reordered",async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.plugins ||= {};
+  cfg.plugins["clear.plugin"]={enable:false,config:{peers:[{name:"a","token.with/slash":"secret-a"},{name:"b","token.with/slash":"secret-b"}]}};
+  await putConfig(context,cfg);await navigate(page,"plugins/clear.plugin");
+  const choice=page.getByLabel("清空密钥：peers.1.token.with/slash",{exact:true});assert.equal(await choice.count(),1);await choice.check();
+  const json=page.getByLabel("高级配置（JSON）");const data=JSON.parse(await json.inputValue());
+  const duplicate=structuredClone(data);duplicate.peers.push(structuredClone(data.peers[1]));
+  await json.fill(JSON.stringify(duplicate));
+  assert.match(await json.evaluate(el=>el.validationMessage),/待清空密钥的标记被复制/);
+  assert.equal((await configOf(context)).plugins["clear.plugin"].config.peers[1]["token.with/slash"],"secret-b");
+  data.peers.reverse();await json.fill(JSON.stringify(data));
+  assert.equal(await json.evaluate(el=>el.validationMessage),"");
+  assert.equal(await page.getByLabel("清空密钥：peers.0.token.with/slash",{exact:true}).isChecked(),true);
+  await waitAction(page,"#apply-save");const saved=(await configOf(context)).plugins["clear.plugin"].config.peers;
+  assert.equal(saved[0].name,"b");assert.equal(saved[0]["token.with/slash"],"");assert.equal(saved[1]["token.with/slash"],"secret-a");
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("secret clearing retains intent on validation failure and succeeds after disabling its use",async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.wan.mode="pppoe";cfg.wan.pppoe={username:"user",password:"required-password"};
+  await putConfig(context,cfg);await navigate(page,"wan");
+  const clear=page.getByLabel("清空PPPoE 密码",{exact:true});assert.equal(await clear.count(),1);await clear.check();await waitAction(page,"#apply-save");
+  assert.equal(await clear.isChecked(),true);assert.equal(await page.locator("#apply-dirty").isVisible(),true);
+  assert.equal((await configOf(context)).wan.pppoe.password,"required-password");
+  assert.equal(await page.getByLabel("PPPoE 密码",{exact:true}).getAttribute("aria-invalid"),"true");
+  await page.getByLabel("上网方式",{exact:true}).selectOption("dhcp");await waitAction(page,"#apply-save");
+  assert.equal((await configOf(context)).wan.pppoe.password,"");
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("advanced array blank preserves secrets and ambiguous edits retain input", async () => {
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.plugins ||= {};
+  cfg.plugins.arrayblank={enable:false,config:{peers:[{name:"a",token:"saved-token"},{name:"b",token:""}]}};
+  await putConfig(context,cfg);await navigate(page,"plugins/arrayblank");
+  let json=page.getByLabel("高级配置（JSON）");let data=JSON.parse(await json.inputValue());
+  data.peers[0].token="";data.peers.reverse();await json.fill(JSON.stringify(data));await waitAction(page,"#apply-save");
+  let stored=(await configOf(context)).plugins.arrayblank.config.peers;
+  assert.equal(stored[0].token,"");assert.equal(stored[1].token,"saved-token");
+  json=page.getByLabel("高级配置（JSON）");data=JSON.parse(await json.inputValue());
+  data.peers[1].name="changed";data.peers[1].token="****";const edited=JSON.stringify(data);
+  await json.fill(edited);await waitAction(page,"#apply-save");
+  assert.equal(await json.inputValue(),edited);
+  assert.equal((await configOf(context)).plugins.arrayblank.config.peers[1].token,"saved-token");
+  assert.equal(await page.locator("#apply-dirty").isVisible(),true);
+ } finally {await putConfig(context,original);await context.close();}
 });
