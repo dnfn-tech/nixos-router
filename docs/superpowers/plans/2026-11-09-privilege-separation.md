@@ -96,3 +96,9 @@ socket 初始权限 0600；不同 UID 的访问权限由后续特权 daemon 在�
 - 两处 Nix Go 包入口均包含 routerd 和 router-executor；两个二进制以 `-buildvcs=false` 本地构建通过。
 - 固定 `/v1/leases` 只读查询由执行器读取其专用 dnsmasq.leases，拒绝调用方参数、symlink、特殊文件及超过 1 MiB 的内容。API 不读取私有 executor 目录；空文件返回真实空集合，文件缺失/不可读明确 503。新增 managed/RPC/API 回归先失败再通过；legacy 解析复用共享解析器。
 - 全量 Go 回归通过，新增租约和 API 权限边界定向 race 通过；新增功能仅在代码/真实本地 IPC 层验证，尚未完成服务账户分离、升级迁移、无线观测代理和跨 UID VM。
+
+### 检查点 a75b14a 的补充验证
+
+- `nix eval --impure --json --file tests/module-managed.nix` 全部断言通过；这里仍验证原服务布局，不等同于完成分权部署。
+- `nix build .#routerd --no-link --print-out-paths` 成功，产物为 `/nix/store/45fvh4j0h9vrn3qhz2yrwlv6zcc4mjj4-routerd-0.1.0`，包含 routerd 和 router-executor。未切换 NixOS 系统或启动此包服务。
+- 最新后端配合独立临时状态运行 `npm run test:web`：34/34 通过；`go vet` 定向包通过。现有浏览器用例验证兼容性，不替代待补的真实分权服务/跨 UID VM 验证。
