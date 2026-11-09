@@ -206,3 +206,12 @@ nix build .#routerd
 
 
 - 直接消费 nft 使用 `routerd_filter` / `routerd_tmp` / `routerd_nat` 专属表并原子替换，跳过 nftables 单元 reload。旧实验版本的通用表及快照需按 backend/README.md 的升级说明人工迁移。
+
+
+## 配置版本与并发写入
+
+保存的 JSON 使用 `schemaVersion: 1` 和不透明的 `revision`。旧的无版本草稿首次加载时先以原始字节写入 `config.json.v0.bak`（0600），再原子迁移；备份冲突、未知字段、重复键和未来版本会拒绝迁移，保留原文件。last-good 等运行快照只读加载，不因观察而迁移。
+
+API 调用者先 `GET /api/v1/config`，保留响应的完整 `ETag`，再将它作为写请求的 `If-Match`。`PUT /config`、插件配置、设备 PATCH 和备份恢复共享同一个修订；成功返回新 ETag。缺失条件返回 428/config_revision_required，过期条件返回 409/config_conflict。不得收到 409 后自动取新修订并重发旧内容；应重新加载、核对再保存。
+
+旧 JSON/备份格式继续可导入，但无条件写 API 不再接受。这是为了阻止旧调用者静默覆盖新配置；集成脚本须同步增加 GET/If-Match。Web 自动携带编辑开始时的修订，冲突时保留输入。恢复备份也生成新修订，不重用备份中的旧身份。managed apply 作业记录其捕获的 configRevision。

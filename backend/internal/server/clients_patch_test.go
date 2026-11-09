@@ -23,7 +23,7 @@ func TestPatchClientHostnameAndBlock(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/clients/AA%3ABB%3ACC%3ADD%3AEE%3A01", bytes.NewReader(bs))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, withConfigRevision(srv, req))
 	if w.Code != http.StatusOK {
 		t.Fatalf("patch hostname failed: %d %s", w.Code, w.Body.String())
 	}
@@ -33,14 +33,14 @@ func TestPatchClientHostnameAndBlock(t *testing.T) {
 	req2 := httptest.NewRequest(http.MethodPatch, "/api/v1/clients/AA%3ABB%3ACC%3ADD%3AEE%3A01", bytes.NewReader(bs2))
 	req2.Header.Set("Content-Type", "application/json")
 	w2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w2, req2)
+	srv.Handler().ServeHTTP(w2, withConfigRevision(srv, req2))
 	if w2.Code != http.StatusOK {
 		t.Fatalf("patch block failed: %d %s", w2.Code, w2.Body.String())
 	}
 	// GET clients should show blocked and hostname
 	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
 	w3 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w3, req3)
+	srv.Handler().ServeHTTP(w3, withConfigRevision(srv, req3))
 	if w3.Code != http.StatusOK {
 		t.Fatalf("get clients failed: %d", w3.Code)
 	}
@@ -64,4 +64,3 @@ func TestPatchClientHostnameAndBlock(t *testing.T) {
 		t.Fatalf("client not found after patch")
 	}
 }
-

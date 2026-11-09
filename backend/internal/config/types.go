@@ -17,6 +17,8 @@ const (
 
 // Root configuration describing the intended network state.
 type Config struct {
+	SchemaVersion int `json:"schemaVersion,omitempty"`
+	Revision string `json:"revision,omitempty"`
 	System   SystemConfig            `json:"system"`
 	WAN      WANConfig               `json:"wan"`
 	LAN      LANConfig               `json:"lan"`
@@ -261,6 +263,9 @@ func DefaultConfig() Config {
 
 // Validate returns an error describing the first invalid setting encountered.
 func (c *Config) Validate() error {
+	if err := c.validateDocumentMetadata(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.System.Hostname) == "" {
 		return errors.New("system.hostname must not be empty")
 	}
@@ -497,17 +502,17 @@ func SaveToFile(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+	tmp, err := writeSyncedTemp(path, append(data, '\n'))
+	if err != nil {
 		return err
 	}
+	defer os.Remove(tmp)
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	return nil
+	return syncConfigDirectory(path)
 }
-

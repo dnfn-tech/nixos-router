@@ -24,7 +24,8 @@ func (s *Server) reconcileRemoteJob(ctx context.Context, j db.Job) (db.Job, erro
 		return j, nil
 	}
 	var marker struct {
-		Executor bool `json:"executor"`
+		Executor       bool   `json:"executor"`
+		ConfigRevision string `json:"configRevision"`
 	}
 	if json.Unmarshal([]byte(j.Payload), &marker) != nil || !marker.Executor {
 		return j, nil
@@ -55,7 +56,7 @@ func (s *Server) reconcileRemoteJob(ctx context.Context, j db.Job) (db.Job, erro
 	if status == "interrupted" {
 		status = "failed"
 	}
-	payload := map[string]interface{}{"jobId": j.ID, "mode": "managed-runtime", "executor": true, "status": status, "executorStatus": remote.Status, "stage": remote.Result.Stage, "appliedRuntime": remote.Status == "success", "rollbackStatus": remote.Result.RollbackStatus, "warnings": remote.Result.Warnings}
+	payload := map[string]interface{}{"jobId": j.ID, "mode": "managed-runtime", "executor": true, "configRevision": marker.ConfigRevision, "status": status, "executorStatus": remote.Status, "stage": remote.Result.Stage, "appliedRuntime": remote.Status == "success", "rollbackStatus": remote.Result.RollbackStatus, "warnings": remote.Result.Warnings}
 	if remote.Error != "" {
 		payload["error"] = remote.Error
 	}
@@ -77,9 +78,13 @@ func (s *Server) reconcileRemoteJob(ctx context.Context, j db.Job) (db.Job, erro
 // later query may still reveal the real result. Never replay or overwrite it.
 func unknownRemoteJob(j db.Job, reason string) db.Job {
 	j.Status = "unknown"
+	var original struct {
+		ConfigRevision string `json:"configRevision"`
+	}
+	_ = json.Unmarshal([]byte(j.Payload), &original)
 	body, _ := json.Marshal(map[string]interface{}{
 		"jobId": j.ID, "mode": "managed-runtime", "executor": true,
-		"status": "unknown", "stage": "outcome-unknown", "executorStatus": reason,
+		"configRevision": original.ConfigRevision, "status": "unknown", "stage": "outcome-unknown", "executorStatus": reason,
 		"warnings": []string{"执行结果尚未确认，请刷新作业记录并核对实际运行配置；系统不会自动重试应用。"},
 	})
 	j.Payload = string(body)

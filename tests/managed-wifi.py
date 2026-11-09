@@ -13,6 +13,9 @@ COOKIE = "/root/wifi-cookie"
 
 def api(method, path, body=None):
     command = f"curl --max-time 30 -fsS -b {COOKIE} -H 'Content-Type: application/json' -X {method}"
+    if method in ("PUT", "PATCH") or path == "/backup/restore":
+        revision = api("GET", "/config")["config"]["revision"]
+        command += " -H " + shlex.quote("If-Match: " + json.dumps(revision))
     if body is not None:
         command += " --data-binary " + shlex.quote(json.dumps(body))
     result = machine.succeed(command + " " + shlex.quote(BASE + path))

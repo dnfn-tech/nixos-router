@@ -249,7 +249,7 @@ func loadStartupConfig(opts config.LoadOptions, managedMode bool) (config.Config
 	var err error
 	if managedMode {
 		// Do not let LoadOrDefault hide a deleted draft or overwrite it via seeding.
-		cfg, err = config.LoadFromFile(path)
+		cfg, err = config.LoadDraft(path)
 	} else {
 		cfg, path, err = config.LoadOrDefault(opts)
 	}
@@ -275,6 +275,10 @@ func loadStartupConfig(opts config.LoadOptions, managedMode bool) (config.Config
 			return cfg, path, "", err
 		}
 		return cfg, path, "", fmt.Errorf("draft invalid: %v; last-good unavailable: %w", err, goodErr)
+	}
+	good, goodErr = config.WithNewRevision(good)
+	if goodErr != nil {
+		return cfg, path, "", goodErr
 	}
 	return good, path, "Saved draft is missing or invalid; restored last-good. Repair and save configuration before applying.", nil
 }

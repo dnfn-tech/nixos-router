@@ -167,6 +167,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
 	mux.HandleFunc("/api/v1/ui/nav", s.handleUINav)
 	mux.HandleFunc("/api/v1/plugins", s.handlePlugins)
+	mux.HandleFunc("/api/v1/plugins/", s.handlePlugins)
 	mux.HandleFunc("/api/v1/clients", s.handleClients)
 	mux.HandleFunc("/api/v1/clients/", s.handleClientItem)
 	mux.HandleFunc("/api/v1/capabilities/wifi", s.handleWifiCaps)
@@ -477,6 +478,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		cfg := s.configSnapshot()
+		w.Header().Set("ETag", strconv.Quote(cfg.Revision))
 		if redact {
 			cfg = cfg.RedactedCopy()
 		}
@@ -491,20 +493,16 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		var wrapper struct {
-			Config *config.Config `json:"config"`
-		}
-		var newCfg config.Config
-		if err := json.Unmarshal(body, &wrapper); err == nil && wrapper.Config != nil {
-			newCfg = *wrapper.Config
-		} else {
-			if err := json.Unmarshal(body, &newCfg); err != nil {
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
+		newCfg, err := config.DecodeDocument(body)
+		if err != nil {
+			http.Error(w, "invalid configuration JSON", http.StatusBadRequest)
+			return
 		}
 		s.cfgMu.Lock()
 		defer s.cfgMu.Unlock()
+		if !s.checkConfigRevisionLocked(w, r) {
+			return
+		}
 		// Preserve secrets if placeholders or empty are provided
 		newCfg = s.mergeSecrets(s.cfg, newCfg)
 		if err := newCfg.Validate(); err != nil {
@@ -514,7 +512,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// persist
-		if err := config.SaveToFile(s.cfgPath, newCfg); err != nil {
+		if err := s.saveConfigLocked(w, &newCfg); err != nil {
 			http.Error(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
@@ -860,12 +858,16 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 			Enabled *bool                  `json:"enabled"`
 			Config  map[string]interface{} `json:"config"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		data, readErr := io.ReadAll(r.Body)
+		if readErr != nil || config.DecodeStrictJSON(data, &body) != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		s.cfgMu.Lock()
 		defer s.cfgMu.Unlock()
+		if !s.checkConfigRevisionLocked(w, r) {
+			return
+		}
 		cfg := cloneConfig(s.cfg)
 		cur := cfg.Plugins[id]
 		// Merge config with secret-preserve
@@ -880,7 +882,7 @@ func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg.Plugins[id] = cur
 		// persist
-		if err := config.SaveToFile(s.cfgPath, cfg); err != nil {
+		if err := s.saveConfigLocked(w, &cfg); err != nil {
 			http.Error(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
@@ -1001,12 +1003,16 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 		Hostname *string `json:"hostname"`
 		Blocked  *bool   `json:"blocked"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	data, readErr := io.ReadAll(r.Body)
+	if readErr != nil || config.DecodeStrictJSON(data, &body) != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
+	if !s.checkConfigRevisionLocked(w, r) {
+		return
+	}
 	cfg := cloneConfig(s.cfg)
 	// update static lease hostname
 	found := false
@@ -1049,7 +1055,7 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": []string{err.Error()}})
 		return
 	}
-	if err := config.SaveToFile(s.cfgPath, cfg); err != nil {
+	if err := s.saveConfigLocked(w, &cfg); err != nil {
 		http.Error(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
@@ -1540,37 +1546,32 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 		defer file.Close()
 		data, _ := io.ReadAll(file)
-		var wrapper struct {
-			Config *config.Config `json:"config"`
-		}
-		if json.Unmarshal(data, &wrapper) == nil && wrapper.Config != nil {
-			newCfg = *wrapper.Config
-		} else if json.Unmarshal(data, &newCfg) != nil {
+		newCfg, err = config.DecodeDocument(data)
+		if err != nil {
 			http.Error(w, "invalid JSON in backup", http.StatusBadRequest)
 			return
 		}
 	} else {
 		// JSON body: either {config:{...}} or raw config object
 		body, _ := io.ReadAll(r.Body)
-		var wrapper struct {
-			Config *config.Config `json:"config"`
-		}
-		if json.Unmarshal(body, &wrapper) == nil && wrapper.Config != nil {
-			newCfg = *wrapper.Config
-		} else if json.Unmarshal(body, &newCfg) != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+		newCfg, err = config.DecodeDocument(body)
+		if err != nil {
+			http.Error(w, "invalid configuration JSON", http.StatusBadRequest)
 			return
 		}
 	}
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
+	if !s.checkConfigRevisionLocked(w, r) {
+		return
+	}
 	// Secret-aware merge to preserve placeholders if present
 	newCfg = s.mergeSecrets(s.cfg, newCfg)
 	if err = newCfg.Validate(); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": []string{err.Error()}})
 		return
 	}
-	if err := config.SaveToFile(s.cfgPath, newCfg); err != nil {
+	if err := s.saveConfigLocked(w, &newCfg); err != nil {
 		http.Error(w, "failed to save config", http.StatusInternalServerError)
 		return
 	}
@@ -1680,7 +1681,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	if s.applyReload {
 		jobMode = "generate+reload"
 	}
-	if err := s.db.CreateJob(jid, "apply", fmt.Sprintf(`{"mode":"%s"}`, jobMode)); err != nil {
+	if err := s.db.CreateJob(jid, "apply", fmt.Sprintf(`{"mode":%q,"configRevision":%q}`, jobMode, cfg.Revision)); err != nil {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}

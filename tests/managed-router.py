@@ -15,6 +15,9 @@ for node in [client, observer]:
 base = "http://192.168.50.1:8080/api/v1"
 def api(method, path, body=None):
     args = "curl --connect-timeout 3 --max-time 20 -fsS -b /tmp/cookie -c /tmp/cookie -X " + method
+    if method in ("PUT", "PATCH") or path == "/backup/restore":
+        revision = api("GET", "/config")["config"]["revision"]
+        args += " -H " + shlex.quote("If-Match: " + json.dumps(revision))
     if body is not None:
         args += " -H 'Content-Type: application/json' --data " + shlex.quote(json.dumps(body))
     return json.loads(client.succeed(args + " " + shlex.quote(base + path)))
@@ -26,7 +29,9 @@ cfg = api("GET", "/config")["config"]
 
 def apply(config, success=True):
     api("PUT", "/config", config)
+    revision = api("GET", "/config")["config"]["revision"]
     job = api("POST", "/apply")
+    assert job["configRevision"] == revision, job
     assert job["appliedRuntime"] is False, job
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
@@ -39,6 +44,7 @@ def apply(config, success=True):
         if result["status"] in ("success", "failed"):
             assert (result["status"] == "success") == success, result
             payload = json.loads(result["payload"]) if isinstance(result["payload"], str) else result["payload"]
+            assert payload["configRevision"] == revision, result
             if success:
                 assert payload["stage"] in ("complete", "awaiting-wan-lease"), result
                 if payload["stage"] == "awaiting-wan-lease":

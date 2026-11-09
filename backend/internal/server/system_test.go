@@ -25,7 +25,7 @@ func TestPasswordChangeAndLogin(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/session", bytes.NewReader(bs))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, withConfigRevision(srv, req))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("login failed: %d", w.Code)
 	}
@@ -39,7 +39,7 @@ func TestPasswordChangeAndLogin(t *testing.T) {
 	}
 	req2.Header.Set("Content-Type", "application/json")
 	w2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w2, req2)
+	srv.Handler().ServeHTTP(w2, withConfigRevision(srv, req2))
 	if w2.Code != http.StatusOK {
 		t.Fatalf("change password failed: %d", w2.Code)
 	}
@@ -47,7 +47,7 @@ func TestPasswordChangeAndLogin(t *testing.T) {
 	req3 := httptest.NewRequest(http.MethodPost, "/api/v1/session", bytes.NewReader(bs))
 	req3.Header.Set("Content-Type", "application/json")
 	w3 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w3, req3)
+	srv.Handler().ServeHTTP(w3, withConfigRevision(srv, req3))
 	if w3.Code == http.StatusCreated {
 		t.Fatalf("old password should not work")
 	}
@@ -57,7 +57,7 @@ func TestPasswordChangeAndLogin(t *testing.T) {
 	req4 := httptest.NewRequest(http.MethodPost, "/api/v1/session", bytes.NewReader(bs2))
 	req4.Header.Set("Content-Type", "application/json")
 	w4 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w4, req4)
+	srv.Handler().ServeHTTP(w4, withConfigRevision(srv, req4))
 	if w4.Code != http.StatusCreated {
 		t.Fatalf("new password login failed: %d", w4.Code)
 	}
@@ -74,7 +74,7 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 	// backup
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/backup", nil)
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, withConfigRevision(srv, req))
 	if w.Code != http.StatusOK {
 		t.Fatalf("backup failed: %d", w.Code)
 	}
@@ -89,15 +89,17 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/backup/restore", bytes.NewReader(body))
 	req2.Header.Set("Content-Type", "application/json")
 	w2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w2, req2)
+	srv.Handler().ServeHTTP(w2, withConfigRevision(srv, req2))
 	if w2.Code != http.StatusOK {
 		t.Fatalf("restore failed: %d %s", w2.Code, w2.Body.String())
 	}
 	// GET should show new hostname (dev mode no auth)
 	req3 := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
 	w3 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w3, req3)
-	var resp struct{ Config config.Config `json:"config"` }
+	srv.Handler().ServeHTTP(w3, withConfigRevision(srv, req3))
+	var resp struct {
+		Config config.Config `json:"config"`
+	}
 	_ = json.Unmarshal(w3.Body.Bytes(), &resp)
 	if resp.Config.System.Hostname != "after" {
 		t.Fatalf("restore did not update hostname: %s", resp.Config.System.Hostname)
@@ -108,9 +110,8 @@ func TestRebootDisabledPath(t *testing.T) {
 	srv := New(Options{Config: config.DefaultConfig(), DevMode: true})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/system/reboot", nil)
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, withConfigRevision(srv, req))
 	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("expected 501 when reboot disabled, got %d", w.Code)
 	}
 }
-

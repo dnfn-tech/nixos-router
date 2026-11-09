@@ -317,12 +317,13 @@
   }
   async function api(
     path,
-    { method = "GET", body, raw = false, timeout = 12000 } = {},
+    { method = "GET", body, raw = false, timeout = 12000, revision } = {},
   ) {
     const controller = new AbortController(),
       timer = setTimeout(() => controller.abort(), timeout);
     try {
       const headers = { Accept: "application/json" };
+      if (revision !== undefined) headers["If-Match"] = JSON.stringify(revision);
       if (body && !(body instanceof FormData)) {
         headers["Content-Type"] = "application/json";
         body = JSON.stringify(body);
@@ -359,7 +360,10 @@
       }
       if (raw) return response;
       if (response.status === 204) return {};
-      return await response.json();
+      const data = await response.json();
+      const etag = response.headers.get("ETag");
+      if (etag) data.revision = JSON.parse(etag);
+      return data;
     } catch (error) {
       if (error.name === "AbortError") {
         const timeoutError = new Error(
@@ -476,7 +480,7 @@
   }
   function beginEditor(cfg, path) {
     const data = clone(get(cfg, path));
-    state.section = { path, data };
+    state.section = { path, data, base: clone(cfg), revision: cfg.revision };
     return data;
   }
   function editor(...cards) {
@@ -508,10 +512,12 @@
     state.busy = true;
     syncActions();
     try {
-      const latest = await api("/api/v1/config");
-      const cfg = clone(latest.config || latest);
+      const cfg = clone(section.base);
       set(cfg, section.path, candidate);
-      await api("/api/v1/config", { method: "PUT", body: cfg });
+      const result = await api("/api/v1/config", { method: "PUT", body: cfg, revision: section.revision });
+      cfg.revision = result.revision;
+      section.revision = result.revision;
+      section.base = clone(cfg);
       state.configCache = clone(cfg);
       state.pageDirty = false;
       state.pending = true;
@@ -1526,6 +1532,7 @@
     );
   }
   function editClient(client) {
+    const revision = state.configCache?.revision;
     const d = { hostname: client.hostname || "", blocked: !!(client.draftBlocked ?? client.blocked) };
     // This dialog owns its draft independently of the page configuration editor.
     const name = node("input", { id: "client-name", value: d.hostname }),
@@ -1547,6 +1554,7 @@
           await api(`/api/v1/clients/${encodeURIComponent(client.mac)}`, {
             method: "PATCH",
             body: { hostname: name.value, blocked: blocked.checked },
+            revision,
           });
           state.pending = true;
           close();
@@ -1633,7 +1641,7 @@
       ),
     );
     if (tab === "general") return stack(nav, coreEditor("system", cfg, status));
-    if (tab === "account") return stack(nav, accountPage());
+    if (tab === "account") return stack(nav, accountPage(cfg));
     if (tab === "diagnostics")
       return stack(
         nav,
@@ -1734,7 +1742,8 @@
       lists,
     );
   }
-  function accountPage() {
+  function accountPage(cfg) {
+    let revision = cfg.revision;
     const current = node("input", {
       id: "password-current",
       type: "password",
@@ -1846,7 +1855,8 @@
       try {
         const form = new FormData();
         form.append("file", file.files[0]);
-        await api("/api/v1/backup/restore", { method: "POST", body: form });
+        const result = await api("/api/v1/backup/restore", { method: "POST", body: form, revision });
+        revision = result.revision;
         state.configCache = null;
         state.pending = true;
         file.value = "";

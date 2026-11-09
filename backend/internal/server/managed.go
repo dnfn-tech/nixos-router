@@ -33,7 +33,7 @@ func (s *Server) handleManagedApply(w http.ResponseWriter, r *http.Request) {
 	}
 	id := newSessionID()
 	user, _, _ := s.getSession(r)
-	queued := map[string]interface{}{"mode": "managed-runtime", "appliedRuntime": false, "stage": "queued"}
+	queued := map[string]interface{}{"mode": "managed-runtime", "configRevision": cfg.Revision, "appliedRuntime": false, "stage": "queued"}
 	remote, durable := s.managedRuntime.(remoteRuntime)
 	if durable {
 		queued["executor"] = true
@@ -44,7 +44,7 @@ func (s *Server) handleManagedApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot create apply job", 500)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]interface{}{"jobId": id, "mode": "managed-runtime", "status": "running", "appliedRuntime": false})
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{"jobId": id, "mode": "managed-runtime", "configRevision": cfg.Revision, "status": "running", "appliedRuntime": false})
 	// Deliver the job identifier before activation can change the LAN address.
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
@@ -71,7 +71,7 @@ func (s *Server) handleManagedApply(w http.ResponseWriter, r *http.Request) {
 			status = "failed"
 			message = runErr.Error()
 		}
-		payload := map[string]interface{}{"jobId": id, "mode": "managed-runtime", "status": status, "stage": result.Stage, "appliedRuntime": runErr == nil, "rollbackStatus": result.RollbackStatus, "warnings": result.Warnings}
+		payload := map[string]interface{}{"jobId": id, "mode": "managed-runtime", "configRevision": cfg.Revision, "status": status, "stage": result.Stage, "appliedRuntime": runErr == nil, "rollbackStatus": result.RollbackStatus, "warnings": result.Warnings}
 		if durable {
 			payload["executor"] = true
 		}

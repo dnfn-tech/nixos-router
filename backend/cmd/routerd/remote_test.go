@@ -29,6 +29,9 @@ func TestRemoteStartupPreservesCorruptDraft(t *testing.T) {
 	if err != nil || warning == "" || got.System.Hostname != "applied-router" {
 		t.Fatalf("fallback %v %q %v", got.System, warning, err)
 	}
+	if got.Revision == "" || got.SchemaVersion != config.CurrentSchemaVersion {
+		t.Fatal("fallback draft cannot be conditionally repaired")
+	}
 	b, _ := os.ReadFile(path)
 	if string(b) != "broken draft" {
 		t.Fatal("draft overwritten")

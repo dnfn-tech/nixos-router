@@ -25,7 +25,7 @@ type appliedReader interface {
 
 func loadRemoteStartupConfig(opts config.LoadOptions, runtime appliedReader) (config.Config, string, string, error) {
 	_, path := config.ResolvePaths(opts)
-	cfg, err := config.LoadFromFile(path)
+	cfg, err := config.LoadDraft(path)
 	if err == nil {
 		err = cfg.Validate()
 	}
@@ -40,6 +40,12 @@ func loadRemoteStartupConfig(opts config.LoadOptions, runtime appliedReader) (co
 	}
 	if readErr = applied.Validate(); readErr != nil {
 		return cfg, path, "", fmt.Errorf("invalid executor snapshot: %w", readErr)
+	}
+	// Give this repair view its own identity; never reuse the runtime revision
+	// as the editable draft identity after a restart or damaged saved intent.
+	applied, readErr = config.WithNewRevision(applied)
+	if readErr != nil {
+		return cfg, path, "", readErr
 	}
 	return applied, path, "Saved draft is missing or invalid; showing executor's applied configuration. Repair and save before applying.", nil
 }

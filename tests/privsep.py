@@ -11,6 +11,9 @@ base = "http://127.0.0.1:8080/api/v1"
 
 def api(method, path, body=None):
     command = "curl -fsS --max-time 10 -b /run/legacy-cookie -c /run/legacy-cookie -X " + method
+    if method in ("PUT", "PATCH") or path == "/backup/restore":
+        revision = api("GET", "/config")["config"]["revision"]
+        command += " -H " + shlex.quote("If-Match: " + json.dumps(revision))
     if body is not None:
         command += " -H 'Content-Type: application/json' --data " + shlex.quote(json.dumps(body))
     return json.loads(machine.succeed(command + " " + shlex.quote(base + path)))

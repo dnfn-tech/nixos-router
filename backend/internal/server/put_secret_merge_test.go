@@ -46,7 +46,7 @@ func TestPutConfigPreservesSecrets(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/config", bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, withConfigRevision(srv, req))
 	if w.Code != http.StatusOK {
 		t.Fatalf("put failed: %d %s", w.Code, w.Body.String())
 	}
@@ -85,7 +85,7 @@ func TestPutConfigPreservesPluginSecrets(t *testing.T) {
 		req.AddCookie(cookie)
 	}
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, withConfigRevision(srv, req))
 	if w.Code != http.StatusOK {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}

@@ -94,8 +94,8 @@ func TestConcurrentManagementRequests(t *testing.T) {
 			for i := 0; i < 12; i++ {
 				r := httptest.NewRequest(route.method, route.path, bytes.NewBufferString(route.body))
 				w := httptest.NewRecorder()
-				h.ServeHTTP(w, r)
-				if w.Code != route.code && !(route.path == "/api/v1/session" && w.Code == 429) {
+				h.ServeHTTP(w, withConfigRevision(s, r))
+				if w.Code != route.code && !(w.Code == 409 && route.method != "GET") && !(route.path == "/api/v1/session" && w.Code == 429) {
 					t.Errorf("%s %s: %d %s", route.method, route.path, w.Code, w.Body.String())
 				}
 			}
@@ -161,7 +161,7 @@ func TestClientPatchFailureDoesNotPublish(t *testing.T) {
 	// A directory at the save destination forces persistence to fail, even as root.
 	s.cfgPath = t.TempDir()
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest("PATCH", "/api/v1/clients/AA:BB:CC:DD:EE:01", bytes.NewBufferString(`{"hostname":"not-saved","blocked":true}`)))
+	s.Handler().ServeHTTP(w, withConfigRevision(s, httptest.NewRequest("PATCH", "/api/v1/clients/AA:BB:CC:DD:EE:01", bytes.NewBufferString(`{"hostname":"not-saved","blocked":true}`))))
 	if w.Code != 500 {
 		t.Fatalf("got %d: %s", w.Code, w.Body.String())
 	}

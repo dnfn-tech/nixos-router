@@ -369,6 +369,7 @@ async function configOf(context) {
 async function putConfig(context, config) {
   const r = await context.request.put(`${base}/api/v1/config`, {
     data: config,
+    headers: { "If-Match": JSON.stringify((await configOf(context)).revision) },
   });
   assert.equal(r.status(), 200, await r.text());
 }
@@ -1243,3 +1244,30 @@ for (const persistent of [false, true]) {
     } finally { await context.close(); }
   });
 }
+
+test("two editors reject stale saves and retain input until explicit reload", async () => {
+  const first = await pageAt("plugins");
+  const second = await pageAt("plugins");
+  const original = await configOf(first.context);
+  try {
+    await navigate(first.page, "system");
+    await navigate(second.page, "system");
+    await first.page.getByLabel("主机名", { exact: true }).fill("first-editor");
+    await second.page.getByLabel("主机名", { exact: true }).fill("second-editor");
+    await waitAction(first.page, "#apply-save");
+    await waitAction(second.page, "#apply-save");
+    assert.match(await second.page.locator("#apply-msg").innerText(), /其他会话修改/);
+    assert.equal(await second.page.getByLabel("主机名", { exact: true }).inputValue(), "second-editor");
+    assert.equal(await second.page.locator("#apply-dirty").isVisible(), true);
+    assert.equal((await configOf(first.context)).system.hostname, "first-editor");
+    await navigate(second.page, "plugins");
+    await navigate(second.page, "system");
+    await second.page.getByLabel("主机名", { exact: true }).fill("second-editor");
+    await waitAction(second.page, "#apply-save");
+    assert.equal((await configOf(first.context)).system.hostname, "second-editor");
+  } finally {
+    await putConfig(first.context, original);
+    await first.context.close();
+    await second.context.close();
+  }
+});
