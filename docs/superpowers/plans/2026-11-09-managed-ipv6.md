@@ -34,7 +34,7 @@ Interfaces: `parseDelegatedPrefixes(string) ([]ipv6Delegation, error)`；`ipv6De
 ## Task 2: 完整协议事件和生命周期
 
 Files: `backend/internal/managed/ipv6_event.go` / tests、`ipv6_runtime.go` / tests、受限回调命令入口、manager.go、modules/managed.nix。
-- [ ] 解析 ADDRESSES/RA_ADDRESSES/RA_ROUTES/RDNSS/RA_DNS/RA_MTU，明确时间单位、失效及输入上限；禁止 IPv4、任意 zone 和 shell 文本。
+- [x] 解析 ADDRESSES/RA_ADDRESSES/RA_ROUTES/RDNSS/RA_DNS/RA_MTU，明确时间单位、失效及输入上限；禁止 IPv4、任意 zone 和 shell 文本。
 - [ ] generation/接口绑定、root 私有状态与回调串行化；只维护授权资源，显式记录已安装状态，不能宽泛 flush 非归属路由。
 - [ ] odhcp6c 启停、SLAAC/IA_NA/PD 获取、更新与撤销；寿命交给内核或有界到期调度；DNS 与 IPv4 独立文件再统一提供 dnsmasq。
 - [ ] PPP IPv6CP、PPP 断线/重连联动和 IPv6 MSS 上限；不把 RA 默认路由或 IPv6CP 完成误认为互联网可达。
@@ -68,3 +68,8 @@ Files: `tests/vm-managed-ipv6.nix`、`tests/managed-ipv6.py`、flake/CI、测试
 - 解析支持三字段及带T1/T2的五字段、十六进制class、单个excluded；输入64KiB/128项上限，重复冲突整事件拒绝，错误不回显网络输入。保留valid=0撤销记录和preferred=0弃用记录；/64选择不遍历大地址空间，排除更小子段时跳过整个/64。
 - nixpkgs评估96072退出0：odhcp6c版本0-unstable-2026-06-27，src=/nix/store/6h5dmzqh1c8as4n063zmc1zda94riqf1-odhcp6c-10a5222。此source尚未realize，本轮协议格式核对来自上游README/script.c；接入前仍需核对锁定版本实际输出/参数。
 - 当前仅纯函数及测试，无命令执行、无配置能力放开、无网络部署。Task2–4尚未完成；下一步处理地址/RA路由/DNS事件解析及受限回调生命周期，不能跳过更新、撤销、寿命及旧generation测试。
+
+- 2026-11-10 Task2协议解析部分完成，生命周期尚未接入。锁定客户端源码通过临时GC root /tmp/router-ipv6-odhcp6c-source保留（首次无root构建后路径已消失；86580已退出0）。src/script.c已核对三/五字段、RA_DNS纯地址、RA_ROUTES四字段及有效期0撤销；odhcp6c.c已核对unbound发生在清除IA状态之前，RDNSS可能仍旧，而RA仍有用，运行态必须按来源和事件清理。
+- 新增ipv6_event.go/test：保留DHCP/RA地址及DNS来源，保留地址host bits、零寿命、无限寿命和多个网关；整个事件64KiB，每列表128项；冲突重复整事件拒绝；路由网关仅允许无zone的link-local地址，DNS允许global/link-local但不能loopback/unspecified/multicast/IPv4；未知环境项不参与执行。
+- RED /tmp/router-ipv6-event-red.log：未定义parseIPv6Event；GREEN /tmp/router-ipv6-event-green.log：定向0.005s。额外边界RED /tmp/router-ipv6-event-network-red.log证明地址2001:db8::1/0被错误接受；修复同时验证所属网络，保持host bits不变。最终完整managed race55926退出0，5.485s（/tmp/router-ipv6-event-final-race.log），vet/diff退出0。
+- 下一步是Task2运行态：generation内还没有回调所需的受限上下文，需要渲染独立IPv6上下文和环境（不复制PPP凭据），记录已安装资源，回调在私有锁内再次验证current generation/接口；manager先停止协议服务，再锁定清理/切换，避免systemctl等待回调时持锁死锁。unbound清DHCP来源，保留仍有效RA；stopped清全部本代IPv6资源。不得只完成解析就宣称IPv6可用。
