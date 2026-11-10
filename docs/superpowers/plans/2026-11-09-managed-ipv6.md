@@ -73,3 +73,11 @@ Files: `tests/vm-managed-ipv6.nix`、`tests/managed-ipv6.py`、flake/CI、测试
 - 新增ipv6_event.go/test：保留DHCP/RA地址及DNS来源，保留地址host bits、零寿命、无限寿命和多个网关；整个事件64KiB，每列表128项；冲突重复整事件拒绝；路由网关仅允许无zone的link-local地址，DNS允许global/link-local但不能loopback/unspecified/multicast/IPv4；未知环境项不参与执行。
 - RED /tmp/router-ipv6-event-red.log：未定义parseIPv6Event；GREEN /tmp/router-ipv6-event-green.log：定向0.005s。额外边界RED /tmp/router-ipv6-event-network-red.log证明地址2001:db8::1/0被错误接受；修复同时验证所属网络，保持host bits不变。最终完整managed race55926退出0，5.485s（/tmp/router-ipv6-event-final-race.log），vet/diff退出0。
 - 下一步是Task2运行态：generation内还没有回调所需的受限上下文，需要渲染独立IPv6上下文和环境（不复制PPP凭据），记录已安装资源，回调在私有锁内再次验证current generation/接口；manager先停止协议服务，再锁定清理/切换，避免systemctl等待回调时持锁死锁。unbound清DHCP来源，保留仍有效RA；stopped清全部本代IPv6资源。不得只完成解析就宣称IPv6可用。
+
+- 2026-11-10 Task2继续：ipv6_lease.go实现协议来源状态转换与保守重放寿命；unbound清DHCP地址/PD/DNS保留RA，started/stopped清全部；RA合并通知含完整地址/PD可恢复绑定标记，单独旧RDNSS不够。重放扣除向上取整的已过秒数，保留无限寿命和撤销项；旧时间观察拒绝。DNS导出没有TTL，重放不发明DNS寿命，应等待新协议回调（at仅用于重放，不等价新回调的DNS处理）。资源是否已安装必须由另一个journal表示，不能把lease当作成功执行证明。
+- 新增ipv6_generation.go与测试：候选目录生成不含秘密的ipv6-context.json；回调通过当前代次/物理接口allowlist/实际WAN/桥名检查，在私有flock内运行。上下文拒绝symlink/hardlink/非0600/非当前进程所有者/超16KiB；代次目录拒绝symlink及非私有目录。root入口仍必须先调用现有privsep状态祖先校验，不将非root单元测试视为root边界已接入。
+- switchFiles已实际接入同一锁，等待上限20秒且支持调用方取消；不会在systemctl stop时持锁。并发测试证明回调持锁时切换超时、释放后切换成功、旧回调不执行。未添加协议服务或开放IPv6能力。
+- RED：/tmp/router-ipv6-lease-red.log及/router-ipv6-generation-red.log（后者完整路径/tmp/router-ipv6-generation-red.log）观察缺实现；/tmp/router-ipv6-lease-order-red.log观察旧事件覆盖新状态。定向GREEN及完整managed回归4.074s；最终managed race29185退出0，7.910s（/tmp/router-ipv6-generation-final2-race.log），vet/diff通过。最终全量Go30977运行中，日志/tmp/router-ipv6-generation-final-go.log；先poll，不重复启动。
+- 下一步必须接实际资源journal/命令reconcile：写前记录旧+候选资源以容忍回调SIGTERM，失败不宣称已安装，按精确资源撤销而非全接口flush；generation切换在锁内先清理已记录IPv6资源。然后接root回调入口、专属odhcp6c/Nix服务。仍需LAN通告、防火墙与真实VM，不再仅凭解析或锁测试宣称Task2完成。
+
+- 最终全量Go30977已终态退出0（/tmp/router-ipv6-generation-final-go.log）。本轮生命周期/代次保护基础可提交，Task2资源命令和服务接线仍未完成；尚未为此基础变更运行VM。当前无存活测试进程。

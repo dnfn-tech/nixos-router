@@ -400,6 +400,13 @@ func (m *Manager) prepare(ctx context.Context, c config.Config) (string, error) 
 			return "", e
 		}
 	}
+	ipv6Context, e := json.Marshal(ipv6ContextFor(c))
+	if e != nil {
+		return "", e
+	}
+	if e = atomicFile(filepath.Join(dir, "ipv6-context.json"), ipv6Context); e != nil {
+		return "", e
+	}
 	if e = m.cmd(ctx, "nft", "--check", "-f", filepath.Join(dir, "firewall.nft")); e != nil {
 		return "", e
 	}
@@ -411,15 +418,17 @@ func (m *Manager) prepare(ctx context.Context, c config.Config) (string, error) 
 	prepared = true
 	return dir, nil
 }
-func (m *Manager) switchFiles(dir string) error {
-	tmp := filepath.Join(m.base(), ".current-next")
-	if e := os.Remove(tmp); e != nil && !errors.Is(e, os.ErrNotExist) {
-		return e
-	}
-	if e := os.Symlink(filepath.Base(dir), tmp); e != nil {
-		return e
-	}
-	return os.Rename(tmp, filepath.Join(m.base(), "current"))
+func (m *Manager) switchFiles(ctx context.Context, dir string) error {
+	return m.withIPv6StateLock(ctx, func() error {
+		tmp := filepath.Join(m.base(), ".current-next")
+		if e := os.Remove(tmp); e != nil && !errors.Is(e, os.ErrNotExist) {
+			return e
+		}
+		if e := os.Symlink(filepath.Base(dir), tmp); e != nil {
+			return e
+		}
+		return os.Rename(tmp, filepath.Join(m.base(), "current"))
+	})
 }
 func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Config, dir string) error {
 	for _, unit := range []string{"hostapd", "dnsmasq", "wan", "pppoe"} {
@@ -437,7 +446,7 @@ func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Con
 			}
 		}
 	}
-	if e := m.switchFiles(dir); e != nil {
+	if e := m.switchFiles(ctx, dir); e != nil {
 		return e
 	}
 	// Old protocol processes and callbacks have stopped. A new candidate
