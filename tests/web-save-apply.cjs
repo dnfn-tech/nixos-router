@@ -1416,3 +1416,76 @@ test("advanced array blank preserves secrets and ambiguous edits retain input", 
   assert.equal(await page.locator("#apply-dirty").isVisible(),true);
  } finally {await putConfig(context,original);await context.close();}
 });
+
+test("WiFi security selection persists SAE and keeps the existing secret", async () => {
+  const { page, context } = await pageAt("plugins");
+  const original = await configOf(context);
+  try {
+    const cfg = structuredClone(original);
+    cfg.wifi.aps = [{ssid:"security-test",band:"2g",channel:6,psk:"preserved-wifi-password",enable:true}];
+    await putConfig(context,cfg);
+    await navigate(page,"wifi");
+    const security = page.getByLabel("安全模式",{exact:true});
+    assert.equal(await security.inputValue({timeout:2000}), "");
+    await security.selectOption("wpa3-sae");
+    await waitAction(page,"#apply-save");
+    let saved=await configOf(context);
+    assert.equal(saved.wifi.aps[0].security,"wpa3-sae");
+    let backup=await (await context.request.get(`${base}/api/v1/backup`)).json();
+    assert.equal(backup.config.wifi.aps[0].psk,"preserved-wifi-password");
+    await page.locator("#page-refresh").click();
+    await page.waitForFunction(()=>!window.app.state.loading);
+    assert.equal(await page.getByLabel("安全模式",{exact:true}).inputValue(),"wpa3-sae");
+  } finally {
+    await putConfig(context,original);
+    await context.close();
+  }
+});
+
+test("independent WiFi subnet editor preserves drafts and explicit access permissions", async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.wifi.enable=true;cfg.wifi.bridgeToLan=true;
+  cfg.wifi.aps=[{enable:true,ssid:"routed-ui",psk:"routed-ui-password",band:"2g",channel:6}];
+  await putConfig(context,cfg);await navigate(page,"wifi");
+  await page.getByLabel("桥接到内网",{exact:true}).uncheck();
+  const cidr=page.getByLabel("无线网关 / CIDR",{exact:true});
+  assert.equal(await cidr.isVisible({timeout:2000}),true);
+  assert.equal(await page.getByLabel("允许无线管理路由器",{exact:true}).isChecked(),false);
+  assert.equal(await page.getByLabel("允许有线与无线互访",{exact:true}).isChecked(),false);
+  await cidr.fill("192.168.77.1/24");
+  await page.getByLabel("无线地址池起始地址",{exact:true}).fill("192.168.77.100");
+  await page.getByLabel("无线地址池结束地址",{exact:true}).fill("192.168.77.110");
+  await page.getByLabel("无线租约时间（分钟）",{exact:true}).fill("30");
+  await page.getByLabel("允许无线管理路由器",{exact:true}).check();
+  await waitAction(page,"#apply-save");
+  let saved=await configOf(context);
+  assert.equal(saved.wifi.bridgeToLan,false);assert.equal(saved.wifi.network.ipv4Cidr,"192.168.77.1/24");
+  assert.equal(saved.wifi.network.allowManagement,true);assert.equal(saved.wifi.network.allowWiredAccess,false);
+  await page.getByLabel("无线网关 / CIDR",{exact:true}).fill("inactive-draft");
+  await page.getByLabel("桥接到内网",{exact:true}).check();
+  await waitAction(page,"#apply-save");
+  saved=await configOf(context);assert.equal(saved.wifi.network.ipv4Cidr,"inactive-draft");
+  await page.getByLabel("桥接到内网",{exact:true}).uncheck();
+  await waitAction(page,"#apply-save");
+  assert.equal(await page.getByLabel("无线网关 / CIDR",{exact:true}).getAttribute("aria-invalid"),"true");
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("WiFi radio standard and numeric channel width persist through the editor", async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.wifi.enable=true;cfg.wifi.bridgeToLan=true;
+  cfg.wifi.aps=[{enable:true,ssid:"radio-ui",psk:"radio-ui-password",band:"5g",channel:149,security:"wpa3-sae"}];
+  await putConfig(context,cfg);await navigate(page,"wifi");
+  await page.getByLabel("无线标准",{exact:true}).selectOption("wifi7");
+  await page.getByLabel("信道带宽",{exact:true}).selectOption("80");
+  await waitAction(page,"#apply-save");
+  const saved=await configOf(context);
+  assert.equal(saved.wifi.aps[0].standard,"wifi7");
+  assert.equal(saved.wifi.aps[0].channelWidthMHz,80);
+  await page.locator("#page-refresh").click();await page.waitForFunction(()=>!window.app.state.loading);
+  assert.equal(await page.getByLabel("无线标准",{exact:true}).inputValue(),"wifi7");
+  assert.equal(await page.getByLabel("信道带宽",{exact:true}).inputValue(),"80");
+ }finally{await putConfig(context,original);await context.close()}
+});

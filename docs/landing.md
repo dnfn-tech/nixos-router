@@ -5,7 +5,7 @@
 ## 选择运行模式
 
 - **预览/仅生成**：默认模式，可与现有网络管理器并存。保存与生成成功不表示网络已经应用。旧的片段消费模式见本文后半部分。
-- **managed**：routerd 独占明确授权的接口，管理单 LAN 网桥及自己的 DHCP/DNS/AP/nft 服务。此模式与 NetworkManager、networkd、dhcpcd、ConnMan，以及宿主 Kea/dnsmasq/hostapd/防火墙服务互斥。
+- **managed**：routerd 独占明确授权的接口，管理一个有线 LAN 网桥、可选独立无线网段及自己的 DHCP/DNS/AP/nft 服务。此模式与 NetworkManager、networkd、dhcpcd、ConnMan，以及宿主 Kea/dnsmasq/hostapd/radvd/防火墙服务互斥。
 
 ## managed 最小模块模板
 
@@ -33,15 +33,29 @@
   systemd.network.enable = false;
   services.connman.enable = false;
   services.kea.dhcp4.enable = false;
+  services.kea.dhcp6.enable = false;
   services.dnsmasq.enable = false;
   services.hostapd.enable = false;
+  services.radvd.enable = false;
   networking.firewall.enable = false;
   networking.nat.enable = false;
   networking.nftables.enable = false;
 }
 ```
 
-集成方还需删除受管接口的宿主静态 IPv4/DHCP 声明及旧桥定义，处理旧单元。模板中的普通赋值不会强制覆盖其他模块的冲突定义：应在集成源头明确唯一所有者。不要全局打开 API 防火墙端口；managed 自有规则限制 API 和 NixOS SSH 端口从 LAN 访问。
+集成方还需删除受管接口的宿主静态 IPv4/IPv6 地址、DHCP 声明及旧桥定义，处理旧单元。模板中的普通赋值不会强制覆盖其他模块的冲突定义：应在集成源头明确唯一所有者。不要全局打开 API 防火墙端口；managed 自有规则限制 API 和 NixOS SSH 端口从 LAN 访问。
+
+### 宿主 UDP 服务的 WAN 入口
+
+需要保留 ZeroTier 等宿主服务入口时，由集成方显式设置：
+
+```nix
+services.nixos-router.backend.managed.wanUDPPorts = [ 9993 ];
+```
+
+默认 `[]`，最多 64 项，每项为 1–65535。规则只对实际 WAN 出口放行指定 UDP 端口，覆盖 IPv4/IPv6；PPPoE 使用逻辑出口，不额外打开物理口。该权限来自 NixOS 配置，Web 草稿不能增加入口；服务本身、overlay 路由及其管理权限仍由集成方分别配置，不会自动获得家庭 LAN 身份。
+
+移除端口并重启执行器以加载部署策略后，新入站流量不再放行；已建立连接仍遵循连接跟踪。该配置不开放 TCP 管理端口或新增转发权限，不能用 `networking.firewall.allowedUDPPorts` 代替受管规则。实际重启可能短暂中断网络，应纳入已审核的迁移步骤。
 
 两个文件均是**运行时文件**，由集成方的密钥机制在服务启动前提供，权限限制为 root 可读；不要把真实密码写进 Nix 字符串或 `writeText`，它们会进入 Nix store。初始管理员密码至少8字节。已有账户时不会用此文件重置密码。
 
@@ -58,7 +72,9 @@
 }
 ```
 
-启用 WiFi 时提供独立 `wifiInterface`、一个启用的 WPA2 AP、合法国家/非DFS信道和运行时密钥。当前配置不支持 WPA3、WiFi 6/7 参数、访客/多AP、IPv6路由等高级能力；不要把宿主已有能力视为被框架自动保留。
+启用 WiFi 时提供独立 `wifiInterface`、一个启用的 AP、合法国家/非 DFS 信道和运行时密钥。支持 WPA2-PSK 或纯 WPA3-SAE（强制 PMF）；无线可桥接到有线 LAN，也可使用独立 IPv4 网段，并显式选择无线管理及跨网段访问权限。配置 `standard`（`wifi4`／`wifi5`／`wifi6`／`wifi7`）和 `channelWidthMHz`（20／40／80）时，执行器在变更网络前查询实际 PHY 的 AP 模式、频段、标准及全部占用信道，缺少能力或受法规限制时明确拒绝，不静默降级。空标准、默认带宽保留旧配置行为。多 AP、访客配置、DFS、6 GHz、MLO 仍不属于当前候选能力。
+
+IPv6 支持 Ethernet SLAAC／DHCPv6、动态 DNS 和委派前缀生命周期；独立无线网段与有线 LAN 可各分配一个 /64，委派容量不足时不会重复使用前缀。PPPoE6 已通过真实 IPv6CP、DHCPv6/PD、双栈流量及完整生命周期软件验收；这不证明实体设备或真实运营商已验收。软件验证、设备驱动及射频验收的具体证据和边界见 [gw 集成对照表](gw-integration-matrix.md)。
 
 PPPoE 使用独立的 `nixos-router-pppoe` 服务和逻辑出口 `nr-ppp0`，物理 WAN 仍须在接口 allowlist 内。凭据从运行时配置写入 root 私有 options 文件，不应写入 Nix store。应用成功或服务 active 不代表认证及联网成功；`awaiting-pppoe-session` 表示尚未观察到 PPP 地址。完整验收进度见 [测试说明](testing.md)。
 
@@ -237,3 +253,7 @@ API 写请求体上限为 16 MiB，JSON 和 multipart 请求均适用；超出�
 路径由字符串段组成，插件名称或键含点、斜杠时不拆分。清空命令不写进配置或备份；整批操作通过校验后才保存，活动功能的必填凭据不能清空。Web 密码字段和高级 JSON 均提供清空选项，输入新值可取消普通密码控件的清空选择。
 
 空串、`****` 不表示清空既有密钥。插件数组只在非秘密字段能唯一匹配原项目时保留空值对应的旧密钥；改名、重复项目等导致归属不明时拒绝，需保留引用或填写新值。已清空项目可继续保存。数组项目的删除仍表示删除整个项目。
+
+### WiFi 认证模式
+
+接入点 `security` 支持 `wpa2-psk` 与纯 `wpa3-sae`；省略或空值保留旧 WPA2 行为。WPA3-SAE 强制 PMF，不自动回退 WPA2。密码继续通过 `psk` 提供，受管模式要求 8–63 位可打印 ASCII；运行配置保存在 root 私有目录，API 沿用秘密脱敏与版本绑定。真实秘密须由集成方通过私有 bootstrap/秘密文件提供，不得用 `builtins.toFile`/`writeText` 将生产密码写入 Nix store。模拟无线测试不证明真实射频或设备能力。

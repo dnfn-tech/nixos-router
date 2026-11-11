@@ -38,9 +38,17 @@
       checks."x86_64-linux" = let
         pkgs = import nixpkgs { system = "x86_64-linux"; };
       in {
+        vm-managed-ipv6 = pkgs.testers.runNixOSTest (import ./tests/vm-managed-ipv6.nix { inherit pkgs self; });
+        vm-managed-ipv6-dual-radio = pkgs.testers.runNixOSTest (import ./tests/vm-managed-ipv6-dual.nix { inherit pkgs self; advancedRadio = true; });
+        vm-managed-ipv6-dual = pkgs.testers.runNixOSTest (import ./tests/vm-managed-ipv6-dual.nix { inherit pkgs self; });
+        vm-managed-pppoe6 = pkgs.testers.runNixOSTest (import ./tests/vm-managed-pppoe6.nix { inherit pkgs self; });
         vm-managed-pppoe = pkgs.testers.runNixOSTest (import ./tests/vm-managed-pppoe.nix { inherit pkgs self; });
         vm-privsep = pkgs.testers.runNixOSTest (import ./tests/vm-privsep.nix { inherit pkgs self; });
         vm-managed-wifi = pkgs.testers.runNixOSTest (import ./tests/vm-managed-wifi.nix { inherit pkgs self; });
+        vm-managed-wifi-sae = pkgs.testers.runNixOSTest (import ./tests/vm-managed-wifi.nix { inherit pkgs self; security = "wpa3-sae"; });
+        vm-managed-wifi-he = pkgs.testers.runNixOSTest (import ./tests/vm-managed-wifi.nix { inherit pkgs self; security = "wpa3-sae"; routed = true; standard = "wifi6"; channelWidthMHz = 80; });
+        vm-managed-wifi-radio = pkgs.testers.runNixOSTest (import ./tests/vm-managed-wifi.nix { inherit pkgs self; security = "wpa3-sae"; routed = true; standard = "wifi7"; channelWidthMHz = 80; });
+        vm-managed-wifi-routed = pkgs.testers.runNixOSTest (import ./tests/vm-managed-wifi.nix { inherit pkgs self; security = "wpa3-sae"; routed = true; });
         vm-managed-router = pkgs.testers.runNixOSTest (import ./tests/vm-managed-router.nix { inherit pkgs self; });
         vm-router = pkgs.testers.runNixOSTest {
           name = "vm-router";

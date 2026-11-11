@@ -61,7 +61,7 @@ func TestRejectBeforeMutation(t *testing.T) {
 		{"bridge physical collision", func(c *config.Config) { c.LAN.BridgeName = "lan1" }},
 		{"injected domain", func(c *config.Config) { c.DNS.Domain = "lan\ninterface=eth-host" }},
 		{"unsupported qos", func(c *config.Config) { c.QoS.Enable = true }},
-		{"unsupported ipv6", func(c *config.Config) { c.IPv6.Enable = true }},
+		{"invalid ipv6 mode", func(c *config.Config) { c.IPv6.Enable = true; c.IPv6.WANMode = "invalid" }},
 		{"pool outside lan", func(c *config.Config) { c.LAN.DHCP.RangeStart = "10.0.0.2" }},
 		{"foreign forward", func(c *config.Config) {
 			c.Firewall.PortForwards = []config.PortForward{{Protocol: "tcp", ExternalPort: 80, DestPort: 80, DestIP: "10.0.0.1"}}

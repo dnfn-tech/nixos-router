@@ -39,8 +39,10 @@ type Options struct {
 	WiFiInterface  string
 	ManagementPort int
 	SSHPorts       []int
+	WANUDPPorts    []int // Trusted deployment policy, outside Config/RPC.
 	CountryCode    string
 	Runner         Runner
+	Clock          func() time.Time
 }
 type Result struct {
 	Stage          string   `json:"stage"`
@@ -77,6 +79,21 @@ func New(o Options) (*Manager, error) {
 			seenPorts[port] = true
 		}
 	}
+	if len(o.WANUDPPorts) > 64 {
+		return nil, errors.New("too many host WAN UDP ports")
+	}
+	udpPorts := o.WANUDPPorts
+	o.WANUDPPorts = nil
+	seenUDP := map[int]bool{}
+	for _, port := range udpPorts {
+		if port < 1 || port > 65535 {
+			return nil, errors.New("invalid host WAN UDP port")
+		}
+		if !seenUDP[port] {
+			o.WANUDPPorts = append(o.WANUDPPorts, port)
+			seenUDP[port] = true
+		}
+	}
 	if o.CountryCode == "" {
 		o.CountryCode = "US"
 	}
@@ -85,6 +102,9 @@ func New(o Options) (*Manager, error) {
 	}
 	if o.Runner == nil {
 		o.Runner = commandRunner{}
+	}
+	if o.Clock == nil {
+		o.Clock = time.Now
 	}
 	m := &Manager{opts: o, allowed: map[string]bool{}}
 	for _, s := range o.Interfaces {
@@ -141,7 +161,17 @@ func (m *Manager) publish(c *config.Config) {
 func (m *Manager) base() string     { return filepath.Join(m.opts.StateDir, "managed") }
 func (m *Manager) lastGood() string { return filepath.Join(m.base(), "last-good.json") }
 func (m *Manager) run(ctx context.Context, name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	timeout := 20 * time.Second
+	if name == "systemctl" && len(args) == 2 && (args[0] == "stop" || args[0] == "restart") {
+		switch args[1] {
+		case "nixos-router-wan.service", "nixos-router-wan6.service", "nixos-router-pppoe.service":
+			// Each unit allows 60s to drain its process group and 60s for
+			// ExecStopPost. Allow systemd to finish both before giving up.
+			// The caller's overall deadline/cancellation still takes priority.
+			timeout = 150 * time.Second
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	s, e := m.opts.Runner.Run(ctx, name, args...)
 	if e != nil {
@@ -379,6 +409,12 @@ func (m *Manager) prepare(ctx context.Context, c config.Config) (string, error) 
 			return "", errors.New("managed interface is attached to a foreign master")
 		}
 	}
+	if err := m.preflightWiFiRadio(ctx, c); err != nil {
+		return "", err
+	}
+	if err := m.preflightWiFiIPv4(ctx, c); err != nil {
+		return "", err
+	}
 	dir, e := os.MkdirTemp(m.base(), "generation-")
 	if e != nil {
 		return "", e
@@ -400,17 +436,35 @@ func (m *Manager) prepare(ctx context.Context, c config.Config) (string, error) 
 			return "", e
 		}
 	}
-	ipv6Context, e := json.Marshal(ipv6ContextFor(c))
+	dnsContext, e := json.Marshal(dnsContextFor(c))
+	if e != nil {
+		return "", e
+	}
+	if e = atomicFile(filepath.Join(dir, "dns-context.json"), dnsContext); e != nil {
+		return "", e
+	}
+	ipv6Runtime := ipv6ContextFor(c)
+	if routedWiFi(c) {
+		ipv6Runtime.WiFiLAN = m.opts.WiFiInterface
+	}
+	ipv6Context, e := json.Marshal(ipv6Runtime)
 	if e != nil {
 		return "", e
 	}
 	if e = atomicFile(filepath.Join(dir, "ipv6-context.json"), ipv6Context); e != nil {
 		return "", e
 	}
+	ipv6Env, e := ipv6ServiceEnvironment(c, filepath.Base(dir))
+	if e != nil {
+		return "", e
+	}
+	if e = atomicFile(filepath.Join(dir, "wan6.env"), []byte(ipv6Env)); e != nil {
+		return "", e
+	}
 	if e = m.cmd(ctx, "nft", "--check", "-f", filepath.Join(dir, "firewall.nft")); e != nil {
 		return "", e
 	}
-	if c.DNS.EnableDNSMasq || c.LAN.DHCP.Enable {
+	if needsLANService(c) {
 		if e = m.cmd(ctx, "dnsmasq", "--test", "--conf-file="+filepath.Join(dir, "dnsmasq.conf")); e != nil {
 			return "", e
 		}
@@ -420,6 +474,12 @@ func (m *Manager) prepare(ctx context.Context, c config.Config) (string, error) 
 }
 func (m *Manager) switchFiles(ctx context.Context, dir string) error {
 	return m.withIPv6StateLock(ctx, func() error {
+		if err := m.cleanupIPv6Resources(ctx); err != nil {
+			return err
+		}
+		if err := m.resetDNS(); err != nil {
+			return err
+		}
 		tmp := filepath.Join(m.base(), ".current-next")
 		if e := os.Remove(tmp); e != nil && !errors.Is(e, os.ErrNotExist) {
 			return e
@@ -431,7 +491,7 @@ func (m *Manager) switchFiles(ctx context.Context, dir string) error {
 	})
 }
 func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Config, dir string) error {
-	for _, unit := range []string{"hostapd", "dnsmasq", "wan", "pppoe"} {
+	for _, unit := range []string{"wan6", "hostapd", "dnsmasq", "wan", "pppoe"} {
 		if e := m.cmd(ctx, "systemctl", "stop", "nixos-router-"+unit+".service"); e != nil {
 			return e
 		}
@@ -447,11 +507,6 @@ func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Con
 		}
 	}
 	if e := m.switchFiles(ctx, dir); e != nil {
-		return e
-	}
-	// Old protocol processes and callbacks have stopped. A new candidate
-	// must not use peer DNS from the previous session while dialing.
-	if e := atomicFile(filepath.Join(m.base(), "wan-resolv.conf"), nil); e != nil {
 		return e
 	}
 	s, e := m.run(ctx, "ip", "-j", "link", "show")
@@ -493,7 +548,7 @@ func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Con
 			// The AP interface has separate authorization. If an interrupted
 			// candidate enabled it, stopping an already-dead hostapd may not
 			// detach it, so disabled WiFi also reconciles observed membership.
-			if link.Master == c.LAN.BridgeName && link.Name == m.opts.WiFiInterface && !c.WiFi.Enable {
+			if link.Master == c.LAN.BridgeName && link.Name == m.opts.WiFiInterface && (!c.WiFi.Enable || !c.WiFi.BridgeToLan) {
 				if e = m.cmd(ctx, "ip", "link", "set", "dev", link.Name, "nomaster"); e != nil {
 					return e
 				}
@@ -516,6 +571,17 @@ func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Con
 			return errors.Join(e, cleanupErr)
 		}
 	}
+	if c.IPv6.Enable {
+		interfaces := append([]string{c.LAN.BridgeName, c.WAN.Interface}, c.LAN.Ports...)
+		if c.WiFi.Enable {
+			interfaces = append(interfaces, m.opts.WiFiInterface)
+		}
+		for _, iface := range interfaces {
+			if e = m.claimIPv6Autoconfiguration(ctx, iface); e != nil {
+				return e
+			}
+		}
+	}
 	for _, p := range c.LAN.Ports {
 		if e = m.cmd(ctx, "ip", "-4", "addr", "flush", "dev", p); e != nil {
 			return e
@@ -524,6 +590,14 @@ func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Con
 			return e
 		}
 		if e = m.cmd(ctx, "ip", "link", "set", "dev", p, "up"); e != nil {
+			return e
+		}
+	}
+	if e = m.reconcileWiFiIPv4(ctx, c); e != nil {
+		return e
+	}
+	if routedWiFi(c) {
+		if e = m.cmd(ctx, "ip", "link", "set", "dev", m.opts.WiFiInterface, "up"); e != nil {
 			return e
 		}
 	}
@@ -548,6 +622,17 @@ func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Con
 	if e = m.cmd(ctx, "nft", "-f", filepath.Join(dir, "firewall.nft")); e != nil {
 		return e
 	}
+	if e = m.setIPv6Forwarding(ctx, c.LAN.BridgeName, c.IPv6.Enable && c.IPv6.LANPD); e != nil {
+		return e
+	}
+	if e = m.setIPv6Forwarding(ctx, c.WAN.Interface, c.IPv6.Enable && c.IPv6.LANPD && c.WAN.Mode != "pppoe"); e != nil {
+		return e
+	}
+	if m.opts.WiFiInterface != "" {
+		if e = m.setIPv6Forwarding(ctx, m.opts.WiFiInterface, routedWiFi(c) && c.IPv6.Enable && c.IPv6.LANPD); e != nil {
+			return e
+		}
+	}
 	if c.WAN.Mode == "static" {
 		if e = m.cmd(ctx, "ip", "addr", "add", c.WAN.Static.AddressCIDR, "dev", c.WAN.Interface); e != nil {
 			return e
@@ -569,7 +654,16 @@ func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Con
 			return e
 		}
 	}
-	if c.DNS.EnableDNSMasq || c.LAN.DHCP.Enable {
+	// PPP starts odhcp6c from IPv6CP's up hook, after link-local negotiation.
+	if c.IPv6.Enable && c.IPv6.WANMode != "pppoe6" {
+		if e = m.cmd(ctx, "systemctl", "restart", "nixos-router-wan6.service"); e != nil {
+			return e
+		}
+		if e = m.cmd(ctx, "systemctl", "is-active", "--quiet", "nixos-router-wan6.service"); e != nil {
+			return e
+		}
+	}
+	if needsLANService(c) {
 		if e = m.cmd(ctx, "systemctl", "restart", "nixos-router-dnsmasq.service"); e != nil {
 			return e
 		}
@@ -630,8 +724,30 @@ func (m *Manager) removeBridge(ctx context.Context, name string) error {
 }
 func (m *Manager) cleanup(ctx context.Context, c config.Config) error {
 	var errs []error
-	for _, u := range []string{"wan", "pppoe", "dnsmasq", "hostapd"} {
+	for _, u := range []string{"wan6", "wan", "pppoe", "dnsmasq", "hostapd"} {
 		errs = append(errs, m.cmd(ctx, "systemctl", "stop", "nixos-router-"+u+".service"))
+	}
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	if err := m.withIPv6StateLock(ctx, func() error {
+		if err := m.cleanupIPv6Resources(ctx); err != nil {
+			return err
+		}
+		return m.resetDNS()
+	}); err != nil {
+		return err
+	}
+	if err := m.reconcileWiFiIPv4(ctx, config.Config{}); err != nil {
+		return err
+	}
+	if err := m.setIPv6Forwarding(ctx, c.WAN.Interface, false); err != nil {
+		return err
+	}
+	if m.opts.WiFiInterface != "" {
+		if err := m.setIPv6Forwarding(ctx, m.opts.WiFiInterface, false); err != nil {
+			return err
+		}
 	}
 	errs = append(errs, m.detach(ctx, c), m.removeBridge(ctx, c.LAN.BridgeName))
 	if _, e := m.run(ctx, "nft", "list", "table", "inet", "nixos_router"); e == nil {

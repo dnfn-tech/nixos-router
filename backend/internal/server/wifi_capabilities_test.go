@@ -27,6 +27,9 @@ func (f *wifiProbeRunner) Output(name string, args ...string) (string, error) {
 	if reflect.DeepEqual(args, []string{"phy", "phy7", "info"}) {
 		return "Wiphy phy7\n\tSupported interface modes:\n\t\t * managed\n\t\t * AP\n\tBand 1:\n\t\tFrequencies:\n\t\t\t* 2412 MHz [1] (20.0 dBm)\n\tBand 2:\n\t\tFrequencies:\n\t\t\t* 5180 MHz [36] (disabled)\n", nil
 	}
+	if reflect.DeepEqual(args, []string{"phy", "phy7", "channels"}) {
+		return "Band 1:\n * 2412 MHz [1]\n  Channel widths: 20MHz HT40+\nBand 2:\n * 5180 MHz [36] (disabled)\n", nil
+	}
 	return "", errors.New("unexpected command")
 }
 func TestManagedWifiCapabilitiesProbe(t *testing.T) {
@@ -42,12 +45,19 @@ func TestManagedWifiCapabilitiesProbe(t *testing.T) {
 	if body["source"] != "iw" || body["available"] != true || body["maxAP"] != float64(1) || body["phy"] != "phy7" {
 		t.Fatalf("unexpected caps: %s", w.Body.String())
 	}
-	if !reflect.DeepEqual(f.calls, []string{"iw dev wlan-test info", "iw phy phy7 info"}) {
+	if !reflect.DeepEqual(f.calls, []string{"iw dev wlan-test info", "iw phy phy7 info", "iw phy phy7 channels"}) {
 		t.Fatal(f.calls)
+	}
+	if _, ok := body["radioBands"].(map[string]interface{}); !ok {
+		t.Fatal("missing AP radio capability observations")
 	}
 	channels, ok := body["channels"].([]interface{})
 	if !ok || len(channels) != 2 {
 		t.Fatal(body)
+	}
+	widths, ok := channels[0].(map[string]interface{})["widths"].(map[string]interface{})
+	if !ok || widths["20MHz"] != true {
+		t.Fatal("missing channel width restrictions")
 	}
 	if channels[1].(map[string]interface{})["disabled"] != true {
 		t.Fatal("disabled channel presented as usable")

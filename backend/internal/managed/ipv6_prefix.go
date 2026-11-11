@@ -123,25 +123,52 @@ func delegationNetwork(value string) (netip.Prefix, bool) {
 // a potentially enormous delegation. A sub-/64 exclusion reserves its whole
 // enclosing /64, because advertising that /64 would include excluded space.
 func (d ipv6Delegation) lanPrefix() (netip.Prefix, error) {
-	if !d.Prefix.IsValid() || !d.Prefix.Addr().Is6() || d.Prefix.Bits() > 64 || d.Valid == 0 {
-		return netip.Prefix{}, errors.New("IPv6 delegation has no usable LAN /64")
+	prefixes, err := d.lanPrefixes(1)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	return prefixes[0], nil
+}
+
+// lanPrefixes allocates the wired and optional independent WiFi /64s in stable
+// order. A delegation is all-or-nothing for the requested number of networks.
+// Jump across an exclusion in constant time; never walk a huge prefix space.
+func (d ipv6Delegation) lanPrefixes(count int) ([]netip.Prefix, error) {
+	unavailable := errors.New("IPv6 delegation has insufficient usable LAN /64s")
+	if count < 1 || count > 2 || !d.Prefix.IsValid() || !d.Prefix.Addr().Is6() || d.Prefix.Bits() > 64 || d.Valid == 0 {
+		return nil, unavailable
 	}
 	candidate := netip.PrefixFrom(d.Prefix.Addr(), 64).Masked()
-	if d.Excluded.IsValid() && candidate.Overlaps(d.Excluded) {
-		address := d.Excluded.Masked().Addr().As16()
-		upper := binary.BigEndian.Uint64(address[:8])
-		if d.Excluded.Bits() < 64 {
-			upper |= (uint64(1) << (64 - d.Excluded.Bits())) - 1
+	var result []netip.Prefix
+	for len(result) < count {
+		if d.Excluded.IsValid() && candidate.Overlaps(d.Excluded) {
+			address := d.Excluded.Masked().Addr().As16()
+			upper := binary.BigEndian.Uint64(address[:8])
+			if d.Excluded.Bits() < 64 {
+				upper |= (uint64(1) << (64 - d.Excluded.Bits())) - 1
+			}
+			if upper == ^uint64(0) {
+				return nil, unavailable
+			}
+			binary.BigEndian.PutUint64(address[:8], upper+1)
+			clear(address[8:])
+			candidate = netip.PrefixFrom(netip.AddrFrom16(address), 64)
 		}
+		if !d.Prefix.Contains(candidate.Addr()) {
+			return nil, unavailable
+		}
+		result = append(result, candidate)
+		if len(result) == count {
+			return result, nil
+		}
+		address := candidate.Addr().As16()
+		upper := binary.BigEndian.Uint64(address[:8])
 		if upper == ^uint64(0) {
-			return netip.Prefix{}, errors.New("IPv6 delegation has no usable LAN /64")
+			return nil, unavailable
 		}
 		binary.BigEndian.PutUint64(address[:8], upper+1)
 		clear(address[8:])
 		candidate = netip.PrefixFrom(netip.AddrFrom16(address), 64)
 	}
-	if !d.Prefix.Contains(candidate.Addr()) {
-		return netip.Prefix{}, errors.New("IPv6 delegation has no usable LAN /64")
-	}
-	return candidate, nil
+	return result, nil
 }

@@ -86,12 +86,16 @@ type DNSConfig struct {
 }
 
 type WiFiConfig struct {
+	Network     *WiFiNetwork `json:"network,omitempty"`
 	Enable      bool     `json:"enable"`
 	BridgeToLan bool     `json:"bridgeToLan"`
 	APs         []WiFiAP `json:"aps,omitempty"`
 }
 
 type WiFiAP struct {
+	Standard string `json:"standard,omitempty"`
+	ChannelWidthMHz int `json:"channelWidthMHz,omitempty"`
+	Security string `json:"security,omitempty"` // empty/wpa2-psk or pure wpa3-sae
 	SSID    string `json:"ssid"`
 	Band    string `json:"band,omitempty"`    // "2g" | "5g" | "6g" (stub)
 	Channel int    `json:"channel,omitempty"` // stub
@@ -338,6 +342,14 @@ func (c *Config) Validate() error {
 
 	// Basic WiFi checks (more in later milestones)
 	for i, ap := range c.WiFi.APs {
+		if err := validateWiFiRadio(ap, i, c.WiFi.Enable && ap.Enable); err != nil {
+			return err
+		}
+		switch ap.Security {
+		case "", "wpa2-psk", "wpa3-sae":
+		default:
+			return invalidField(fmt.Sprintf("wifi.aps.%d.security", i), "must be wpa2-psk or wpa3-sae")
+		}
 		if ap.SSID == "" {
 			return invalidField(fmt.Sprintf("wifi.aps.%d.ssid", i), "must not be empty")
 		}
@@ -349,6 +361,10 @@ func (c *Config) Validate() error {
 		default:
 			return invalidField(fmt.Sprintf("wifi.aps.%d.band", i), "unsupported band")
 		}
+	}
+
+	if err := c.validateWiFiNetwork(); err != nil {
+		return err
 	}
 
 	// SSH port sanity
@@ -377,6 +393,20 @@ func (c *Config) Validate() error {
 	case "dhcpv6", "slaac", "pppoe6", "disabled", "":
 	default:
 		return invalidField("ipv6.wanMode", "must be one of: dhcpv6, slaac, pppoe6, disabled")
+	}
+	if c.IPv6.Enable {
+		if c.IPv6.WANMode == "" || c.IPv6.WANMode == "disabled" {
+			return invalidField("ipv6.wanMode", "select a WAN acquisition mode when IPv6 is enabled")
+		}
+		if (c.IPv6.WANMode == "pppoe6") != (c.WAN.Mode == "pppoe") {
+			return invalidField("ipv6.wanMode", "PPPoE IPv6 must use the PPPoE WAN connection")
+		}
+		if c.IPv6.LANPD && c.IPv6.WANMode == "slaac" {
+			return invalidField("ipv6.lanPrefixDelegation", "prefix delegation requires DHCPv6 or PPPoE IPv6")
+		}
+		if c.IPv6.LANRA && !c.IPv6.LANPD {
+			return invalidField("ipv6.lanRouterAdvertisement", "LAN advertisements require a delegated LAN prefix")
+		}
 	}
 	// Firewall port forwards
 	for i, pf := range c.Firewall.PortForwards {

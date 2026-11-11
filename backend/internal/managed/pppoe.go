@@ -49,9 +49,13 @@ func renderPPPoE(c config.Config) (string, error) {
 	// pppd options use double-quoted words and backslash escapes, not shell or
 	// JSON escaping. Reject controls above; escape only backslash and quote.
 	quote := func(value string) string { return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"` }
+	ipv6 := "noipv6\n"
+	if c.IPv6.Enable && c.IPv6.WANMode == "pppoe6" {
+		ipv6 = "+ipv6\n"
+	}
 	return "plugin pppoe.so\nnic-" + c.WAN.Interface + "\nifname " + managedPPPInterface + "\n" +
 		"user " + quote(c.WAN.PPPoE.Username) + "\npassword " + quote(c.WAN.PPPoE.Password) + "\n" +
-		"nodetach\nnoauth\nnoipdefault\nnoipv6\nnodefaultroute\n" +
+		"nodetach\nnoauth\nnoipdefault\n" + ipv6 + "nodefaultroute\n" +
 		"mtu 1492\nmru 1492\npersist\nmaxfail 0\nholdoff 5\n" +
 		"lcp-echo-interval 10\nlcp-echo-failure 3\nhide-password\n", nil
 }

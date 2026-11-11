@@ -39,7 +39,7 @@ nix run .#checks.x86_64-linux.vm-router.driverInteractive
 
 ## CI
 
-GitHub Actions 使用 `cachix/install-nix-action` 运行 `vm-router`、`vm-privsep`、`vm-managed-router`、`vm-managed-wifi`、`vm-managed-pppoe` 五个 check，并评估两个模块契约。运行前检查并开放 `/dev/kvm`，因为旧 `vm-router` 仍要求 KVM。宿主没有 KVM 设备或设备不可读写时直接失败，需要改用支持 KVM 的 runner。
+GitHub Actions 使用 `cachix/install-nix-action` 串行运行基础五个 check（`vm-router`、`vm-privsep`、`vm-managed-router`、`vm-managed-wifi`、`vm-managed-pppoe`），以及下文列出的六个双栈/无线组合 check，并评估两个模块契约。新增 CI 定义不代表远端已经执行或通过。运行前检查并开放 `/dev/kvm`，因为旧 `vm-router` 仍要求 KVM。宿主没有 KVM 设备或设备不可读写时直接失败，需要改用支持 KVM 的 runner。
 
 ## 保存与应用反馈的浏览器回归
 
@@ -67,7 +67,7 @@ Nix 断言在 `applyReload=true` 时拒绝同时启用 NetworkManager、systemd-
 
 ## Web 全局布局与数据契约回归
 
-同一 `tests/web-save-apply.cjs` 现覆盖 37 项回归：24 个页面/面板在四种宽度下的溢出和标签检查，真实配置读写、WAN/DDNS 条件字段、WiFi 与插件密钥、备份恢复、密码和客户端编辑，以及注入的错误/慢响应/异步作业。加上 managed 能力文件，共 44 项；双浏览器编辑覆盖真实 API 的过期修订拒绝、输入保留及显式重新加载后保存。字段错误用例验证真实 API 的静态地址和数组行定位、修正后保存，以及受控错误文本的安全展示。
+两个浏览器文件最近一次完整本地运行共 48 项通过，覆盖 24 个页面/面板在四种宽度下的溢出和标签检查，真实配置读写、WAN/DDNS 条件字段、WiFi 与插件密钥、备份恢复、密码和客户端编辑，以及注入的错误/慢响应/异步作业。新增无线安全、独立网段权限、标准/数字带宽及双栈能力展示回归；双浏览器编辑覆盖真实 API 的过期修订拒绝、输入保留及显式重新加载后保存。字段错误用例验证真实 API 的静态地址和数组行定位、修正后保存，以及受控错误文本的安全展示。阶段性结果不替代最终固定提交的回归。
 
 密钥回归覆盖默认插件脱敏、引用重排与连续保存、显式清空和撤销、新值取消清空、校验失败保留意图，以及数组空占位保留和歧义拒绝。
 
@@ -96,6 +96,24 @@ nix build --keep-going "path:$PWD#checks.x86_64-linux.vm-privsep" \
 浏览器回归：`tests/web-save-apply.cjs` 与 `tests/web-managed-capabilities.cjs`；需提供 Playwright NODE_PATH、CHROMIUM_PATH 和重新构建的 ROUTERD_TEST_BINARY。能力提示测试使用拦截响应，仅作为 UI 证据。
 
 实体 gw 的授权、迁移影响和验收顺序见 [硬件验收方案](gw-hardware-acceptance.md)。具体结果、制品与未验证范围以 [候选验收报告](gw-readiness.md) 为准。
+
+### 双栈与无线模式组合
+
+以下检查使用真实协议与 mac80211_hwsim，覆盖通用框架当前所需组合；具体阶段性结果见 [集成对照表](gw-integration-matrix.md)。运行命令本身不表示检查已经通过：
+
+```bash
+nix build --keep-going --max-jobs 1 \
+  "path:$PWD#checks.x86_64-linux.vm-managed-ipv6" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-ipv6-dual" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-wifi-he" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-wifi-radio" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-ipv6-dual-radio" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-pppoe6" -L
+```
+
+`vm-managed-ipv6` 验证 Ethernet RA、DHCPv6/PD、DNS、MTU/PMTU 和生命周期；`-dual` 验证有线/无线各一个 /64 的分配、前缀变更、委派容量不足、自然过期、重启及关闭。`wifi-he`／`wifi-radio` 分别验证 WPA3-SAE 的 WiFi 6／7、80MHz 及独立无线 IPv4 网络完整生命周期；`ipv6-dual-radio` 验证 WiFi 7／80MHz 与双网段 IPv6 组合。
+
+`vm-managed-pppoe6` 使用真实 PAP、IPv6CP、DHCPv6 地址/前缀委派和 RA，覆盖双栈流量、DNS、协商 MTU/MSS、故障恢复、重启及撤销；本地完整运行已通过（286.13s，`/tmp/router-pppoe6-vm-ready.log`），固定提交后仍需适用复验。ISP 侧兼容处理不得改写 CPE 状态或注入 CPE 协议回调。测试秘密均为公开合成值。上述软件无线结果不证明 MT7927、CN 监管域、射频或吞吐；最终候选还须绑定固定提交、依赖锁文件和 nixos-home 系统构建结果。
 
 
 ## 可复现浏览器 CI

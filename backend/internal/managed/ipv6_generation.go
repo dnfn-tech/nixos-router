@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 // Only the non-secret data needed by protocol callbacks lives in a generation.
 // The root executor's state/ancestor validation remains the entrypoint boundary.
 type ipv6RuntimeConfig struct {
+	WiFiLAN     string `json:"wifiLan,omitempty"`
 	Enabled     bool   `json:"enabled"`
 	Mode        string `json:"mode"`
 	WAN         string `json:"wan"`
@@ -35,6 +37,28 @@ func ipv6ContextFor(c config.Config) ipv6RuntimeConfig {
 }
 
 var ipv6GenerationName = regexp.MustCompile(`^generation-[a-zA-Z0-9_-]+$`)
+
+func ipv6ServiceEnvironment(c config.Config, generation string) (string, error) {
+	v := ipv6ContextFor(c)
+	if !ipv6GenerationName.MatchString(generation) || !ifname.MatchString(v.WAN) {
+		return "", errors.New("invalid IPv6 service identity")
+	}
+	enabled, pd := 0, 0
+	if v.Enabled {
+		switch v.Mode {
+		case "dhcpv6", "slaac", "pppoe6":
+		default:
+			return "", errors.New("invalid IPv6 service mode")
+		}
+		enabled = 1
+		if v.PD {
+			pd = 1
+		}
+	} else {
+		v.Mode = "disabled"
+	}
+	return fmt.Sprintf("WAN6_ENABLED='%d'\nWAN6_MODE='%s'\nWAN6_INTERFACE='%s'\nWAN6_PD='%d'\nWAN6_GENERATION='%s'\n", enabled, v.Mode, v.WAN, pd, generation), nil
+}
 
 func (m *Manager) withIPv6Generation(ctx context.Context, generation, iface string, fn func(ipv6RuntimeConfig) error) error {
 	if !ipv6GenerationName.MatchString(generation) {
@@ -86,6 +110,9 @@ func (m *Manager) withIPv6Generation(ctx context.Context, generation, iface stri
 		if c.WAN != wantWAN || iface != wantWAN || !ifname.MatchString(c.LAN) || m.allowed[c.LAN] || c.LAN == m.opts.WiFiInterface || c.LAN == "lo" || c.LAN == managedPPPInterface {
 			return errors.New("IPv6 callback interface mismatch")
 		}
+		if !m.validIPv6WiFiLAN(c) {
+			return errors.New("unauthorized IPv6 WiFi LAN")
+		}
 		if err = ctx.Err(); err != nil {
 			return err
 		}
@@ -130,6 +157,10 @@ func (m *Manager) withIPv6StateLock(ctx context.Context, fn func() error) error 
 }
 
 func openIPv6PrivateFile(path string, create bool) (*os.File, error) {
+	return openIPv6PrivateFileLimit(path, create, 16384)
+}
+
+func openIPv6PrivateFileLimit(path string, create bool, limit int64) (*os.File, error) {
 	flags := syscall.O_RDONLY | syscall.O_CLOEXEC | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
 	if create {
 		flags = syscall.O_RDWR | syscall.O_CREAT | syscall.O_CLOEXEC | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
@@ -145,9 +176,16 @@ func openIPv6PrivateFile(path string, create bool) (*os.File, error) {
 		return nil, err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || (!create && info.Size() > 16384) {
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || (!create && info.Size() > limit) {
 		f.Close()
 		return nil, errors.New("unprotected IPv6 runtime file")
 	}
 	return f, nil
+}
+
+func (c ipv6RuntimeConfig) isLAN(iface string) bool {
+	return iface == c.LAN || (c.WiFiLAN != "" && iface == c.WiFiLAN)
+}
+func (m *Manager) validIPv6WiFiLAN(c ipv6RuntimeConfig) bool {
+	return c.WiFiLAN == "" || (m.opts.WiFiInterface != "" && c.WiFiLAN == m.opts.WiFiInterface && c.WiFiLAN != c.WAN && c.WiFiLAN != c.LAN && c.WiFiLAN != managedPPPInterface && c.WiFiLAN != "lo")
 }

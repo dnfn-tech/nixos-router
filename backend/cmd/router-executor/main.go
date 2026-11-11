@@ -28,11 +28,12 @@ type options struct {
 	stateDir, socket, bootstrap, apiUser, interfaces, wifi, country, prepareAPI string
 	port                                                                        int
 	sshPorts                                                                    []int
+	wanUDPPorts                                                                 []int
 }
 
 func parseOptions(args []string) (options, error) {
 	var o options
-	var ports string
+	var ports, udpPorts string
 	fs := flag.NewFlagSet("router-executor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&o.prepareAPI, "prepare-api-state", "", "Initialize or migrate the API state directory offline, then exit")
@@ -45,6 +46,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.country, "country-code", "CN", "AP regulatory country")
 	fs.IntVar(&o.port, "management-port", 8080, "Trusted HTTP management port")
 	fs.StringVar(&ports, "ssh-ports", "22", "Trusted host SSH listener ports")
+	fs.StringVar(&udpPorts, "wan-udp-ports", "", "Trusted host UDP listeners allowed on the actual WAN exit")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -69,9 +71,34 @@ func parseOptions(args []string) (options, error) {
 		}
 		o.sshPorts = append(o.sshPorts, port)
 	}
+	if udpPorts != "" {
+		parts := strings.Split(udpPorts, ",")
+		if len(parts) > 64 {
+			return o, errors.New("too many WAN UDP ports")
+		}
+		for _, value := range parts {
+			port, err := strconv.Atoi(value)
+			if err != nil || port < 1 || port > 65535 {
+				return o, errors.New("invalid WAN UDP ports")
+			}
+			o.wanUDPPorts = append(o.wanUDPPorts, port)
+		}
+	}
 	return o, nil
 }
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "dns-event" {
+		if err := runDNSCallback(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "ipv6-event" {
+		if err := runIPv6Callback(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	o, err := parseOptions(os.Args[1:])
 	if err != nil {
 		log.Fatal(err)
@@ -120,7 +147,7 @@ func run(o options) error {
 	if err = os.Chown(o.socket, int(uid), int(gid)); err != nil {
 		return err
 	}
-	manager, err := managed.New(managed.Options{StateDir: o.stateDir, Interfaces: strings.Split(o.interfaces, ","), WiFiInterface: o.wifi, ManagementPort: o.port, SSHPorts: o.sshPorts, CountryCode: o.country})
+	manager, err := managed.New(managed.Options{StateDir: o.stateDir, Interfaces: strings.Split(o.interfaces, ","), WiFiInterface: o.wifi, ManagementPort: o.port, SSHPorts: o.sshPorts, WANUDPPorts: o.wanUDPPorts, CountryCode: o.country})
 	if err != nil {
 		return err
 	}

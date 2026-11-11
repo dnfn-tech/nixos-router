@@ -66,6 +66,8 @@ func TestIPv6EventStatesAndBounds(t *testing.T) {
 		{"bound", "RA_DNS", "ff02::1"},
 		{"bound", "RA_DNS", "::"},
 		{"bound", "RA_MTU", "1279"},
+		{"bound", "RA_MTU", "65536"},
+		{"bound", "RA_MTU", "4294967295"},
 		{"bound", "RA_MTU", "secret"},
 		{"bound", "RA_MTU", "4294967296"},
 		{"bound", "PREFIXES", "2001:db8::/56,1,secret"},
@@ -100,6 +102,15 @@ func TestIPv6EventDuplicateIdentity(t *testing.T) {
 	} {
 		if _, err := parseIPv6Event("bound", map[string]string{key: value}); err == nil {
 			t.Fatal("conflicting duplicate", key)
+		}
+	}
+}
+
+func TestIPv6EventMTUBoundaries(t *testing.T) {
+	for raw, want := range map[string]uint32{"": 0, "0": 0, "1280": 1280, "65535": 65535} {
+		event, err := parseIPv6Event("ra-updated", map[string]string{"RA_MTU": raw})
+		if err != nil || event.MTU != want {
+			t.Fatalf("MTU %q: %+v %v", raw, event, err)
 		}
 	}
 }

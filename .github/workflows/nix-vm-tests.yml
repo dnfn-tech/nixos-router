@@ -45,4 +45,10 @@ jobs:
             .#checks.x86_64-linux.vm-privsep \
             .#checks.x86_64-linux.vm-managed-router \
             .#checks.x86_64-linux.vm-managed-pppoe \
-            .#checks.x86_64-linux.vm-managed-wifi -L
+            .#checks.x86_64-linux.vm-managed-wifi \
+            .#checks.x86_64-linux.vm-managed-ipv6 \
+            .#checks.x86_64-linux.vm-managed-ipv6-dual \
+            .#checks.x86_64-linux.vm-managed-wifi-he \
+            .#checks.x86_64-linux.vm-managed-wifi-radio \
+            .#checks.x86_64-linux.vm-managed-ipv6-dual-radio \
+            .#checks.x86_64-linux.vm-managed-pppoe6 -L

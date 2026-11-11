@@ -174,3 +174,21 @@ test("managed WAN description follows advertised PPPoE capability", async () => 
   assert.doesNotMatch(description,/不支持 PPPoE/);
  } finally {await context.close()}
 });
+
+test("dual-stack managed profile describes independent WiFi without claiming live connectivity",async()=>{
+ const {page,context}=await pageAt("wifi");
+ try {
+  const health=structuredClone(managedHealth);
+  health.deployment.profile="managed-router";
+  health.capabilities.wanModes=["dhcp","static","pppoe"];
+  health.capabilities.independentWiFiLAN=true;
+  health.capabilities.ipv6WanModes=["slaac","dhcpv6"];
+  health.capabilities.unsupported=health.capabilities.unsupported.filter(x=>x!=="ipv6"&&x!=="pppoe");
+  await page.route("**/api/v1/health",route=>route.fulfill({json:health}));
+  await page.locator("#page-refresh").click();await page.waitForFunction(()=>!window.app.state.loading);
+  const description=await page.locator("#deployment-description").innerText();
+  assert.match(description,/IPv4.*IPv6/);
+  assert.match(description,/独立无线网段/);
+  assert.doesNotMatch(description,/IPv4 单内网|不支持 IPv6|已联网/);
+ }finally{await context.close()}
+});

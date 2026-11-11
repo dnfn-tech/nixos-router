@@ -68,7 +68,7 @@ func parseIPv6Event(state string, env map[string]string) (ipv6Event, error) {
 	if value := env["RA_MTU"]; value != "" {
 		var ok bool
 		e.MTU, ok = delegationNumber(value, 10)
-		if !ok || (e.MTU != 0 && e.MTU < 1280) {
+		if !ok || (e.MTU != 0 && (e.MTU < 1280 || e.MTU > 65535)) {
 			return fail()
 		}
 	}

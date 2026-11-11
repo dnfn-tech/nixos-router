@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/db"
 	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
+	"github.com/dnfn-tech/nixos-router/backend/internal/wifi"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -463,9 +465,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.managedRuntime != nil {
-		resp["deployment"] = map[string]interface{}{"mode": "runtime", "runtimeApply": true, "rebootAllowed": s.rebootAllowed(), "profile": "ipv4-single-lan"}
+		resp["deployment"] = map[string]interface{}{"mode": "runtime", "runtimeApply": true, "rebootAllowed": s.rebootAllowed(), "profile": "managed-router"}
 		resp["startupWarning"] = s.startupWarning
-		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "wanModes": []string{"dhcp", "static", "pppoe"}, "singleLAN": true, "singleAP": true, "unsupported": []string{"ipv6", "qos", "ddns", "parental", "plugins", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
+		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "wanModes": []string{"dhcp", "static", "pppoe"}, "singleLAN": false, "singleWiredLAN": true, "independentWiFiLAN": true, "singleAP": true, "ipv6WanModes": []string{"slaac", "dhcpv6", "pppoe6"}, "unsupported": []string{"qos", "ddns", "parental", "plugins", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -2603,52 +2605,46 @@ func (s *Server) handleManagedWifiCaps(w http.ResponseWriter, r *http.Request) {
 		unknown("Cannot query configured PHY capabilities")
 		return
 	}
+	channelInfo, err := s.runner.Output("iw", "phy", phy, "channels")
+	if err != nil {
+		unknown("Cannot query configured PHY channel restrictions")
+		return
+	}
+	if !strings.HasPrefix(strings.TrimSpace(info), "Wiphy "+phy+"\n") {
+		unknown("PHY observation identity mismatch")
+		return
+	}
+	observed, err := wifi.ParseCapabilities(info, channelInfo)
+	if err != nil {
+		unknown("Cannot interpret configured PHY capabilities")
+		return
+	}
 	bands := []string{}
+	for name := range observed.Bands {
+		bands = append(bands, name)
+	}
+	sort.Strings(bands)
+	frequencies := []int{}
+	for frequency := range observed.Channels {
+		frequencies = append(frequencies, frequency)
+	}
+	sort.Ints(frequencies)
 	channels := []map[string]interface{}{}
-	ap := false
-	for _, line := range strings.Split(info, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "* AP" {
-			ap = true
-		}
-		var frequency, channel int
-		if n, _ := fmt.Sscanf(line, "* %d MHz [%d]", &frequency, &channel); n != 2 {
-			continue
-		}
-		band := ""
-		switch {
-		case frequency >= 2400 && frequency < 2500:
-			band = "2g"
-		case frequency >= 4900 && frequency < 5925:
-			band = "5g"
-		case frequency >= 5925 && frequency <= 7125:
-			band = "6g"
-		}
+	for _, frequency := range frequencies {
+		ch := observed.Channels[frequency]
+		band := ch.Band
 		if band == "" {
 			continue
 		}
-		found := false
-		for _, v := range bands {
-			if v == band {
-				found = true
-			}
-		}
-		if !found {
-			bands = append(bands, band)
-		}
-		channels = append(channels, map[string]interface{}{"band": band, "channel": channel, "frequencyMHz": frequency, "disabled": strings.Contains(line, "disabled"), "noIR": strings.Contains(line, "no IR")})
-	}
-	if !strings.Contains(info, "Wiphy "+phy) || len(channels) == 0 {
-		unknown("iw returned no usable capability description")
-		return
+		channels = append(channels, map[string]interface{}{"band": band, "channel": ch.Number, "frequencyMHz": frequency, "disabled": ch.Disabled, "noIR": ch.NoIR, "radar": ch.Radar, "restricted": ch.Restricted, "widths": ch.Widths})
 	}
 	maxAP := 0
-	if ap {
+	if observed.AP {
 		maxAP = 1
 	}
 	driver := "unknown"
 	if link, err := os.Readlink(filepath.Join(s.sysClassNet, s.wifiInterface, "device", "driver")); err == nil {
 		driver = filepath.Base(link)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"source": "iw", "available": true, "interface": s.wifiInterface, "phy": phy, "driver": driver, "apSupported": ap, "maxAP": maxAP, "managedMaxAP": 1, "bands": bands, "channels": channels, "note": "maxAP is the managed profile limit, not a measured hardware maximum; regulatory and driver restrictions still apply"})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"source": "iw", "available": true, "interface": s.wifiInterface, "phy": phy, "driver": driver, "apSupported": observed.AP, "maxAP": maxAP, "managedMaxAP": 1, "bands": bands, "radioBands": observed.Bands, "channels": channels, "note": "maxAP is the managed profile limit, not a measured hardware maximum; regulatory and driver restrictions still apply"})
 }

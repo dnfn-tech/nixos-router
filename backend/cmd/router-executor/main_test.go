@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseOptionsRejectIncompleteOrUnsafeArguments(t *testing.T) {
 	good := []string{"--state-dir", "/var/lib/router-executor", "--socket", "/run/router-executor/control.sock", "--bootstrap", "/run/secrets/router.json", "--api-user", "router-api", "--interfaces", "wan0,lan0"}
@@ -17,6 +20,27 @@ func TestParseOptionsRejectIncompleteOrUnsafeArguments(t *testing.T) {
 	} {
 		if _, err := parseOptions(args); err == nil {
 			t.Fatalf("unsafe arguments accepted: %v", args)
+		}
+	}
+}
+
+func TestWANUDPServiceArguments(t *testing.T) {
+	good := []string{"--state-dir", "/var/lib/router-executor", "--socket", "/run/router-executor/control.sock", "--bootstrap", "/run/secrets/router.json", "--api-user", "router-api", "--interfaces", "wan0,lan0"}
+	for _, value := range []string{"", "9993,51820"} {
+		o, err := parseOptions(append(append([]string{}, good...), "--wan-udp-ports", value))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if value == "" && len(o.wanUDPPorts) != 0 {
+			t.Fatal(o.wanUDPPorts)
+		}
+		if value != "" && (len(o.wanUDPPorts) != 2 || o.wanUDPPorts[0] != 9993) {
+			t.Fatal(o.wanUDPPorts)
+		}
+	}
+	for _, value := range []string{"0", "65536", "9993,", "udp/9993", "-1", "9993,1;true", strings.Repeat("9993,", 64) + "9993"} {
+		if _, err := parseOptions(append(append([]string{}, good...), "--wan-udp-ports", value)); err == nil {
+			t.Fatal("unsafe UDP port accepted", value)
 		}
 	}
 }

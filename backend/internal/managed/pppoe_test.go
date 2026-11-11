@@ -41,6 +41,44 @@ func TestPPPoEOptionsAndEgress(t *testing.T) {
 	}
 }
 
+func TestPPPoEIPv6NegotiationOnlyWhenRequested(t *testing.T) {
+	for _, mode := range []string{"disabled", "dhcpv6", "slaac", "pppoe6"} {
+		for _, enabled := range []bool{false, true} {
+			c := config.DefaultConfig()
+			c.WAN.Mode, c.WAN.Interface = "pppoe", "wan0"
+			c.WAN.PPPoE = &config.PPPoEConfig{Username: "u", Password: "p"}
+			c.IPv6.Enable, c.IPv6.WANMode = enabled, mode
+			options, err := renderPPPoE(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := enabled && mode == "pppoe6"
+			if strings.Contains(options, "\n+ipv6\n") != want || strings.Contains(options, "\nnoipv6\n") == want {
+				t.Fatal("wrong NCP negotiation", mode, enabled, options)
+			}
+		}
+	}
+}
+
+func TestPPPoEMSSFamilyBounds(t *testing.T) {
+	m, _, c := fixture(t)
+	c.WAN.Mode = "pppoe"
+	c.WAN.PPPoE = &config.PPPoEConfig{Username: "u", Password: "p"}
+	rules := m.render(c)["firewall.nft"]
+	// 1492-byte PPP MTU minus IPv4/TCP (40) or IPv6/TCP (60) headers.
+	// Family selection prevents IPv6 packets matching the IPv4 ceiling first.
+	for _, direction := range []string{"iifname", "oifname"} {
+		for _, contract := range []string{
+			`meta nfproto ipv4 ` + direction + ` "nr-ppp0" tcp flags & (syn | rst) == syn tcp option maxseg size > 1452 tcp option maxseg size set 1452`,
+			`meta nfproto ipv6 ` + direction + ` "nr-ppp0" tcp flags & (syn | rst) == syn tcp option maxseg size > 1432 tcp option maxseg size set 1432`,
+		} {
+			if !strings.Contains(rules, contract) {
+				t.Fatal("missing protocol-specific MSS ceiling", contract)
+			}
+		}
+	}
+}
+
 func TestPPPoERejectsUnsafeOptions(t *testing.T) {
 	for _, value := range []string{"", "x\nplugin evil.so", "x\rsecret", "x\x00", "x\tvalue", strings.Repeat("a", 256)} {
 		for _, field := range []string{"username", "password"} {

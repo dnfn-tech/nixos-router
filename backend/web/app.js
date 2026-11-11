@@ -534,7 +534,13 @@
         : mode === "runtime"
           ? "应用会修改部署环境；生成和应用结果请以作业记录为准。"
           : "暂不能确认部署能力，请刷新连接。";
-    if (state.health?.deployment?.profile === "ipv4-single-lan") {
+    if (state.health?.deployment?.profile === "managed-router") {
+      const caps = state.health.capabilities || {};
+      const modes = (caps.wanModes || []).map(mode => ({dhcp:"DHCP",static:"静态地址",pppoe:"PPPoE"})[mode] || mode).join(" / ");
+      const ipv6 = (caps.ipv6WanModes || []).length ? "IPv4 / IPv6" : "IPv4";
+      const networks = caps.independentWiFiLAN ? "有线内网与可选独立无线网段" : "有线内网";
+      $("#deployment-description").textContent = `${ipv6} 配置框架，${networks}，WAN 支持 ${modes}，最多一个接入点。无线标准与带宽按实际设备能力校验；当前 5 GHz 仅支持非 DFS 信道。配置能力不代表当前联网状态，请查看接口与作业结果。SSH 与系统设置由 NixOS 管理。`;
+    } else if (state.health?.deployment?.profile === "ipv4-single-lan") {
       const ppp = state.health?.capabilities?.wanModes?.includes("pppoe");
       const modes = ppp ? "DHCP / 静态地址 / PPPoE" : "DHCP / 静态地址";
       const unsupported = ppp ? "IPv6" : "PPPoE、IPv6";
@@ -776,7 +782,7 @@
     if (!caps?.available || caps.source !== "iw") {
       return unavailable(`无线硬件能力未确认；不会把预览值当作硬件检测结果。${caps?.reason ? "检测说明：" + caps.reason : "请检查设备和 iw 工具后刷新。"}`);
     }
-    const usable = (caps.channels || []).filter((c) => !c.disabled && !c.noIR).length;
+    const usable = (caps.channels || []).filter((c) => !c.disabled && !c.noIR && !c.radar && !c.restricted).length;
     return notice(`来源：iw · 接口 ${caps.interface} · ${caps.phy}。硬件报告频段：${(caps.bands || []).join("、")}；AP 模式：${caps.apSupported ? "支持" : "不支持"}；当前未标记禁用或禁止发射的信道：${usable} 个。管理配置最多 ${caps.managedMaxAP} 个接入点（不是硬件上限）。首版 5 GHz 仅支持 36/40/44/48/149/153/157/161/165 非 DFS 信道；仍需确认监管域、驱动和实际关联结果。`);
   }
   function coreEditor(id, cfg, status) {
@@ -913,16 +919,50 @@
       );
     if (id === "wifi") {
       d.aps ||= [];
+      d.network ||= { ipv4Cidr: "", dhcp: { enable: true, rangeStart: "", rangeEnd: "", leaseMins: 1440 }, allowManagement: false, allowWiredAccess: false };
+      d.network.dhcp ||= {};
+      d.network.staticLeases ||= [];
+      const refreshNetwork = () => {
+        const independent = !d.bridgeToLan;
+        for (const panel of [networkCard, networkLeases]) {
+          panel.hidden = !independent;
+          panel.querySelectorAll("input,select,textarea,button").forEach(input => {
+            const path = input.dataset.configPath || "";
+            const dhcpParameter = path.startsWith("wifi.network.dhcp.") && !path.endsWith(".enable");
+            input.disabled = !independent || (dhcpParameter && !d.network.dhcp.enable);
+          });
+        }
+        for (const [path, required] of [
+          ["wifi.network.ipv4Cidr", independent && d.enable],
+          ["wifi.network.dhcp.rangeStart", independent && d.enable && d.network.dhcp.enable],
+          ["wifi.network.dhcp.rangeEnd", independent && d.enable && d.network.dhcp.enable],
+        ]) networkCard.querySelector(`[data-config-path="${path}"]`).required = !!required;
+      };
+      const networkCard = formCard("独立无线网段", fields(
+        ["network.ipv4Cidr", "无线网关 / CIDR", {help:"使用与有线内网及外网不重叠的独立网段；地址由部署方配置。"}],
+        ["network.dhcp.enable", "启用无线 DHCP", {type:"checkbox",change:refreshNetwork}],
+        ["network.dhcp.rangeStart", "无线地址池起始地址"],
+        ["network.dhcp.rangeEnd", "无线地址池结束地址"],
+        ["network.dhcp.leaseMins", "无线租约时间（分钟）", {type:"number",min:1}],
+        ["network.allowManagement", "允许无线管理路由器", {type:"checkbox",help:"允许此网段访问 Web 管理和宿主 SSH 端口。关闭后仍可使用 DHCP、DNS 和网关连通性检查。"}],
+        ["network.allowWiredAccess", "允许有线与无线互访", {type:"checkbox",help:"显式允许两个内网双向发起连接；关闭后仅保留各自到外网的访问。"}],
+      ));
+      const networkLeases = collection("无线静态租约", d.network.staticLeases, lease => [
+        field(lease,"hostname","无线设备名称"), field(lease,"ip","无线租约 IP"),
+        field(lease,"mac","无线租约 MAC"), field(lease,"comment","无线租约备注"),
+      ], () => ({hostname:"",ip:"",mac:"",comment:""}));
       const originalNames = new WeakMap(d.aps.map((ap) => [ap, ap.ssid]));
-      return editor(
+      const form = editor(
         wifiCapabilitiesNotice(),
         formCard(
           "无线设置",
           fields(
-            ["enable", "启用 WiFi", { type: "checkbox" }],
-            ["bridgeToLan", "桥接到内网", { type: "checkbox" }],
+            ["enable", "启用 WiFi", { type: "checkbox", change: refreshNetwork }],
+            ["bridgeToLan", "桥接到内网", { type: "checkbox", change: refreshNetwork }],
           ),
         ),
+        networkCard,
+        networkLeases,
         collection(
           "接入点",
           d.aps,
@@ -950,9 +990,26 @@
                   ["6g", "6 GHz"],
                 ],
               }),
+              field(ap, "standard", "无线标准", {
+                choices: [["", "兼容现有配置"], ["wifi4", "WiFi 4（HT）"], ["wifi5", "WiFi 5（VHT）"], ["wifi6", "WiFi 6（HE）"], ["wifi7", "WiFi 7（EHT）"]],
+                help: "应用前会核对对应频段的 AP 能力；不支持时明确拒绝，不会自动降级。",
+              }),
+              field(ap, "channelWidthMHz", "信道带宽", {
+                type: "number",
+                choices: [[0, "默认（20 MHz）"], [20, "20 MHz"], [40, "40 MHz"], [80, "80 MHz"]],
+                help: "80 MHz 需要 5 GHz 和 WiFi 5 或更新标准；全部子信道均须允许发射。",
+              }),
               field(ap, "channel", "信道", {
                 type: "number",
-                help: "0 表示自动；实际支持能力取决于无线设备。",
+                help: "受管模式需要显式信道；5 GHz 当前支持列出的非 DFS 信道，165 仅支持 20 MHz。",
+              }),
+              field(ap, "security", "安全模式", {
+                choices: [
+                  ["", "WPA2-PSK（兼容现有配置）"],
+                  ["wpa2-psk", "WPA2-PSK"],
+                  ["wpa3-sae", "WPA3-SAE"],
+                ],
+                help: "WPA3-SAE 要求客户端支持受保护管理帧，不会自动降级为 WPA2。",
               }),
               password,
               field(ap, "enable", "启用此接入点", { type: "checkbox" }),
@@ -965,6 +1022,9 @@
           },
           () => ({
             ssid: "",
+            security: "wpa2-psk",
+            standard: "",
+            channelWidthMHz: 0,
             band: "2g",
             channel: 0,
             psk: "",
@@ -974,6 +1034,8 @@
           }),
         ),
       );
+      refreshNetwork();
+      return form;
     }
     if (id === "firewall") {
       d.portForwards ||= [];
