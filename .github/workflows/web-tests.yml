@@ -1,0 +1,39 @@
+name: Browser Tests
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/package-lock.json
+      - name: Install pinned test dependencies
+        run: npm ci --prefix tests
+      - name: Install matching Chromium
+        working-directory: tests
+        run: npx --no-install playwright-core install --with-deps chromium
+      - name: Build backend with embedded assets
+        run: go -C backend build -o "$RUNNER_TEMP/routerd-web-test" ./cmd/routerd
+      - name: Check embedded asset mirror
+        run: |
+          cmp web/app.js backend/web/app.js
+          cmp web/index.html backend/web/index.html
+          cmp web/styles.css backend/web/styles.css
+      - name: Run browser regressions
+        env:
+          ROUTERD_TEST_BINARY: ${{ runner.temp }}/routerd-web-test
+        run: npm --prefix tests run test:web

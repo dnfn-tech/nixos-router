@@ -1,0 +1,10 @@
+{
+  "name": "nixos-router-browser-tests",
+  "private": true,
+  "scripts": {
+    "test:web": "node --test web-save-apply.cjs web-managed-capabilities.cjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.64.1"
+  }
+}

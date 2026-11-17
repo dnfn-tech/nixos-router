@@ -62,7 +62,7 @@ in {
       { assertion = !config.services.kea.dhcp4.enable && !config.services.dnsmasq.enable; message = "nixos-router managed mode owns DHCP/DNS; disable other Kea/dnsmasq services explicitly."; }
       { assertion = !config.services.hostapd.enable; message = "nixos-router managed mode owns hostapd; disable the previous AP service explicitly."; }
       { assertion = !config.networking.firewall.enable && !config.networking.nat.enable && !config.networking.nftables.enable; message = "nixos-router managed mode owns firewall/NAT; disable NixOS firewall, NAT and nftables service explicitly."; }
-      { assertion = lib.all (name: let i = config.networking.interfaces.${name} or {}; in (i.ipv4.addresses or []) == [] && (i.useDHCP or false) != true) m.interfaces; message = "nixos-router managed interfaces must not have NixOS-managed addresses or DHCP clients."; }
+      { assertion = lib.all (name: let i = config.networking.interfaces.${name} or {}; in (i.ipv4.addresses or []) == [] && (i.useDHCP or false) != true) (m.interfaces ++ lib.optional (m.wifiInterface != "") m.wifiInterface); message = "nixos-router managed interfaces must not have NixOS-managed addresses or DHCP clients."; }
     ];
     services.nixos-router.backend = {
       applyReload = true;

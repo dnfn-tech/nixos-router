@@ -10,13 +10,15 @@ inputs.nixos-router.url = "github:dnfn-tech/nixos-router";
 
 ## Docs
 
+- 通用模块接入与 managed 生命周期：[接入指南](docs/landing.md)
+
 - 需求与信息架构：`docs/requirements.md`
 - 后端服务架构：`docs/backend-architecture.md`
 - 插件与功能模块：`docs/plugins.md`
 - 存储选型（JSON + SQLite）：`docs/storage-choice.md`
 - 实现现状：`docs/implementation-status.md`
 - 测试（NixOS VM 多节点）：`docs/testing.md`
-- IPv4 单 LAN 候选范围与验证结果：[gw 软件验收报告](docs/gw-readiness.md)
+- 历史 IPv4 单 LAN 候选范围与验证结果：[gw 软件验收报告](docs/gw-readiness.md)
 - 用户审核后才执行的实体测试：[gw 硬件验收方案](docs/gw-hardware-acceptance.md)
 
 ## Development (Backend + WebUI)

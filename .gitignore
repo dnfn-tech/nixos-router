@@ -3,3 +3,5 @@ result-*
 .direnv/
 .direnv
 *.qcow2
+
+/tests/node_modules/

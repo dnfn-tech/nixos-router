@@ -93,3 +93,17 @@ nix build --keep-going "path:$PWD#checks.x86_64-linux.vm-managed-router" \
 浏览器回归：`tests/web-save-apply.cjs` 与 `tests/web-managed-capabilities.cjs`；需提供 Playwright NODE_PATH、CHROMIUM_PATH 和重新构建的 ROUTERD_TEST_BINARY。能力提示测试使用拦截响应，仅作为 UI 证据。
 
 实体 gw 的授权、迁移影响和验收顺序见 [硬件验收方案](gw-hardware-acceptance.md)。具体结果、制品与未验证范围以 [候选验收报告](gw-readiness.md) 为准。
+
+
+## 可复现浏览器 CI
+
+`Browser Tests` 对 main 的 push/PR 执行两个浏览器测试文件，同时验证 Web 资源镜像一致。测试依赖在 `tests/package-lock.json` 固定；Node 22，Go 版本按 `backend/go.mod`。
+
+```bash
+npm ci --prefix tests
+(cd tests && npx --no-install playwright-core install --with-deps chromium)
+go -C backend build -o /tmp/routerd-web-test ./cmd/routerd
+ROUTERD_TEST_BINARY=/tmp/routerd-web-test npm --prefix tests run test:web
+```
+
+Linux 上安装浏览器系统依赖可能需要管理员权限。已有浏览器的环境可跳过安装步骤并设置 `CHROMIUM_PATH`；CI 安装锁定 Playwright 对应的 Chromium。测试后端只监听 loopback，状态和账户均在临时目录中；不会访问实体路由器。模块断言覆盖受管无线 IPv4/DHCP 冲突，同时允许未受管无线接口和预览部署。
