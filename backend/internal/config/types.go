@@ -13,6 +13,8 @@ import (
 const (
 	DefaultStateDir       = "/var/lib/nixos-router"
 	DefaultConfigBasename = "config.json"
+	// MaxDocumentBytes bounds API configuration requests and durable draft files.
+	MaxDocumentBytes = 16 << 20
 )
 
 // Root configuration describing the intended network state.
@@ -564,6 +566,9 @@ func SaveToFile(path string, cfg Config) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
+	}
+	if len(data)+1 > MaxDocumentBytes {
+		return invalidField("config", "configuration document exceeds 16 MiB")
 	}
 	tmp, err := writeSyncedTemp(path, append(data, '\n'))
 	if err != nil {

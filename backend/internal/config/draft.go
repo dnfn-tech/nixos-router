@@ -88,7 +88,7 @@ func readDraftFile(path string, private bool) ([]byte, error) {
 	if !info.Mode().IsRegular() || (private && info.Mode().Perm()&0077 != 0) {
 		return nil, fmt.Errorf("draft or backup is not a private regular file")
 	}
-	const limit = 16 << 20
+	const limit = MaxDocumentBytes
 	b, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return nil, err

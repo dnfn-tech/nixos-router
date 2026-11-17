@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -198,7 +199,7 @@ func TestRPCStrictRequestBoundary(t *testing.T) {
 		return DialContext(ctx, path, uint32(os.Geteuid()))
 	}}
 	defer tr.CloseIdleConnections()
-	hc := &http.Client{Transport: tr, Timeout: time.Second}
+	hc := &http.Client{Transport: tr, Timeout: 10 * time.Second}
 	raw, _ := json.Marshal(cfg)
 	valid := `{"id":"bad","config":` + string(raw) + `}`
 	for _, tc := range []struct {
@@ -212,7 +213,7 @@ func TestRPCStrictRequestBoundary(t *testing.T) {
 		{"trailing value", "/v1/jobs", valid + ` {}`, 400},
 		{"invalid id", "/v1/jobs", strings.Replace(valid, `"bad"`, `"../outside"`, 1), 400},
 		{"invalid config", "/v1/jobs", `{"id":"bad","config":{}}`, 400},
-		{"oversize", "/v1/jobs", strings.Repeat(" ", 2<<20) + valid, 413},
+		{"oversize", "/v1/jobs", strings.Repeat(" ", (16<<20)+1025) + valid, 413},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp, err := hc.Post("http://executor"+tc.path, "application/json", bytes.NewBufferString(tc.body))
@@ -228,6 +229,75 @@ func TestRPCStrictRequestBoundary(t *testing.T) {
 	}
 	if r.calls.Load() != 0 {
 		t.Fatal("malformed requests executed network commands")
+	}
+}
+
+func TestRPCSavedLargeConfigRoundTrip(t *testing.T) {
+	for _, kind := range []string{"adblock", "archived-data"} {
+		t.Run(kind, func(t *testing.T) {
+			m, cfg, state := protocolFixture(t, &protocolRunner{})
+			if kind == "adblock" {
+				entries := make([]string, 4096)
+				for i := range entries {
+					entries[i] = strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + fmt.Sprintf("%061d", i)
+				}
+				cfg.Plugins["adblock"] = config.PluginConfig{Enable: true, Config: map[string]interface{}{"entries": entries}}
+			} else {
+				cfg.Plugins["archive"] = config.PluginConfig{Config: map[string]interface{}{"note": strings.Repeat("x", 4<<20)}}
+			}
+			cfg, err := config.WithNewRevision(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(state, "config.json")
+			if err := config.SaveToFile(path, cfg); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err = config.LoadDraft(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Exercise the authenticated listener and real RPC handler without
+			// making document-size coverage depend on decoding speed under -race.
+			executor, err := OpenExecutor(state, m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer executor.Close()
+			socket := socketPath(t)
+			listener, err := Listen(socket, uint32(os.Geteuid()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			httpServer := &http.Server{Handler: http.HandlerFunc(executor.handle), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: time.Minute, WriteTimeout: time.Minute}
+			defer httpServer.Close()
+			go httpServer.Serve(listener)
+			client := NewClient(socket, uint32(os.Geteuid()))
+			client.http.Timeout = time.Minute
+			defer client.Close()
+			if _, err := client.Submit(context.Background(), "large-config", cfg); err != nil {
+				t.Fatalf("saved configuration rejected by executor: %v", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			job, err := client.Job(ctx, "large-config")
+			for err == nil && job.Status == "running" {
+				select {
+				case <-ctx.Done():
+					t.Fatal("large configuration job did not complete")
+				case <-time.After(10 * time.Millisecond):
+				}
+				job, err = client.Job(ctx, "large-config")
+			}
+			if err != nil || job.Status != "success" {
+				t.Fatalf("large configuration failed to apply: %+v", job)
+			}
+			applied, ok, err := client.Applied(context.Background())
+			if err != nil || !ok || !reflect.DeepEqual(applied, cfg) {
+				t.Fatalf("applied configuration did not round-trip: available=%v err=%v", ok, err)
+			}
+		})
 	}
 }
 

@@ -830,7 +830,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		// index static leases for hostnames
 		mac2host := map[string]string{}
 		ip2host := map[string]string{}
-		for _, sl := range cfg.LAN.StaticLeases {
+		for _, sl := range clientStaticLeases(cfg) {
 			if sl.MAC != "" && sl.Hostname != "" {
 				mac2host[strings.ToLower(sl.MAC)] = sl.Hostname
 			}
@@ -863,7 +863,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if source == "stub" {
 		// From static leases fallback
-		for _, sl := range cfg.LAN.StaticLeases {
+		for _, sl := range clientStaticLeases(cfg) {
 			clients = append(clients, Client{IP: sl.IP, MAC: sl.MAC, Hostname: sl.Hostname, Source: "static", Blocked: isMacBlocked(cfg, sl.MAC)})
 		}
 	}
@@ -915,24 +915,26 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := cloneConfig(s.cfg)
-	// update static lease hostname
-	found := false
-	for i := range cfg.LAN.StaticLeases {
-		if strings.ToLower(cfg.LAN.StaticLeases[i].MAC) == mac {
-			if body.Hostname != nil {
-				cfg.LAN.StaticLeases[i].Hostname = *body.Hostname
+	// Hostnames belong to existing reservations in either managed network.
+	// A block-only request must not manufacture an incomplete reservation.
+	if body.Hostname != nil {
+		found := false
+		groups := [][]config.StaticLease{cfg.LAN.StaticLeases}
+		if cfg.WiFi.Network != nil {
+			groups = append(groups, cfg.WiFi.Network.StaticLeases)
+		}
+		for _, leases := range groups {
+			for i := range leases {
+				if strings.EqualFold(leases[i].MAC, mac) {
+					leases[i].Hostname = *body.Hostname
+					found = true
+				}
 			}
-			found = true
-			break
 		}
-	}
-	if !found {
-		// create entry if hostname provided
-		sl := config.StaticLease{MAC: strings.ToUpper(mac)}
-		if body.Hostname != nil {
-			sl.Hostname = *body.Hostname
+		if !found {
+			apiHTTPError(w, "configure a static lease before renaming this client", http.StatusBadRequest)
+			return
 		}
-		cfg.LAN.StaticLeases = append(cfg.LAN.StaticLeases, sl)
 	}
 	// update blocked list
 	if body.Blocked != nil {
@@ -963,6 +965,15 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 	s.cfg = cfg
 	s.db.AddAudit("clients", "patch", mac)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+}
+
+// clientStaticLeases returns reservations visible to the current client list.
+func clientStaticLeases(cfg config.Config) []config.StaticLease {
+	leases := append([]config.StaticLease(nil), cfg.LAN.StaticLeases...)
+	if cfg.WiFi.Enable && !cfg.WiFi.BridgeToLan && cfg.WiFi.Network != nil {
+		leases = append(leases, cfg.WiFi.Network.StaticLeases...)
+	}
+	return leases
 }
 
 func (s *Server) handleWifiCaps(w http.ResponseWriter, r *http.Request) {

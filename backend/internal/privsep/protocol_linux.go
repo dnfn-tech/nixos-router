@@ -22,7 +22,8 @@ import (
 	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
 )
 
-const maxRequestBytes = 1 << 20
+// Leave room for the fixed RPC envelope and bounded job ID around a full draft.
+const maxRequestBytes = config.MaxDocumentBytes + 1024
 
 var jobID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 

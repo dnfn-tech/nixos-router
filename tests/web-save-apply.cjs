@@ -927,6 +927,35 @@ test("WAN mode changes and all DDNS providers retain conditional fields", async 
     await context.close();
   }
 });
+test("blocking a DHCP client does not submit an unchanged hostname or create a static lease", async () => {
+  const { page, context } = await pageAt("plugins");
+  const original = await configOf(context);
+  try {
+    const cfg = structuredClone(original);
+    cfg.lan.staticLeases = [];
+    cfg.firewall.blockedMacs = [];
+    await putConfig(context, cfg);
+    await page.route("**/api/v1/clients", route => route.fulfill({
+      status: 200,
+      json: {source: "leases", clients: [{mac: "02:00:00:00:00:03", ip: "192.168.1.12", hostname: "dynamic-client", source: "leases", expires: "", lastSeen: "", blocked: false}]},
+    }));
+    await navigate(page, "clients");
+    await page.getByRole("button", { name: "编辑", exact: true }).click();
+    await page.getByLabel("阻止访问", { exact: true }).check();
+    const patched = page.waitForResponse(r => r.request().method() === "PATCH" && r.url().includes("/api/v1/clients/"));
+    await page.getByRole("button", { name: "保存设备" }).click();
+    const response = await patched;
+    assert.equal(response.status(), 200, await response.text());
+    assert.deepEqual(response.request().postDataJSON(), {blocked: true});
+    await page.waitForSelector("dialog", { state: "detached" });
+    const saved = await configOf(context);
+    assert.deepEqual(saved.lan.staticLeases || [], []);
+    assert.ok(saved.firewall.blockedMacs.includes("02:00:00:00:00:03"));
+  } finally {
+    await putConfig(context, original);
+    await context.close();
+  }
+});
 test("client edits persist and password changes remain usable", async () => {
   const { page, context } = await pageAt("plugins");
   const original = await configOf(context);

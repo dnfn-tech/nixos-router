@@ -68,7 +68,8 @@ func (c *Client) call(ctx context.Context, method, path string, payload, dst any
 		_ = json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&msg)
 		return &RPCError{Status: res.StatusCode, Code: msg.Error}
 	}
-	dec := json.NewDecoder(io.LimitReader(res.Body, 4<<20))
+	// Applied snapshots can contain the same full document accepted on submit.
+	dec := json.NewDecoder(io.LimitReader(res.Body, maxRequestBytes))
 	dec.DisallowUnknownFields()
 	return dec.Decode(dst)
 }

@@ -84,7 +84,7 @@ func (s *Server) limitAPIBody(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		const limit = 16 << 20
+		const limit = config.MaxDocumentBytes
 		if r.ContentLength > limit {
 			apiHTTPError(w, "request body exceeds 16 MiB", http.StatusRequestEntityTooLarge)
 			return

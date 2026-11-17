@@ -1723,9 +1723,12 @@
         state.busy = true;
         syncActions();
         try {
+          const changes = {};
+          if (name.value !== d.hostname) changes.hostname = name.value;
+          if (blocked.checked !== d.blocked) changes.blocked = blocked.checked;
           await api(`/api/v1/clients/${encodeURIComponent(client.mac)}`, {
             method: "PATCH",
-            body: { hostname: name.value, blocked: blocked.checked },
+            body: changes,
             revision,
           });
           state.pending = true;

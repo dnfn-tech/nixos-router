@@ -137,3 +137,28 @@ func TestConfigStrictTagsAndNumericPreservation(t *testing.T) {
 		}
 	}
 }
+
+func TestSaveRejectsDocumentTooLargeToReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	c := DefaultConfig()
+	if err := SaveToFile(path, c); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A compact request can fit while the durable, indented document does not.
+	c.Plugins["archive"] = PluginConfig{Config: map[string]interface{}{"note": strings.Repeat("x", (16<<20)-len(original))}}
+	compact, err := json.Marshal(c)
+	if err != nil || len(compact) > 16<<20 {
+		t.Fatalf("fixture must fit in the API request: bytes=%d err=%v", len(compact), err)
+	}
+	if err := SaveToFile(path, c); err == nil {
+		t.Fatal("saved a document that LoadDraft cannot reload")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, original) {
+		t.Fatal("oversized save changed the previous configuration")
+	}
+}
