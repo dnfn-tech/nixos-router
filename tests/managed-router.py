@@ -246,7 +246,33 @@ cfg["lan"]["ipv4Cidr"] = "192.168.60.1/24"
 cfg["lan"]["dhcp"]["rangeStart"] = "192.168.60.100"
 cfg["lan"]["dhcp"]["rangeEnd"] = "192.168.60.150"
 api("PUT", "/config", cfg)
-moved_job = api("POST", "/apply")["jobId"]
+moved_revision = api("GET", "/config")["config"]["revision"]
+moved = api("POST", "/apply")
+moved_job = moved["jobId"]
+assert moved["configRevision"] == moved_revision, moved
+assert moved["appliedRuntime"] is False, moved
+# The LAN address changes asynchronously. Observe the same job over loopback
+# before restarting either DHCP client, otherwise it can select an OFFER from
+# the old dnsmasq instance and keep retrying that obsolete server/address pair.
+local_base = "http://127.0.0.1:8080/api/v1"
+router.succeed("curl -fsS -c /tmp/move-cookie -H 'Content-Type: application/json' --data " + shlex.quote(json.dumps({"username":"admin", "password":"test-password-123"})) + " " + local_base + "/session")
+deadline = time.monotonic() + 180
+while time.monotonic() < deadline:
+    rc, raw = router.execute("curl --connect-timeout 2 --max-time 5 -fsS -b /tmp/move-cookie " + shlex.quote(local_base + "/jobs/" + moved_job))
+    if rc in (7, 28, 52, 56):
+        time.sleep(1)
+        continue
+    assert rc == 0, (rc, raw)
+    result = json.loads(raw)
+    assert result["status"] != "failed", result
+    if result["status"] == "success":
+        payload = json.loads(result["payload"]) if isinstance(result["payload"], str) else result["payload"]
+        assert payload["configRevision"] == moved_revision, result
+        assert payload["appliedRuntime"] is True, result
+        break
+    time.sleep(1)
+else:
+    raise Exception("LAN address change did not complete")
 for node in [client, observer]:
     node.succeed("systemctl stop systemd-networkd; ip address flush dev eth1; rm -f /run/systemd/netif/leases/*; systemctl start systemd-networkd")
     node.wait_until_succeeds("ip -4 -o address show eth1 | grep '192.168.60.'", timeout=90)
