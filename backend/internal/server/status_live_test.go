@@ -84,4 +84,3 @@ func TestStatusInterfacesFromSysfs(t *testing.T) {
 		t.Fatalf("expected sources.interfaces=sysfs, got %v", srcs)
 	}
 }
-

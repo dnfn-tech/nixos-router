@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
-	"path/filepath"
 	"os"
+	"path/filepath"
 )
 
 func TestHealth(t *testing.T) {
@@ -77,4 +77,3 @@ func TestClientsFromLeases(t *testing.T) {
 		t.Fatalf("expected 2 clients from leases, got %d", len(clients))
 	}
 }
-

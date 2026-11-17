@@ -15,6 +15,9 @@ for node in [client, observer]:
 base = "http://192.168.50.1:8080/api/v1"
 def api(method, path, body=None):
     args = "curl --connect-timeout 3 --max-time 20 -fsS -b /tmp/cookie -c /tmp/cookie -X " + method
+    if method in ("PUT", "PATCH") or path == "/backup/restore":
+        revision = api("GET", "/config")["config"]["revision"]
+        args += " -H " + shlex.quote("If-Match: " + json.dumps(revision))
     if body is not None:
         args += " -H 'Content-Type: application/json' --data " + shlex.quote(json.dumps(body))
     return json.loads(client.succeed(args + " " + shlex.quote(base + path)))
@@ -26,7 +29,9 @@ cfg = api("GET", "/config")["config"]
 
 def apply(config, success=True):
     api("PUT", "/config", config)
+    revision = api("GET", "/config")["config"]["revision"]
     job = api("POST", "/apply")
+    assert job["configRevision"] == revision, job
     assert job["appliedRuntime"] is False, job
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
@@ -36,9 +41,10 @@ def apply(config, success=True):
             continue  # LAN activation may interrupt this read; never repeat POST.
         assert rc == 0, (rc, raw)
         result = json.loads(raw)
-        if result["status"] != "running":
+        if result["status"] in ("success", "failed"):
             assert (result["status"] == "success") == success, result
             payload = json.loads(result["payload"]) if isinstance(result["payload"], str) else result["payload"]
+            assert payload["configRevision"] == revision, result
             if success:
                 assert payload["stage"] in ("complete", "awaiting-wan-lease"), result
                 if payload["stage"] == "awaiting-wan-lease":
@@ -196,7 +202,8 @@ candidate["lan"]["ports"] = ["eth2", "eth3"]
 api("PUT", "/config", candidate)
 interrupted_job = api("POST", "/apply")["jobId"]
 router.wait_until_succeeds("test -e /run/activation-paused && test $(basename $(readlink /sys/class/net/eth3/master)) = br-lan", timeout=60)
-router.succeed("systemctl kill --kill-whom=all --signal=SIGKILL nixos-router-backend.service")
+router.succeed("systemctl kill --kill-whom=all --signal=SIGKILL nixos-router-executor.service")
+router.wait_for_unit("nixos-router-executor.service", timeout=180)
 client.wait_until_succeeds("curl -fsS http://192.168.50.1:8080/api/v1/health", timeout=90)
 router.succeed("test ! -e /sys/class/net/eth3/master")
 assert router.succeed("sha256sum /var/lib/nixos-router/managed/last-good.json").split()[0] == last_good_hash
@@ -217,14 +224,16 @@ router.wait_for_unit("nixos-router-backend.service")
 client.wait_until_succeeds("ping -c1 -W2 192.168.50.1")
 router.fail("ip -4 addr show br-lan | grep 192.168.77.1")
 client.succeed("ping -c1 -W2 10.0.0.1")
-# Abrupt daemon death also restores last-good, not the saved draft.
-router.succeed("systemctl kill --kill-whom=main --signal=SIGKILL nixos-router-backend.service")
-router.wait_for_unit("nixos-router-backend.service", timeout=90)
+# Abrupt executor death restores last-good, not the saved draft.
+router.succeed("systemctl kill --kill-whom=main --signal=SIGKILL nixos-router-executor.service")
+router.wait_for_unit("nixos-router-executor.service", timeout=180)
 client.wait_until_succeeds("curl -fsS http://192.168.50.1:8080/api/v1/health")
 router.fail("ip -4 addr show br-lan | grep 192.168.77.1")
-client.succeed("ping -c1 -W2 10.0.0.1")
+# READY means restored services; the restarted DHCP client may still be acquiring
+# its lease. Require real forwarding to recover within a bounded interval.
+client.wait_until_succeeds("ping -c1 -W2 10.0.0.1", timeout=90)
 # Even syntactically corrupt draft files must not prevent last-good recovery.
-router.succeed("printf '{broken' > /var/lib/nixos-router/config.json; systemctl restart nixos-router-backend")
+router.succeed("printf '{broken' > /var/lib/nixos-router-api/config.json; systemctl restart nixos-router-backend")
 router.wait_for_unit("nixos-router-backend.service")
 client.wait_until_succeeds("curl -fsS http://192.168.50.1:8080/api/v1/health | grep startupWarning")
 client.succeed("ping -c1 -W2 10.0.0.1")
@@ -237,7 +246,33 @@ cfg["lan"]["ipv4Cidr"] = "192.168.60.1/24"
 cfg["lan"]["dhcp"]["rangeStart"] = "192.168.60.100"
 cfg["lan"]["dhcp"]["rangeEnd"] = "192.168.60.150"
 api("PUT", "/config", cfg)
-moved_job = api("POST", "/apply")["jobId"]
+moved_revision = api("GET", "/config")["config"]["revision"]
+moved = api("POST", "/apply")
+moved_job = moved["jobId"]
+assert moved["configRevision"] == moved_revision, moved
+assert moved["appliedRuntime"] is False, moved
+# The LAN address changes asynchronously. Observe the same job over loopback
+# before restarting either DHCP client, otherwise it can select an OFFER from
+# the old dnsmasq instance and keep retrying that obsolete server/address pair.
+local_base = "http://127.0.0.1:8080/api/v1"
+router.succeed("curl -fsS -c /tmp/move-cookie -H 'Content-Type: application/json' --data " + shlex.quote(json.dumps({"username":"admin", "password":"test-password-123"})) + " " + local_base + "/session")
+deadline = time.monotonic() + 180
+while time.monotonic() < deadline:
+    rc, raw = router.execute("curl --connect-timeout 2 --max-time 5 -fsS -b /tmp/move-cookie " + shlex.quote(local_base + "/jobs/" + moved_job))
+    if rc in (7, 28, 52, 56):
+        time.sleep(1)
+        continue
+    assert rc == 0, (rc, raw)
+    result = json.loads(raw)
+    assert result["status"] != "failed", result
+    if result["status"] == "success":
+        payload = json.loads(result["payload"]) if isinstance(result["payload"], str) else result["payload"]
+        assert payload["configRevision"] == moved_revision, result
+        assert payload["appliedRuntime"] is True, result
+        break
+    time.sleep(1)
+else:
+    raise Exception("LAN address change did not complete")
 for node in [client, observer]:
     node.succeed("systemctl stop systemd-networkd; ip address flush dev eth1; rm -f /run/systemd/netif/leases/*; systemctl start systemd-networkd")
     node.wait_until_succeeds("ip -4 -o address show eth1 | grep '192.168.60.'", timeout=90)

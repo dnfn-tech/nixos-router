@@ -1,0 +1,198 @@
+--- a/src/dnsmasq.h
++++ b/src/dnsmasq.h
+@@ -1068,7 +1068,7 @@
+   struct in6_addr start6, end6; /* range of available addresses */
+   struct in6_addr local6;
+   int prefix, if_index;
+-  unsigned int valid, preferred, saved_valid;
++  unsigned int valid, preferred, saved_valid, present_valid;
+   time_t ra_time, ra_short_period_start, address_lost_time;
+   char *template_interface;
+ #endif
+@@ -1895,6 +1895,7 @@
+ /* radv.c */
+ #ifdef HAVE_DHCP6
+ void ra_init(time_t now);
++void ra_shutdown(time_t now);
+ void icmp6_packet(time_t now);
+ time_t periodic_ra(time_t now);
+ void ra_start_unsolicited(time_t now, struct dhcp_context *context);
+--- a/src/dhcp6.c
++++ b/src/dhcp6.c
+@@ -710,6 +710,15 @@
+ 
+   if (!(flags & IFACE_PERMANENT))
+     return 1;
++
++  /* Keep the current kernel lifetime even for deprecated addresses. A
++     constructed prefix disappearing is not the same as becoming deprecated. */
++  for (context = daemon->dhcp6; context; context = context->next)
++    if ((context->flags & CONTEXT_CONSTRUCTED) &&
++        context->if_index == if_index && prefix <= context->prefix &&
++        is_same_net6(local, &context->start6, context->prefix) &&
++        valid > context->present_valid)
++      context->present_valid = valid;
+ 
+   if (flags & IFACE_DEPRECATED)
+     return 1;
+@@ -821,21 +830,46 @@
+ 
+   for (context = daemon->dhcp6; context; context = context->next)
+     if (context->flags & CONTEXT_CONSTRUCTED)
+-      context->flags |= CONTEXT_GC;
++      {
++        context->flags |= CONTEXT_GC;
++        context->present_valid = 0;
++      }
+    
+-  iface_enumerate(AF_INET6, &param, (callback_t){.af_inet6=construct_worker});
++  if (!iface_enumerate(AF_INET6, &param, (callback_t){.af_inet6=construct_worker}))
++    return; /* An incomplete dump is not evidence that a prefix disappeared. */
+ 
+   for (up = &daemon->dhcp6, context = daemon->dhcp6; context; context = tmp)
+     {
+       
+       tmp = context->next; 
+      
++      if ((context->flags & (CONTEXT_GC | CONTEXT_OLD)) ==
++          (CONTEXT_GC | CONTEXT_OLD))
++        {
++          if (context->present_valid)
++            {
++              /* The address remains deprecated: preserve its actual remaining
++                 lifetime, without restarting an earlier sampled duration. */
++              context->saved_valid = context->present_valid;
++              context->address_lost_time = now;
++            }
++          else if (context->saved_valid)
++            {
++              /* A previously deprecated address was now removed or expired. */
++              context->saved_valid = 0;
++              context->address_lost_time = now;
++              ra_start_unsolicited(now, context);
++              param.newone = 1;
++            }
++        }
++
+       if (context->flags & CONTEXT_GC && !(context->flags & CONTEXT_OLD))
+ 	{
+ 	  if ((context->flags & CONTEXT_RA) || option_bool(OPT_RA))
+ 	    {
+ 	      /* previously constructed context has gone; advertise its demise */
+ 	      context->flags |= CONTEXT_OLD;
++	      context->saved_valid = context->present_valid;
+ 	      context->address_lost_time = now;
+ 	      /* Apply same ceiling of configured lease time as in radv.c */
+ 	      if (context->saved_valid > context->lease_time)
+--- a/src/radv.c
++++ b/src/radv.c
+@@ -48,6 +48,8 @@
+   int max_alias_ifs;
+   int *alias_ifs;
+ };
++
++static int ra_stopping;
+ 
+ static void send_ra(time_t now, int iface, char *iface_name, struct in6_addr *dest);
+ static void send_ra_alias(time_t now, int iface, char *iface_name, struct in6_addr *dest,
+@@ -251,6 +253,30 @@
+     }
+ }
+ 
++/* The independent manager stops this service before removing its bridge.
++   Withdraw constructed prefixes while the interface and RA socket still exist. */
++void ra_shutdown(time_t now)
++{
++  struct dhcp_context *context;
++
++  if (daemon->icmp6fd == -1)
++    return;
++
++  ra_stopping = 1;
++  for (context = daemon->dhcp6; context; context = context->next)
++    if ((context->flags & CONTEXT_CONSTRUCTED) &&
++        ((context->flags & CONTEXT_RA) || option_bool(OPT_RA)))
++      {
++        context->flags |= CONTEXT_OLD;
++        context->saved_valid = 0;
++        context->address_lost_time = now;
++        context->ra_time = now;
++      }
++
++  /* Send synchronously: the normal unsolicited timer cannot run after exit. */
++  periodic_ra(now);
++}
++
+ static void send_ra_alias(time_t now, int iface, char *iface_name, struct in6_addr *dest, int send_iface)
+ {
+   struct ra_packet *ra;
+@@ -320,6 +346,12 @@
+   if (parm.link_pref_time != 0 && parm.link_pref_time < min_pref_time)
+     min_pref_time = parm.link_pref_time;
+ 
++  if (ra_stopping)
++    {
++      min_pref_time = 0; /* Withdraw RDNSS and DNSSL with the router. */
++      ra->lifetime = htons(0);
++    }
++
+   /* Look for constructed contexts associated with addresses which have gone, 
+      and advertise them with preferred_time == 0  RFC 6204 4.3 L-13 */
+   for (up = &daemon->dhcp6, context = daemon->dhcp6; context; context = tmp)
+@@ -330,7 +362,10 @@
+ 	{
+ 	  unsigned int old = difftime(now, context->address_lost_time);
+ 	  
+-	  if (old > context->saved_valid)
++	  /* Retain expired contexts briefly to send unsolicited zero-lifetime
++             RAs. Otherwise the one-second initial timer deletes a zero-valid
++             context before any client that is not soliciting sees withdrawal. */
++          if (old > context->saved_valid && old - context->saved_valid > 60)
+ 	    { 
+ 	      /* We've advertised this enough, time to go */
+ 	     
+@@ -383,7 +418,7 @@
+                      "on-link" unless "off-link" was specified */
+ 		  opt->flags = (do_slaac ? 0x40 : 0) |
+                     ((context->flags & CONTEXT_RA_OFF_LINK) ? 0 : 0x80);
+-		  opt->valid_lifetime = htonl(context->saved_valid - old);
++		  opt->valid_lifetime = htonl(old < context->saved_valid ? context->saved_valid - old : 0);
+ 		  opt->preferred_lifetime = htonl(0);
+ 		  opt->reserved = 0; 
+ 		  opt->prefix = local;
+@@ -402,7 +437,10 @@
+     
+   /* If we're advertising only old prefixes, set router lifetime to zero. */
+   if (old_prefix && !parm.found_context)
+-    ra->lifetime = htons(0);
++    {
++      ra->lifetime = htons(0);
++      min_pref_time = 0; /* Do not retain DNS after the last usable prefix. */
++    }
+ 
+   /* No prefixes to advertise. */
+   if (!old_prefix && !parm.found_context)
+@@ -448,6 +486,11 @@
+      
+   iface_enumerate(AF_LOCAL, &send_iface, (callback_t){.af_local=add_lla});
+  
++  /* Link-local infinite lifetime must not make DNS immortal during
++     the interval before a deprecated prefix is reconstructed. */
++  if (min_pref_time > ntohs(ra->lifetime))
++    min_pref_time = ntohs(ra->lifetime);
++
+   /* RDNSS, RFC 6106, use relevant DHCP6 options */
+   (void)option_filter(parm.tags, NULL, daemon->dhcp_opts6, 0);
+   
+--- a/src/dnsmasq.c
++++ b/src/dnsmasq.c
+@@ -1713,6 +1713,9 @@
+ 	break;
+ 	
+       case EVENT_TERM:
++#ifdef HAVE_DHCP6
++        ra_shutdown(now);
++#endif
+ 	/* Knock all our children on the head. */
+ 	if (daemon->port != 0)
+ 	  for (i = 0; i < daemon->max_procs; i++)

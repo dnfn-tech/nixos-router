@@ -86,12 +86,12 @@ curl -s -b cookie.txt http://localhost:8080/api/v1/capabilities/wifi | jq .
 # 5) 更新配置（仅保存，不 apply）
 # 形状一：与 GET 对称（{ config: {...} }）
 curl -s -b cookie.txt -H 'Content-Type: application/json' \
-  -d '{"config":{"system":{"hostname":"new-name"}}, "wan":{"mode":"dhcp"}, "lan":{...}, "dns":{...}, "wifi":{...}, "firewall":{...}, "ssh":{...}, "plugins":{}}' \
+  -d '{"config":{"system":{"hostname":"new-name"}}, "wan":{"mode":"dhcp"}, "lan":{...}, "dns":{...}, "wifi":{...}, "firewall":{...}, "plugins":{}}' \
   -X PUT http://localhost:8080/api/v1/config | jq .
 
 # 形状二：直接传完整配置对象
 curl -s -b cookie.txt -H 'Content-Type: application/json' \
-  -d '{"system":{"hostname":"new-name"}, "wan":{"mode":"dhcp"}, "lan":{...}, "dns":{...}, "wifi":{...}, "firewall":{...}, "ssh":{...}, "plugins":{}}' \
+  -d '{"system":{"hostname":"new-name"}, "wan":{"mode":"dhcp"}, "lan":{...}, "dns":{...}, "wifi":{...}, "firewall":{...}, "plugins":{}}' \
   -X PUT http://localhost:8080/api/v1/config | jq .
 
 # 秘密字段合并规则（避免误清空）

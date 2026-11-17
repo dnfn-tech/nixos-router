@@ -79,7 +79,8 @@ async function waitAction(page, id) {
   await page.waitForFunction(() => !window.app.state.busy);
 }
 test("single plugin save persists through API and clears draft before apply", async () => {
-  const { page, context } = await pageAt("plugins/mihomo");
+  const { page, context } = await pageAt("plugins/adblock");
+  const original = await configOf(context);
   try {
     const input = page.locator("#page-content input[type=checkbox]").first();
     const pluginWrites = [];
@@ -98,13 +99,14 @@ test("single plugin save persists through API and clears draft before apply", as
     assert.equal(await page.locator("#apply-dirty").isVisible(), false);
     const response = await context.request.get(`${base}/api/v1/config`);
     const saved = await response.json();
-    assert.equal((saved.config || saved).plugins.mihomo.enable, enabled);
+    assert.equal((saved.config || saved).plugins.adblock.enable, enabled);
     await waitAction(page, "#apply-run");
     assert.match(
       await page.locator("#apply-msg").innerText(),
       /生成完成.*未应用运行态/,
     );
   } finally {
+    await putConfig(context, original);
     await context.close();
   }
 });
@@ -162,6 +164,7 @@ test("failed atomic plugin save keeps dirty and cancels apply", async () => {
 });
 test("all plugin saves clear dirty and stale cached values", async () => {
   const { page, context } = await pageAt("plugins");
+  const original = await configOf(context);
   try {
     const first = page.locator("#page-content input[type=checkbox]").first();
     const label = "adblock";
@@ -179,6 +182,7 @@ test("all plugin saves clear dirty and stale cached values", async () => {
       enabled,
     );
   } finally {
+    await putConfig(context, original);
     await context.close();
   }
 });
@@ -229,7 +233,8 @@ test("runtime success retains reported warnings", async () => {
   }
 });
 test("discarding edits after a save cannot leak into another page save", async () => {
-  const { page, context } = await pageAt("plugins/mihomo");
+  const { page, context } = await pageAt("plugins/adblock");
+  const original = await configOf(context);
   try {
     const input = page.locator("#page-content input[type=checkbox]").first();
     await input.click();
@@ -243,11 +248,12 @@ test("discarding edits after a save cannot leak into another page save", async (
       await context.request.get(`${base}/api/v1/config`)
     ).json();
     assert.equal(
-      (result.config || result).plugins.mihomo.enable,
+      (result.config || result).plugins.adblock.enable,
       savedValue,
       "discarded draft was persisted by another page",
     );
   } finally {
+    await putConfig(context, original);
     await context.close();
   }
 });
@@ -272,7 +278,7 @@ const allRoutes = [
   "vlan",
   "tailscale",
   "zerotier",
-  "plugins/mihomo",
+  "plugins/adblock",
   "system?tab=account",
   "system?tab=activity",
   "system?tab=diagnostics",
@@ -363,12 +369,14 @@ async function navigate(page, route) {
   );
 }
 async function configOf(context) {
-  return (await (await context.request.get(`${base}/api/v1/config`)).json())
+  // Fixture/verification reads explicitly request real stored secrets; page reads stay redacted.
+  return (await (await context.request.get(`${base}/api/v1/config?redact=0`)).json())
     .config;
 }
 async function putConfig(context, config) {
   const r = await context.request.put(`${base}/api/v1/config`, {
     data: config,
+    headers: { "If-Match": JSON.stringify((await configOf(context)).revision) },
   });
   assert.equal(r.status(), 200, await r.text());
 }
@@ -377,6 +385,7 @@ test("core and plugin fields survive real API saves with their correct schema", 
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.lan.staticLeases = [
       { mac: "02:00:00:00:00:01", ip: "192.168.1.10", hostname: "desktop" },
     ];
@@ -407,14 +416,14 @@ test("core and plugin fields survive real API saves with their correct schema", 
       },
     ];
     cfg.plugins.vlan = {
-      enable: true,
+      enable: false,
       config: {
         vlans: [{ vid: 10, name: "vlan10", bridge: "br-lan" }],
         extra: { keep: true },
       },
     };
     cfg.plugins.zerotier = {
-      enable: true,
+      enable: false,
       config: {
         controlPlane: "private",
         controllerUrl: "https://old.example.com",
@@ -423,7 +432,7 @@ test("core and plugin fields survive real API saves with their correct schema", 
       },
     };
     cfg.plugins.tailscale = {
-      enable: true,
+      enable: false,
       config: {
         controlPlane: "headscale",
         loginServer: "https://old.example.com",
@@ -528,7 +537,6 @@ test("core and plugin fields survive real API saves with their correct schema", 
         [["保留天数", "14"]],
         [["plugins.traffic.config.retentionDays", 14]],
       ],
-      ["ssh", [["监听端口", "2222"]], [["ssh.port", 2222]]],
       [
         "system",
         [["主机名", "router-ui-test"]],
@@ -567,6 +575,7 @@ test("WiFi deletes preserve the remaining AP secret and renames require a new pa
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.wifi.aps = [
       {
         ssid: "first",
@@ -634,6 +643,7 @@ test("system panels support backup, invalid restore feedback, restore refresh an
     await page.getByRole("button", { name: "恢复所选备份" }).click();
     await page.getByText(/恢复失败：/).waitFor();
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.system.hostname = "restored-router";
     await page.getByLabel("选择配置备份").setInputFiles({
       name: "config.json",
@@ -696,8 +706,9 @@ test("unknown plugin editing preserves typed JSON and diagnostics mask plugin se
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.plugins.custom = {
-      enable: true,
+      enable: false,
       config: {
         enabled: true,
         count: 2,
@@ -776,6 +787,7 @@ test("populated tables, system tabs and editors fit mobile and desktop; expired 
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.lan.staticLeases = Array.from({ length: 35 }, (_, i) => ({
       hostname: `家庭设备-${i}-` + "long-name-".repeat(5),
       ip: `192.168.1.${i + 10}`,
@@ -915,12 +927,42 @@ test("WAN mode changes and all DDNS providers retain conditional fields", async 
     await context.close();
   }
 });
+test("blocking a DHCP client does not submit an unchanged hostname or create a static lease", async () => {
+  const { page, context } = await pageAt("plugins");
+  const original = await configOf(context);
+  try {
+    const cfg = structuredClone(original);
+    cfg.lan.staticLeases = [];
+    cfg.firewall.blockedMacs = [];
+    await putConfig(context, cfg);
+    await page.route("**/api/v1/clients", route => route.fulfill({
+      status: 200,
+      json: {source: "leases", clients: [{mac: "02:00:00:00:00:03", ip: "192.168.1.12", hostname: "dynamic-client", source: "leases", expires: "", lastSeen: "", blocked: false}]},
+    }));
+    await navigate(page, "clients");
+    await page.getByRole("button", { name: "编辑", exact: true }).click();
+    await page.getByLabel("阻止访问", { exact: true }).check();
+    const patched = page.waitForResponse(r => r.request().method() === "PATCH" && r.url().includes("/api/v1/clients/"));
+    await page.getByRole("button", { name: "保存设备" }).click();
+    const response = await patched;
+    assert.equal(response.status(), 200, await response.text());
+    assert.deepEqual(response.request().postDataJSON(), {blocked: true});
+    await page.waitForSelector("dialog", { state: "detached" });
+    const saved = await configOf(context);
+    assert.deepEqual(saved.lan.staticLeases || [], []);
+    assert.ok(saved.firewall.blockedMacs.includes("02:00:00:00:00:03"));
+  } finally {
+    await putConfig(context, original);
+    await context.close();
+  }
+});
 test("client edits persist and password changes remain usable", async () => {
   const { page, context } = await pageAt("plugins");
   const original = await configOf(context);
   let changed = false;
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.lan.staticLeases = [
       { mac: "02:00:00:00:00:02", ip: "192.168.1.11", hostname: "old-name" },
     ];
@@ -1001,8 +1043,9 @@ test("advanced plugin JSON preserves secrets when nested arrays are reordered", 
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     (cfg.plugins ||= {}).arrayplugin = {
-      enable: true,
+      enable: false,
       config: {
         label: "original",
         peers: [
@@ -1024,6 +1067,11 @@ test("advanced plugin JSON preserves secrets when nested arrays are reordered", 
     assert.equal(result.peers[0].name, "b");
     assert.equal(result.peers[0].token, "secret-b");
     assert.equal(result.peers[1].token, "secret-a");
+    const next = JSON.parse(await input.inputValue());
+    next.label = "saved-twice";
+    await input.fill(JSON.stringify(next));
+    await waitAction(page, "#apply-save");
+    assert.equal((await configOf(context)).plugins.arrayplugin.config.label, "saved-twice");
   } finally {
     await putConfig(context, original);
     await context.close();
@@ -1061,6 +1109,7 @@ test("redrawing WiFi collections retains rename password validation", async () =
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.wifi.aps = [
       {
         ssid: "old",
@@ -1204,8 +1253,10 @@ for (const persistent of [false, true]) {
         window.setTimeout = (fn, ms, ...args) => timeout(fn, ms === 1000 ? 10 : ms === 5000 ? 100 : ms, ...args);
         const nativeFetch = window.fetch;
         window.jobTimeoutAborts = 0;
+        window.jobFetchAttempts = 0;
         window.fetch = (url, options) => {
           if (String(url).includes("/api/v1/jobs/timeout-test")) {
+            window.jobFetchAttempts++;
             options.signal.addEventListener("abort", () => window.jobTimeoutAborts++, { once: true });
           }
           return nativeFetch(url, options);
@@ -1213,8 +1264,20 @@ for (const persistent of [false, true]) {
       });
       await waitAction(page, "#apply-run");
       assert.equal(posts, 1, "polling must never resubmit Apply");
-      assert.equal(reads, persistent ? 30 : 2);
-      assert.equal(await page.evaluate(() => window.jobTimeoutAborts), persistent ? 30 : 1);
+      const attempts = await page.evaluate(() => window.jobFetchAttempts);
+      const aborts = await page.evaluate(() => window.jobTimeoutAborts);
+      // Under load a 100 ms abort can fire before Playwright receives the
+      // routed request. Count the browser's actual fetch attempts and signals,
+      // not only requests that happened to reach the interception callback.
+      assert.ok(reads > 0 && reads <= attempts, `routed ${reads}, attempted ${attempts}`);
+      if (persistent) {
+        assert.equal(attempts, 30);
+        assert.equal(aborts, 30);
+      } else {
+        assert.ok(reads >= 2, `response eventually delivered after ${reads} requests`);
+        assert.ok(attempts >= 2 && attempts <= 30);
+        assert.equal(aborts, attempts - 1);
+      }
       const message = await page.locator("#apply-msg").innerText();
       const job = await page.evaluate(() => sessionStorage.getItem("router-apply-job"));
       if (persistent) {
@@ -1229,3 +1292,275 @@ for (const persistent of [false, true]) {
     } finally { await context.close(); }
   });
 }
+
+test("two editors reject stale saves and retain input until explicit reload", async () => {
+  const first = await pageAt("plugins");
+  const second = await pageAt("plugins");
+  const original = await configOf(first.context);
+  try {
+    await navigate(first.page, "system");
+    await navigate(second.page, "system");
+    await first.page.getByLabel("主机名", { exact: true }).fill("first-editor");
+    await second.page.getByLabel("主机名", { exact: true }).fill("second-editor");
+    await waitAction(first.page, "#apply-save");
+    await waitAction(second.page, "#apply-save");
+    assert.match(await second.page.locator("#apply-msg").innerText(), /其他会话修改/);
+    assert.equal(await second.page.getByLabel("主机名", { exact: true }).inputValue(), "second-editor");
+    assert.equal(await second.page.locator("#apply-dirty").isVisible(), true);
+    assert.equal((await configOf(first.context)).system.hostname, "first-editor");
+    await navigate(second.page, "plugins");
+    await navigate(second.page, "system");
+    await second.page.getByLabel("主机名", { exact: true }).fill("second-editor");
+    await waitAction(second.page, "#apply-save");
+    assert.equal((await configOf(first.context)).system.hostname, "second-editor");
+  } finally {
+    await putConfig(first.context, original);
+    await first.context.close();
+    await second.context.close();
+  }
+});
+
+test("field validation preserves input and focuses the rejected configuration field", async () => {
+  const {page,context}=await pageAt("plugins");
+  const original=await configOf(context);
+  try {
+    await navigate(page,"wan");
+    await page.getByLabel("上网方式",{exact:true}).selectOption("static");
+    const address=page.getByLabel("静态地址 / CIDR",{exact:true});
+    await address.fill("invalid-address");
+    await waitAction(page,"#apply-save");
+    assert.equal(await address.getAttribute("aria-invalid"),"true");
+    assert.equal(await address.inputValue(),"invalid-address");
+    assert.equal(await address.evaluate(el=>document.activeElement===el),true);
+    assert.equal(await page.locator("#apply-dirty").isVisible(),true);
+    const described=await address.getAttribute("aria-describedby");
+    assert.ok(described?.includes("-error"));
+    await address.fill("10.20.30.2/24");
+    assert.equal(await address.getAttribute("aria-invalid"),null);
+    await waitAction(page,"#apply-save");
+    assert.equal((await configOf(context)).wan.static.addressCidr,"10.20.30.2/24");
+  } finally {await putConfig(context,original);await context.close();}
+});
+
+test("field validation identifies the second array row without marking the first", async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const fixture=JSON.parse(JSON.stringify(original));
+  fixture.lan.staticLeases=[{mac:"00:11:22:33:44:55",ip:"192.168.1.10"},{mac:"00:11:22:33:44:66",ip:"192.168.1.11"}];
+  await putConfig(context,fixture);await navigate(page,"lan");
+  const ips=page.getByLabel("IP 地址",{exact:true});
+  await ips.nth(1).fill("not-an-ip");await waitAction(page,"#apply-save");
+  assert.equal(await ips.nth(0).getAttribute("aria-invalid"),null);
+  assert.equal(await ips.nth(1).getAttribute("aria-invalid"),"true");
+  assert.equal(await ips.nth(1).getAttribute("data-config-path"),"lan.staticLeases.1.ip");
+  assert.equal(await ips.nth(1).evaluate(el=>document.activeElement===el),true);
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("field validation renders text safely and keeps other errors when editing one field",async()=>{
+ const {page,context}=await pageAt("plugins");
+ try {
+  await navigate(page,"lan");
+  const message='<img src=x onerror="window.errorInjected=true">';
+  await page.route("**/api/v1/config",async route=>{
+   if(route.request().method()!=="PUT")return route.continue();
+   await route.fulfill({status:400,contentType:"application/json",body:JSON.stringify({code:"invalid_config",message:"检查输入",fieldErrors:{"lan.dhcp.rangeStart":message,"lan.dhcp.rangeEnd":"结束地址错误","wan.static.gateway":"其他页面字段错误"}})});
+  });
+  await page.getByLabel("地址池起始地址",{exact:true}).fill("192.168.1.30");await waitAction(page,"#apply-save");
+  assert.equal(await page.locator(".field-error img").count(),0);
+  assert.equal(await page.evaluate(()=>window.errorInjected),undefined);
+  assert.ok((await page.locator(".field-error").allTextContents()).includes(message));
+  assert.match(await page.locator("#apply-msg").innerText(),/其他页面字段错误/);
+  await page.getByLabel("地址池起始地址",{exact:true}).fill("192.168.1.31");
+  assert.equal(await page.getByLabel("地址池起始地址",{exact:true}).getAttribute("aria-invalid"),null);
+  assert.equal(await page.getByLabel("地址池结束地址",{exact:true}).getAttribute("aria-invalid"),"true");
+ } finally {await context.close();}
+});
+
+test("secret clearing is explicit, reversible, and cancelled by a replacement value",async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.plugins ||= {};cfg.plugins.tailscale={enable:false,config:{authKey:"saved-auth-key"}};
+  await putConfig(context,cfg);await navigate(page,"plugins/tailscale");
+  const clear=page.getByLabel("清空认证密钥",{exact:true});
+  assert.equal(await clear.count(),1);
+  await clear.check();await clear.uncheck();await waitAction(page,"#apply-save");
+  assert.equal((await configOf(context)).plugins.tailscale.config.authKey,"saved-auth-key");
+  await clear.check();await page.getByLabel("认证密钥",{exact:true}).fill("replacement-key");
+  assert.equal(await clear.isChecked(),false);await waitAction(page,"#apply-save");
+  assert.equal((await configOf(context)).plugins.tailscale.config.authKey,"replacement-key");
+  await clear.check();await waitAction(page,"#apply-save");
+  assert.equal((await configOf(context)).plugins.tailscale.config.authKey,"");
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("secret clearing follows an array item after deleting its preceding row",async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.wifi.aps=[{ssid:"first",psk:"first-password",enable:false},{ssid:"second",psk:"second-password",enable:false}];
+  await putConfig(context,cfg);await navigate(page,"wifi");
+  const clear=page.getByLabel("清空无线密码",{exact:true});assert.equal(await clear.count(),2);
+  await clear.nth(1).check();await page.getByRole("button",{name:"删除接入点第 1 项",exact:true}).click();
+  assert.equal(await clear.first().isChecked(),true);await waitAction(page,"#apply-save");
+  const saved=(await configOf(context)).wifi.aps;assert.equal(saved.length,1);assert.equal(saved[0].ssid,"second");assert.equal(saved[0].psk ?? "","");
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("secret clearing in advanced JSON follows its reference when rows are reordered",async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.plugins ||= {};
+  cfg.plugins["clear-plugin"]={enable:false,config:{peers:[{name:"a","token.with/slash":"secret-a"},{name:"b","token.with/slash":"secret-b"}]}};
+  await putConfig(context,cfg);await navigate(page,"plugins/clear-plugin");
+  const choice=page.getByLabel("清空密钥：peers.1.token.with/slash",{exact:true});assert.equal(await choice.count(),1);await choice.check();
+  const json=page.getByLabel("高级配置（JSON）");const data=JSON.parse(await json.inputValue());
+  const duplicate=structuredClone(data);duplicate.peers.push(structuredClone(data.peers[1]));
+  await json.fill(JSON.stringify(duplicate));
+  assert.match(await json.evaluate(el=>el.validationMessage),/待清空密钥的标记被复制/);
+  assert.equal((await configOf(context)).plugins["clear-plugin"].config.peers[1]["token.with/slash"],"secret-b");
+  data.peers.reverse();await json.fill(JSON.stringify(data));
+  assert.equal(await json.evaluate(el=>el.validationMessage),"");
+  assert.equal(await page.getByLabel("清空密钥：peers.0.token.with/slash",{exact:true}).isChecked(),true);
+  await waitAction(page,"#apply-save");const saved=(await configOf(context)).plugins["clear-plugin"].config.peers;
+  assert.equal(saved[0].name,"b");assert.equal(saved[0]["token.with/slash"],"");assert.equal(saved[1]["token.with/slash"],"secret-a");
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("secret clearing retains intent on validation failure and succeeds after disabling its use",async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.wan.mode="pppoe";cfg.wan.pppoe={username:"user",password:"required-password"};
+  await putConfig(context,cfg);await navigate(page,"wan");
+  const clear=page.getByLabel("清空PPPoE 密码",{exact:true});assert.equal(await clear.count(),1);await clear.check();await waitAction(page,"#apply-save");
+  assert.equal(await clear.isChecked(),true);assert.equal(await page.locator("#apply-dirty").isVisible(),true);
+  assert.equal((await configOf(context)).wan.pppoe.password,"required-password");
+  assert.equal(await page.getByLabel("PPPoE 密码",{exact:true}).getAttribute("aria-invalid"),"true");
+  await page.getByLabel("上网方式",{exact:true}).selectOption("dhcp");await waitAction(page,"#apply-save");
+  assert.equal((await configOf(context)).wan.pppoe.password,"");
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("advanced array blank preserves secrets and ambiguous edits retain input", async () => {
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.plugins ||= {};
+  cfg.plugins.arrayblank={enable:false,config:{peers:[{name:"a",token:"saved-token"},{name:"b",token:""}]}};
+  await putConfig(context,cfg);await navigate(page,"plugins/arrayblank");
+  let json=page.getByLabel("高级配置（JSON）");let data=JSON.parse(await json.inputValue());
+  data.peers[0].token="";data.peers.reverse();await json.fill(JSON.stringify(data));await waitAction(page,"#apply-save");
+  let stored=(await configOf(context)).plugins.arrayblank.config.peers;
+  assert.equal(stored[0].token,"");assert.equal(stored[1].token,"saved-token");
+  json=page.getByLabel("高级配置（JSON）");data=JSON.parse(await json.inputValue());
+  data.peers[1].name="changed";data.peers[1].token="****";const edited=JSON.stringify(data);
+  await json.fill(edited);await waitAction(page,"#apply-save");
+  assert.equal(await json.inputValue(),edited);
+  assert.equal((await configOf(context)).plugins.arrayblank.config.peers[1].token,"saved-token");
+  assert.equal(await page.locator("#apply-dirty").isVisible(),true);
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("WiFi security selection persists SAE and keeps the existing secret", async () => {
+  const { page, context } = await pageAt("plugins");
+  const original = await configOf(context);
+  try {
+    const cfg = structuredClone(original);
+    cfg.plugins ||= {};
+    cfg.wifi.aps = [{ssid:"security-test",band:"2g",channel:6,psk:"preserved-wifi-password",enable:true}];
+    await putConfig(context,cfg);
+    await navigate(page,"wifi");
+    const security = page.getByLabel("安全模式",{exact:true});
+    assert.equal(await security.inputValue({timeout:2000}), "");
+    await security.selectOption("wpa3-sae");
+    await waitAction(page,"#apply-save");
+    let saved=await configOf(context);
+    assert.equal(saved.wifi.aps[0].security,"wpa3-sae");
+    let backup=await (await context.request.get(`${base}/api/v1/backup`)).json();
+    assert.equal(backup.config.wifi.aps[0].psk,"preserved-wifi-password");
+    await page.locator("#page-refresh").click();
+    await page.waitForFunction(()=>!window.app.state.loading);
+    assert.equal(await page.getByLabel("安全模式",{exact:true}).inputValue(),"wpa3-sae");
+  } finally {
+    await putConfig(context,original);
+    await context.close();
+  }
+});
+
+test("independent WiFi subnet editor preserves drafts and explicit access permissions", async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.wifi.enable=true;cfg.wifi.bridgeToLan=true;
+  cfg.wifi.aps=[{enable:true,ssid:"routed-ui",psk:"routed-ui-password",band:"2g",channel:6}];
+  await putConfig(context,cfg);await navigate(page,"wifi");
+  await page.getByLabel("桥接到内网",{exact:true}).uncheck();
+  const cidr=page.getByLabel("无线网关 / CIDR",{exact:true});
+  assert.equal(await cidr.isVisible({timeout:2000}),true);
+  assert.equal(await page.getByLabel("允许无线管理路由器",{exact:true}).isChecked(),false);
+  assert.equal(await page.getByLabel("允许有线与无线互访",{exact:true}).isChecked(),false);
+  await cidr.fill("192.168.77.1/24");
+  await page.getByLabel("无线地址池起始地址",{exact:true}).fill("192.168.77.100");
+  await page.getByLabel("无线地址池结束地址",{exact:true}).fill("192.168.77.110");
+  await page.getByLabel("无线租约时间（分钟）",{exact:true}).fill("30");
+  await page.getByLabel("允许无线管理路由器",{exact:true}).check();
+  await waitAction(page,"#apply-save");
+  let saved=await configOf(context);
+  assert.equal(saved.wifi.bridgeToLan,false);assert.equal(saved.wifi.network.ipv4Cidr,"192.168.77.1/24");
+  assert.equal(saved.wifi.network.allowManagement,true);assert.equal(saved.wifi.network.allowWiredAccess,false);
+  await page.getByLabel("无线网关 / CIDR",{exact:true}).fill("inactive-draft");
+  await page.getByLabel("桥接到内网",{exact:true}).check();
+  await waitAction(page,"#apply-save");
+  saved=await configOf(context);assert.equal(saved.wifi.network.ipv4Cidr,"inactive-draft");
+  await page.getByLabel("桥接到内网",{exact:true}).uncheck();
+  await waitAction(page,"#apply-save");
+  assert.equal(await page.getByLabel("无线网关 / CIDR",{exact:true}).getAttribute("aria-invalid"),"true");
+ } finally {await putConfig(context,original);await context.close();}
+});
+
+test("WiFi radio standard and numeric channel width persist through the editor", async()=>{
+ const {page,context}=await pageAt("plugins");const original=await configOf(context);
+ try {
+  const cfg=structuredClone(original);cfg.wifi.enable=true;cfg.wifi.bridgeToLan=true;
+  cfg.wifi.aps=[{enable:true,ssid:"radio-ui",psk:"radio-ui-password",band:"5g",channel:149,security:"wpa3-sae"}];
+  await putConfig(context,cfg);await navigate(page,"wifi");
+  await page.getByLabel("无线标准",{exact:true}).selectOption("wifi7");
+  await page.getByLabel("信道带宽",{exact:true}).selectOption("80");
+  await waitAction(page,"#apply-save");
+  const saved=await configOf(context);
+  assert.equal(saved.wifi.aps[0].standard,"wifi7");
+  assert.equal(saved.wifi.aps[0].channelWidthMHz,80);
+  await page.locator("#page-refresh").click();await page.waitForFunction(()=>!window.app.state.loading);
+  assert.equal(await page.getByLabel("无线标准",{exact:true}).inputValue(),"wifi7");
+  assert.equal(await page.getByLabel("信道带宽",{exact:true}).inputValue(),"80");
+ }finally{await putConfig(context,original);await context.close()}
+});
+
+test("plugin capabilities expose AdBlock and keep system-owned services disabled", async () => {
+  const {page,context}=await pageAt("plugins");
+  try {
+    assert.equal(await page.getByLabel("启用 Mihomo",{exact:true}).isDisabled(),true);
+    assert.equal(await page.getByLabel("启用 广告拦截",{exact:true}).isDisabled(),false);
+    assert.match(await page.locator("#page-content").innerText(),/系统管理/);
+    await page.goto(`${base}/#/adblock`);
+    await page.waitForFunction(()=>window.app.state.route==="adblock"&&!window.app.state.loading);
+    assert.equal(await page.getByText("规则订阅",{exact:true}).count(),0);
+    await page.goto(`${base}/#/ssh`);
+    await page.waitForFunction(()=>window.app.state.route==="ssh"&&!window.app.state.loading);
+    assert.equal(await page.getByLabel("启用 SSH",{exact:true}).count(),0);
+    assert.match(await page.locator("#page-content").innerText(),/services.openssh/);
+  } finally {await context.close()}
+});
+
+test("registered module navigation works without a hardcoded page or existing config", async () => {
+ const {page,context}=await pageAt("plugins");
+ try {
+  await page.route("**/api/v1/plugins",async route=>{
+   const response=await route.fetch();const body=await response.json();
+   body.plugins.push({id:"new-module",title:"新增模块",available:true,runtimeSupported:false,ownership:"router",enabled:false,status:"not-applied",nav:{path:"/new-module"}});
+   await route.fulfill({json:body});
+  });
+  await page.locator("#page-refresh").click();await page.waitForFunction(()=>!window.app.state.loading);
+  await page.goto(`${base}/#/plugins/new-module`);await page.waitForFunction(()=>window.app.state.route==="new-module"&&!window.app.state.loading);
+  assert.equal(await page.getByLabel("启用 新增模块",{exact:true}).count(),1);
+  assert.equal(await page.getByLabel("高级配置（JSON）",{exact:true}).count(),1);
+  assert.equal(await page.locator("#section-tabs").getByRole("link",{name:"新增模块",exact:true}).count(),1);
+ } finally {await context.close()}
+});

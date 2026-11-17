@@ -8,13 +8,14 @@ let
       version = "0.1.0";
       src = ../.;
       modRoot = "./backend";
-      subPackages = [ "cmd/routerd" ];
+      subPackages = [ "cmd/routerd" "cmd/router-executor" ];
       vendorHash = "sha256-MM1ODEBButuG1Yalmyxv1mkJmc4Va4tclJpq1q0IAcc=";
     };
 in
 {
   imports = [ ./managed.nix ];
   options.services.nixos-router.backend = {
+    effectivePackage = lib.mkOption { type = lib.types.package; internal = true; readOnly = true; default = routerdPkg; };
     enable = lib.mkEnableOption "nixos-router Go 后端 API (只读)";
 
     package = lib.mkOption {
@@ -111,7 +112,7 @@ in
   config = lib.mkIf cfg.enable {
     # Runtime routerd is the network manager; never stop a competing manager
     # implicitly. Preview/generate-only installations may coexist with it.
-    assertions = lib.optionals cfg.applyReload (map (manager: {
+    assertions = lib.optionals (cfg.applyReload || cfg.managed.enable) (map (manager: {
       assertion = !manager.enabled;
       message = "nixos-router runtime apply is mutually exclusive with ${manager.name}; disable that manager explicitly or set applyReload = false for preview.";
     }) [
@@ -130,7 +131,7 @@ in
       serviceConfig = {
         ExecStart = lib.concatStringsSep " " (
           [ "${routerdPkg}/bin/routerd"
-            "--state-dir ${cfg.stateDir}"
+            "--state-dir ${if cfg.managed.enable then cfg.managed.apiStateDir else cfg.stateDir}"
             "--addr ${cfg.address}"
           ]
           ++ lib.optional cfg.dev "--dev"
@@ -148,7 +149,7 @@ in
         User = "root";
       };
       environment = cfg.environment // {
-        NIXOS_ROUTER_STATE_DIR = cfg.stateDir;
+        NIXOS_ROUTER_STATE_DIR = if cfg.managed.enable then cfg.managed.apiStateDir else cfg.stateDir;
         NIXOS_ROUTER_ADDR = cfg.address;
         NIXOS_ROUTER_DEV = lib.boolToString cfg.dev;
         NIXOS_ROUTER_ALLOW_REBOOT = lib.boolToString cfg.allowReboot;

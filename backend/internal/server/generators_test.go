@@ -58,4 +58,3 @@ func TestGenerateParentalAndQoSFragments(t *testing.T) {
 		t.Fatalf("expected down mbit in qos.sh")
 	}
 }
-

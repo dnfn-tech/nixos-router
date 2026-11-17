@@ -139,7 +139,6 @@ func TestApplyValidGeneratesFiles(t *testing.T) {
 		}
 	}
 	// extra notes may exist
-	_ , _ = os.Stat(filepath.Join(gen, "ipv6.nft.fragment"))
-	_ , _ = os.Stat(filepath.Join(gen, "ddns.env.fragment"))
+	_, _ = os.Stat(filepath.Join(gen, "ipv6.nft.fragment"))
+	_, _ = os.Stat(filepath.Join(gen, "ddns.env.fragment"))
 }
-

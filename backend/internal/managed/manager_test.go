@@ -42,7 +42,7 @@ func (r *recorder) Run(ctx context.Context, name string, args ...string) (string
 func fixture(t *testing.T) (*Manager, *recorder, config.Config) {
 	t.Helper()
 	r := &recorder{}
-	m, e := New(Options{StateDir: t.TempDir(), Interfaces: []string{"wan0", "lan0", "lan1"}, WiFiInterface: "wlan0", CountryCode: "US", ManagementPort: 8080, Runner: r})
+	m, e := New(Options{StateDir: t.TempDir(), Interfaces: []string{"wan0", "lan0", "lan1"}, WiFiInterface: "wlan0", CountryCode: "US", ManagementPort: 8080, SSHPorts: []int{22}, Runner: r})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -61,7 +61,7 @@ func TestRejectBeforeMutation(t *testing.T) {
 		{"bridge physical collision", func(c *config.Config) { c.LAN.BridgeName = "lan1" }},
 		{"injected domain", func(c *config.Config) { c.DNS.Domain = "lan\ninterface=eth-host" }},
 		{"unsupported qos", func(c *config.Config) { c.QoS.Enable = true }},
-		{"unsupported ipv6", func(c *config.Config) { c.IPv6.Enable = true }},
+		{"invalid ipv6 mode", func(c *config.Config) { c.IPv6.Enable = true; c.IPv6.WANMode = "invalid" }},
 		{"pool outside lan", func(c *config.Config) { c.LAN.DHCP.RangeStart = "10.0.0.2" }},
 		{"foreign forward", func(c *config.Config) {
 			c.Firewall.PortForwards = []config.PortForward{{Protocol: "tcp", ExternalPort: 80, DestPort: 80, DestIP: "10.0.0.1"}}
@@ -288,7 +288,7 @@ func TestRejectUnsafeWirelessAndUnsupported(t *testing.T) {
 		}
 	}
 }
-func TestStaticWANAndSSHChanges(t *testing.T) {
+func TestStaticWANDoesNotManageSSH(t *testing.T) {
 	m, r, c := fixture(t)
 	c.WAN.Mode = "static"
 	c.WAN.Static = &config.StaticIP{AddressCIDR: "10.0.0.2/24", Gateway: "10.0.0.1"}
@@ -302,14 +302,10 @@ func TestStaticWANAndSSHChanges(t *testing.T) {
 	if strings.Contains(calls, "restart nixos-router-wan") {
 		t.Fatal("DHCP started for static WAN")
 	}
-	c.SSH.Port = 2222
-	r.calls = nil
-	if _, e := m.Apply(context.Background(), c); e == nil {
-		t.Fatal("SSH silently accepted")
+	if strings.Contains(calls, "sshd") {
+		t.Fatal("network manager touched system SSH")
 	}
-	if len(r.calls) > 0 {
-		t.Fatal("mutated")
-	}
+
 }
 func TestCrossProcessTransactionLock(t *testing.T) {
 	m, _, c := fixture(t)
@@ -379,7 +375,6 @@ func TestManagementPortsProtectedWithFirewallDisabled(t *testing.T) {
 	c.Firewall.Enable = false
 	for _, port := range []int{22, 2222} {
 		m.opts.SSHPorts = []int{port}
-		c.SSH.Port = port
 		rules := m.render(c)["firewall.nft"]
 		want := fmt.Sprintf(`iifname != { "lo", "br-lan" } tcp dport { 8080, %d } drop`, port)
 		if !strings.Contains(rules, want) {
@@ -705,7 +700,6 @@ func TestManagementGuardUsesHostSSHPortsNotDraft(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	c.SSH.Port = 2222
 	c.Firewall.Enable = false
 	rules := m.render(c)["firewall.nft"]
 	if !strings.Contains(rules, `tcp dport { 8080, 22, 2200 } drop`) || strings.Contains(rules, "2222") {

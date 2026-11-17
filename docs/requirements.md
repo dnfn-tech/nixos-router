@@ -106,7 +106,7 @@
  
 ## 验收（插件页面控制）
 - 关闭可选插件（如 QoS/DDNS/IPv6/AdBlock/Traffic/Mihomo/VLAN/Tailscale/Zerotier）后，其侧栏入口与页面不可见；相关 API 返回 404/disabled
-- 重新启用后，入口与页面恢复；核心页面（overview/wan/lan/wifi/clients/dns/firewall/ssh/system/plugins-mgmt）始终存在且不可通过 WebUI 禁用
+- 重新启用后，入口与页面恢复；核心页面（overview/wan/lan/wifi/clients/dns/firewall/system/plugins-mgmt）始终存在且不可通过 WebUI 禁用
 
 ## 参考
 - 设计摘要：《DESIGN-BRIEF》

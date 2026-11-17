@@ -45,7 +45,7 @@ func setupAuthedServerWithConfig(t *testing.T) (*Server, string, []*http.Cookie,
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/session", bytes.NewReader(bs))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, withConfigRevision(srv, req))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("login failed: %d %s", w.Code, w.Body.String())
 	}
@@ -62,7 +62,7 @@ func TestPutConfigUnauthorized(t *testing.T) {
 	defer cleanup()
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/config", bytes.NewReader([]byte(`{}`)))
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, withConfigRevision(srv, req))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
@@ -80,13 +80,12 @@ func TestPutConfigInvalidDoesNotWrite(t *testing.T) {
 				"addressCidr": "not-a-cidr",
 			},
 		},
-		"lan":    config.DefaultConfig().LAN,
-		"dns":    config.DefaultConfig().DNS,
-		"wifi":   config.DefaultConfig().WiFi,
-		"ssh":    config.DefaultConfig().SSH,
-		"system": config.DefaultConfig().System,
+		"lan":      config.DefaultConfig().LAN,
+		"dns":      config.DefaultConfig().DNS,
+		"wifi":     config.DefaultConfig().WiFi,
+		"system":   config.DefaultConfig().System,
 		"firewall": config.DefaultConfig().Firewall,
-		"plugins": map[string]interface{}{},
+		"plugins":  map[string]interface{}{},
 	}
 	bs, _ := json.Marshal(invalid)
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/config", bytes.NewReader(bs))
@@ -95,7 +94,7 @@ func TestPutConfigInvalidDoesNotWrite(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, withConfigRevision(srv, req))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
@@ -119,7 +118,7 @@ func TestPutConfigSuccessWritesAndReadsBack(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv.Handler().ServeHTTP(w, withConfigRevision(srv, req))
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
@@ -137,7 +136,7 @@ func TestPutConfigSuccessWritesAndReadsBack(t *testing.T) {
 		req2.AddCookie(c)
 	}
 	w2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w2, req2)
+	srv.Handler().ServeHTTP(w2, withConfigRevision(srv, req2))
 	if w2.Code != http.StatusOK {
 		t.Fatalf("get failed: %d", w2.Code)
 	}
@@ -151,4 +150,3 @@ func TestPutConfigSuccessWritesAndReadsBack(t *testing.T) {
 		t.Fatalf("GET mismatch, got %s", body.Config.System.Hostname)
 	}
 }
-

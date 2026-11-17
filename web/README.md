@@ -49,7 +49,7 @@ WebUI 会从以下位置确定后端 API 基址（优先级从高到低）：
 - 无线（#/wifi）：编辑 `config.wifi`（启用/桥接、aps[ssid/band/channel/psk/guest/isolate]），capabilities.maxAP 限制 AP 数；显示状态摘要
 - DNS（#/dns）：编辑 `config.dns`（enableDnsmasq、upstreams[]、domain）
 - 防火墙（#/firewall）：编辑 `config.firewall`（enable、natEnabled、portForwards[]、upnp），显示说明
-- SSH（#/ssh）：编辑 `config.ssh`（enable、port、passwordAuth、authorizedKeys[]）并显示 `status.ssh`
+- SSH 由 NixOS 系统配置管理，旧 `#/ssh` 链接仅显示迁移说明。
 - 系统（#/system）：编辑 `config.system`（hostname、timezone），展示 `health/status` 摘要。生成配置入口已并入顶部「应用配置」，系统页不再单独提供按钮
 - 系统页（M7 扩展）：修改密码（尝试 `POST /api/v1/session/password` 或 `PUT /api/v1/account/password`，若未提供则提示）、备份下载（`GET /api/v1/backup` 或 `/api/v1/system/backup`）、恢复上传（`POST /api/v1/backup/restore` 或 `/api/v1/system/restore`）、审计日志（`GET /api/v1/audit?limit=50`）、重启（`POST /api/v1/system/reboot`）；接口缺失时显示“接口尚未提供”
 - 客户端（#/clients）：展示 `GET /api/v1/clients` 返回；若提供 `PATCH /api/v1/clients/{mac}`，支持行内重命名与阻止切换；404 时自动降级为只读；否则明确标注“接口尚未提供”

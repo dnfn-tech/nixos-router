@@ -1,0 +1,2 @@
+# Upstream patch context preserves original whitespace for exact application.
+modules/patches/dnsmasq-owned-prefix-lifetimes.patch -whitespace

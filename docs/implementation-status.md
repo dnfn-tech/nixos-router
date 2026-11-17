@@ -1,8 +1,8 @@
 # 实现现状与验收缺口
 
-核对日期：2026-11-09。源码基线：`2b301dabc636a03d58e764ca173d4af1afcffe14`（PR #16）。本文描述该版本的能力与证据范围，不等同于最新 main、运行中的本地预览或实体 gw 状态。
+核对日期：2026-11-12。本文描述当前本地工作分支，不等同于 main、远端 CI 或实体 gw 状态。表内早期测试记录为历史证据，不能替代本次候选验证；本次插件及 SSH 变更见 [插件说明](plugins.md)。
 
-当前具备显式启用的 IPv4 单 LAN managed 网关实现；**完整家用路由目标仍未完成**。基础候选的通过不能替代完整设计的 A01–A14 验收。完整范围见 [已确认设计](superpowers/specs/2026-10-15-usable-home-router-design.md)，首轮硬件候选范围见 [候选设计](superpowers/specs/2026-10-28-gw-readiness-design.md)。
+当前分支提供显式启用的有线/独立无线双栈 managed 网关框架，并接入 AdBlock 作为首个运行期插件；**完整家用路由目标仍未完成**。基础候选的通过不能替代完整设计的 A01–A14 验收。完整范围见 [已确认设计](superpowers/specs/2026-10-15-usable-home-router-design.md)，首轮硬件候选范围见 [候选设计](superpowers/specs/2026-10-28-gw-readiness-design.md)。
 
 本仓库负责通用模块、运行引擎、API、Web 和隔离测试。实际网口、地址、无线国家/信道、密钥和迁移安排在 nixos-home 集成时配置；这些专用配置不列为本仓库缺陷。
 
@@ -12,7 +12,7 @@
 |---|---|---|
 | 默认 generate-only | 保存配置、生成文件，适合非特权 Web/API 预览 | 已修改网卡、服务或客户端网络 |
 | 旧运行开关 | `applyReload` / `consumeGenerated` / `privilegedApply` 控制旧片段消费路径 | 等同于 managed 的独立网络生命周期 |
-| 显式 managed | routerd 管理授权接口及专属协议服务，与其他通用网络管理器互斥 | 所有 schema 字段和插件均支持运行 |
+| 显式 managed | 低权限 routerd API 经受认证 Unix RPC 调用 root executor，管理授权接口及专属协议服务，与其他通用网络管理器互斥 | 所有 schema 字段和插件均支持运行 |
 
 接入和所有权要求见 [接入指南](landing.md)。保存草稿与应用分离；managed 的应用以异步作业最终结果为准，WAN 等待 DHCP 租约也不等于互联网可达。
 
@@ -22,13 +22,18 @@
 
 | 范围 | 当前实现 | 验证入口及边界 |
 |---|---|---|
+| API 与特权执行隔离 | 非 root API、root Unix executor、持久作业对账、一次性账户/会话/草稿迁移；运行目录保持 root 私有 | `tests/privsep.py` 真实 UID、权限拒绝、SQLite 迁移与进程崩溃；本地分权、有线及 WiFi VM 已通过，实体 gw 未执行 |
+| 配置格式与并发保存 | schemaVersion、随机 revision、旧草稿原字节备份迁移；四类配置写入口统一 If-Match；apply 捕获修订 | config/server 回归及真实双浏览器冲突验证通过；35 项浏览器回归通过；最终配置契约四套 VM 已通过；后续字段错误改造尚未纳入该证据 |
+| 字段错误反馈 | 类型化校验路径、统一 HTTP 错误结构、16 MiB 写请求上限、页面字段定位及保留输入 | 全量 Go/vet、定向 race、38 项浏览器通过；新改造未重新运行 VM |
+| 密钥编辑 | 默认插件递归脱敏、修订绑定引用、显式清空、数组身份歧义拒绝 | 全量 Go/vet、定向 race、43 项浏览器通过；未为本改造重新运行 VM；高级 JSON 撤销重复引用清空后需再次编辑以刷新校验提示 |
 | 接口所有权 | 有线/WiFi 显式授权；配置期和运行前拒绝冲突；未知桥拒绝接管 | `tests/module-managed.nix`、`tests/module-apply.nix`、`backend/internal/managed/manager_test.go` |
 | IPv4 WAN/LAN | DHCP/静态 WAN、单桥、多有线成员、DHCP 池/静态租约、DNS | `tests/managed-router.py`：API 修改后检查客户端实际行为 |
+| PPPoE | 专属 pppd、私有凭据、peer DNS、逻辑出口 NAT/DNAT、按协商 MTU 限制双向 MSS | 最新本地完整 PPP VM 105.29s 通过：真实拨号、特殊字符凭据、错误密码修正、断线/进程崩溃/服务重启、DHCP切换、旧回调、整机重启；MTU1400 时双端 MSS1348、双向2MiB完整传输；未做实体运营商验收 |
 | 防火墙 | 专属 nft 表、NAT、DNAT 增删、转发 MAC 阻断；LAN-only Web/宿主 SSH 端口保护覆盖 IPv4/IPv6 | 同一有线 VM；IPv6 管理面隔离不表示支持 IPv6 路由；MAC 转发阻断不表示同桥二层隔离 |
 | 应用与恢复 | 不可变候选、串行作业、last-good、失败恢复、重启恢复、坏草稿诊断 | 有线 VM 的失败注入/重启/改址；不增加 LAN 改址倒计时或超时自动回滚 |
 | 无线 | 显式单 AP、WPA2、独立 hostapd、检测及受支持信道校验 | `tests/managed-wifi.py` 使用 mac80211_hwsim 真实认证、租约、关闭/重开；不证明实体芯片/射频性能 |
 | Web/API | 同源登录、保存/重读、异步应用反馈、状态来源与能力限制、桌面/移动布局 | 两个 `tests/web-*.cjs`；真实临时 API 与注入响应的边界见测试说明；UI 模拟不作为网络证据 |
-| 系统/SSH | managed 下 SSH 和系统身份由宿主 NixOS 管理；有配置备份/恢复及账户操作 | Web/API 测试；不能宣称已实现完整设计中的所有系统/SSH 运行修改 |
+| 系统/SSH | SSH 配置和编辑页面已移除；schema v2 兼容迁移旧 SSH 字段，实际服务由系统管理；保留系统声明端口的管理面防火墙保护 | `ssh_retirement_test.go`、`module-managed.nix`、浏览器及 managed VM；不写 sshd 配置或启停服务 |
 
 源码入口：[managed 引擎](../backend/internal/managed/manager.go)、[配置校验和渲染](../backend/internal/managed/render.go)、[managed 模块](../modules/managed.nix)、[基础模块](../modules/default.nix)。
 
@@ -38,13 +43,11 @@
 
 | 项目 | 当前差距 | 完成所需证据 |
 |---|---|---|
-| API 与特权执行隔离 | managed 设置 `privilegedApply=true`，基础模块因此以 root 运行 API；尚未满足完整设计第 5 节 | 低权限 API、独立受限执行器；对端认证、接口/路径/动作授权的负向测试；迁移后重跑真实网络及恢复测试 |
-| PPPoE | managed 校验明确拒绝 | 模拟接入服务器上的拨号、断线重拨、凭据失败、真实出口 NAT |
 | IPv6 路由 | managed 拒绝启用 IPv6/RA/PD | 上游获取/PD、LAN 地址与路由、双栈流量和管理隔离 |
 | 多 AP/访客 | managed 拒绝访客/不支持组合 | 能力裁剪与真实无线客户端；访客二层及三层隔离、禁用清理 |
 | QoS/家长控制/DDNS/UPnP | managed 拒绝启用 | 吞吐/时间规则/协议更新/映射创建撤销，含失败路径和停用清理 |
-| 可选插件 | managed 拒绝启用；旧生成器或服务钩子不能证明完整生命周期 | 按完整设计第 7 节逐个验证启用、配置、生效、失败、禁用及 overlay 信任边界 |
-| 其余完整设计契约 | A01–A14 尚无全部完成证据；配置版本/并发、系统操作等须逐项审计 | 对应源码、真实 API/浏览器、部署和网络证据，不能仅靠基础候选测试推断 |
+| 可选插件 | 注册表、配置 schema、部署允许清单与模式/状态边界已接入；AdBlock 自定义域名支持托管 DNS 应用。订阅下载及其他模块运行期仍未实现，overlay 服务交系统管理 | `vm-managed-adblock` 验证实际 A/AAAA、子域、规则替换、禁用和恢复；其他模块不得沿用 AdBlock 的验收结论 |
+| 其余完整设计契约 | A01–A14 尚无全部完成证据；配置副本迁移、系统操作等须逐项审计 | 对应源码、真实 API/浏览器、部署和网络证据，不能仅靠基础候选测试推断 |
 
 实体 gw 测试仍须用户验收后决定；尚未执行。服务权限拆分属于通用框架实现工作，与提供 gw 专用配置无关。
 

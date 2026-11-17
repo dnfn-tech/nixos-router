@@ -274,3 +274,16 @@ func (d *DB) InterruptRunningJobs() error {
 	_, err := d.SQL.Exec(`UPDATE jobs SET status='failed', updated_at=?, error='interrupted by daemon restart; runtime restored from last-good' WHERE status='running'`, time.Now().Unix())
 	return err
 }
+
+// InterruptLegacyRunningJobs settles work owned by a daemon that no longer
+// exists after upgrade. Executor-owned work survives API restarts and must be
+// reconciled by its durable ID instead. Do not claim the old rollback succeeded.
+func (d *DB) InterruptLegacyRunningJobs() error {
+	_, err := d.SQL.Exec(`UPDATE jobs SET status='failed', updated_at=?,
+		error='interrupted by upgrade from legacy daemon; previous outcome unknown',
+		payload=json_object('jobId', id, 'mode', 'managed-runtime', 'status', 'failed',
+		'stage', 'interrupted', 'rollbackStatus', 'unknown')
+		WHERE status='running' AND kind='apply' AND
+		(CASE WHEN json_valid(payload) THEN json_type(payload, '$.executor') ELSE NULL END) IS NOT 'true'`, time.Now().Unix())
+	return err
+}

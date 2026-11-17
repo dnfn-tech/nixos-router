@@ -39,7 +39,7 @@ nix run .#checks.x86_64-linux.vm-router.driverInteractive
 
 ## CI
 
-GitHub Actions 使用 `cachix/install-nix-action` 运行 `vm-router`、`vm-managed-router`、`vm-managed-wifi` 三个 check，并评估两个模块契约。运行前检查并开放 `/dev/kvm`，因为旧 `vm-router` 仍要求 KVM。宿主没有 KVM 设备或设备不可读写时直接失败，需要改用支持 KVM 的 runner。
+GitHub Actions 使用 `cachix/install-nix-action` 串行运行基础五个 check（`vm-router`、`vm-privsep`、`vm-managed-router`、`vm-managed-wifi`、`vm-managed-pppoe`），以及下文列出的六个双栈/无线组合 check，并评估两个模块契约。新增 CI 定义不代表远端已经执行或通过。运行前检查并开放 `/dev/kvm`，因为旧 `vm-router` 仍要求 KVM。宿主没有 KVM 设备或设备不可读写时直接失败，需要改用支持 KVM 的 runner。
 
 ## 保存与应用反馈的浏览器回归
 
@@ -67,7 +67,9 @@ Nix 断言在 `applyReload=true` 时拒绝同时启用 NetworkManager、systemd-
 
 ## Web 全局布局与数据契约回归
 
-同一 `tests/web-save-apply.cjs` 现覆盖 23 项回归：24 个页面/面板在四种宽度下的溢出和标签检查，真实配置读写、WAN/DDNS 条件字段、WiFi 与插件密钥、备份恢复、密码和客户端编辑，以及注入的错误/慢响应/异步作业。
+两个浏览器文件最近一次完整本地运行共 48 项通过，覆盖 24 个页面/面板在四种宽度下的溢出和标签检查，真实配置读写、WAN/DDNS 条件字段、WiFi 与插件密钥、备份恢复、密码和客户端编辑，以及注入的错误/慢响应/异步作业。新增无线安全、独立网段权限、标准/数字带宽及双栈能力展示回归；双浏览器编辑覆盖真实 API 的过期修订拒绝、输入保留及显式重新加载后保存。字段错误用例验证真实 API 的静态地址和数组行定位、修正后保存，以及受控错误文本的安全展示。阶段性结果不替代最终固定提交的回归。
+
+密钥回归覆盖默认插件脱敏、引用重排与连续保存、显式清空和撤销、新值取消清空、校验失败保留意图，以及数组空占位保留和歧义拒绝。
 
 测试中的应用失败、管理器冲突和异步作业响应是受控注入；字段保存与账户、备份、设备编辑使用真实临时后端。截图输出到 `/tmp/nixos-router-web-audit/after/`。这些截图和测试不替代真实设备转发或无线验证。
 
@@ -81,7 +83,8 @@ generate-only 的页面/容器检查不能作为网关网络验收。新的 mana
 # 在仓库根执行；path: 包含尚未提交的新测试文件。
 nix eval --impure --json --file tests/module-managed.nix
 nix eval --impure --json --file tests/module-apply.nix
-nix build --keep-going "path:$PWD#checks.x86_64-linux.vm-managed-router" \
+nix build --keep-going "path:$PWD#checks.x86_64-linux.vm-privsep" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-router" \
   "path:$PWD#checks.x86_64-linux.vm-managed-wifi" -L
 
 # 后端全部逻辑与竞态检查。
@@ -93,6 +96,24 @@ nix build --keep-going "path:$PWD#checks.x86_64-linux.vm-managed-router" \
 浏览器回归：`tests/web-save-apply.cjs` 与 `tests/web-managed-capabilities.cjs`；需提供 Playwright NODE_PATH、CHROMIUM_PATH 和重新构建的 ROUTERD_TEST_BINARY。能力提示测试使用拦截响应，仅作为 UI 证据。
 
 实体 gw 的授权、迁移影响和验收顺序见 [硬件验收方案](gw-hardware-acceptance.md)。具体结果、制品与未验证范围以 [候选验收报告](gw-readiness.md) 为准。
+
+### 双栈与无线模式组合
+
+以下检查使用真实协议与 mac80211_hwsim，覆盖通用框架当前所需组合；具体阶段性结果见 [集成对照表](gw-integration-matrix.md)。运行命令本身不表示检查已经通过：
+
+```bash
+nix build --keep-going --max-jobs 1 \
+  "path:$PWD#checks.x86_64-linux.vm-managed-ipv6" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-ipv6-dual" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-wifi-he" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-wifi-radio" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-ipv6-dual-radio" \
+  "path:$PWD#checks.x86_64-linux.vm-managed-pppoe6" -L
+```
+
+`vm-managed-ipv6` 验证 Ethernet RA、DHCPv6/PD、DNS、MTU/PMTU 和生命周期；`-dual` 验证有线/无线各一个 /64 的分配、前缀变更、委派容量不足、自然过期、重启及关闭。`wifi-he`／`wifi-radio` 分别验证 WPA3-SAE 的 WiFi 6／7、80MHz 及独立无线 IPv4 网络完整生命周期；`ipv6-dual-radio` 验证 WiFi 7／80MHz 与双网段 IPv6 组合。
+
+`vm-managed-pppoe6` 使用真实 PAP、IPv6CP、DHCPv6 地址/前缀委派和 RA，覆盖双栈流量、DNS、协商 MTU/MSS、故障恢复、重启及撤销；本地完整运行已通过（286.13s，`/tmp/router-pppoe6-vm-ready.log`），固定提交后仍需适用复验。ISP 侧兼容处理不得改写 CPE 状态或注入 CPE 协议回调。测试秘密均为公开合成值。上述软件无线结果不证明 MT7927、CN 监管域、射频或吞吐；最终候选还须绑定固定提交、依赖锁文件和 nixos-home 系统构建结果。
 
 
 ## 可复现浏览器 CI
@@ -107,3 +128,18 @@ ROUTERD_TEST_BINARY=/tmp/routerd-web-test npm --prefix tests run test:web
 ```
 
 Linux 上安装浏览器系统依赖可能需要管理员权限。已有浏览器的环境可跳过安装步骤并设置 `CHROMIUM_PATH`；CI 安装锁定 Playwright 对应的 Chromium。测试后端只监听 loopback，状态和账户均在临时目录中；不会访问实体路由器。模块断言覆盖受管无线 IPv4/DHCP 冲突，同时允许未受管无线接口和预览部署。
+
+
+### 分权与旧状态迁移 VM
+
+`vm-privsep` 使用真实不同 UID 的 API/executor 服务，先构造旧账户、会话、草稿和独立 last-good，再启动新模块验证迁移。检查 API 有效 capabilities 为零、不能读取或写入 root 运行目录、root peer 不能冒充 API、未知 RPC/路径参数被拒绝；暂停真实 dnsmasq 应用步骤后强杀 API，验证原编号仍能查询执行器完成结果。另验证重复初始化不覆盖新草稿、坏 last-good 阻止就绪及 API 启动。该 VM 不证明完整客户端转发或真实无线设备；有线/WiFi VM 仍须单独通过。
+
+## PPPoE 隔离验收
+
+`tests/vm-managed-pppoe.nix` / `tests/managed-pppoe.py` 使用独立接入服务器、router 和 LAN client，通过真实 API 配置专属 pppd。验收覆盖 peer DNS、NAT/DNAT、错误密码、断线重连、本地 pppd 强杀和服务重启、切回 DHCP、旧 generation 回调、重启恢复和凭据保护；特殊字符密码使用合成测试数据。低 MRU 场景将 TCP 端点放在 ISP 后方独立网段，检查实际接口 MTU、连接两端 MSS，并校验双向 2 MiB 数据，避免由 PPP 对端自身的 TCP 限制掩盖路由器问题。
+
+```bash
+nix build --no-link "path:$PWD#checks.x86_64-linux.vm-managed-pppoe" -L
+```
+
+新增 check 已接入 CI 定义。2026-11-09 最新本地完整 PPP VM 通过（105.29s），低 MRU 测试在修复前观察到两端 MSS1440 的失败，修复后为1348且双向数据完整。既有四套 VM 回归也已通过，但使用较早的产品快照，早于仅影响 PPP 的 net-init/MSS 钩子修复；不把不同快照描述成同一制品的远程 CI 成绩。源码及日志边界见 PPPoE 实施计划。实体 gw 和真实运营商未验收。

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +23,11 @@ import (
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/db"
+	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
+	"github.com/dnfn-tech/nixos-router/backend/internal/modules"
+	"github.com/dnfn-tech/nixos-router/backend/internal/wifi"
 	"golang.org/x/crypto/bcrypt"
+	"slices"
 )
 
 const (
@@ -33,6 +38,7 @@ const (
 )
 
 type Server struct {
+	modules          []string
 	startupWarning   string
 	managedRuntime   ManagedRuntime
 	wifiInterface    string
@@ -64,6 +70,7 @@ type Server struct {
 }
 
 type Options struct {
+	Modules        []string
 	StartupWarning string
 	WiFiInterface  string // Trusted managed radio; never selected from request input.
 
@@ -121,8 +128,12 @@ type ifacePrev struct {
 }
 
 func New(opts Options) *Server {
+	if opts.Modules == nil {
+		opts.Modules = []string{"adblock"}
+	}
 	s := &Server{
 		managedRuntime:      opts.ManagedRuntime,
+		modules:             append([]string{}, opts.Modules...),
 		startupWarning:      opts.StartupWarning,
 		wifiInterface:       opts.WiFiInterface,
 		cfg:                 opts.Config,
@@ -166,6 +177,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
 	mux.HandleFunc("/api/v1/ui/nav", s.handleUINav)
 	mux.HandleFunc("/api/v1/plugins", s.handlePlugins)
+	mux.HandleFunc("/api/v1/plugins/", s.handlePlugins)
 	mux.HandleFunc("/api/v1/clients", s.handleClients)
 	mux.HandleFunc("/api/v1/clients/", s.handleClientItem)
 	mux.HandleFunc("/api/v1/capabilities/wifi", s.handleWifiCaps)
@@ -189,7 +201,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.routes(mux)
-	h := s.wrapAuth(mux)
+	h := s.wrapAuth(s.limitAPIBody(mux))
 	h = s.wrapCSRF(h)
 	return s.wrapCORS(h)
 }
@@ -245,7 +257,7 @@ func (s *Server) wrapCSRF(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		http.Error(w, "CSRF check failed: Origin not allowed", http.StatusForbidden)
+		apiHTTPError(w, "CSRF check failed: Origin not allowed", http.StatusForbidden)
 	})
 }
 
@@ -260,6 +272,9 @@ func (s *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	if status >= 400 {
+		v = normalizeAPIError(status, v)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
@@ -357,7 +372,7 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only static for non-API paths
 	if strings.HasPrefix(r.URL.Path, "/api/") {
-		http.NotFound(w, r)
+		apiHTTPError(w, "not found", http.StatusNotFound)
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/")
@@ -454,13 +469,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp["deployment"] = map[string]interface{}{
 		"mode":          mode,
 		"runtimeApply":  s.applyReload,
-		"rebootAllowed": !s.devMode && os.Getenv("NIXOS_ROUTER_ALLOW_REBOOT") == "1",
+		"rebootAllowed": s.rebootAllowed(),
 	}
 
 	if s.managedRuntime != nil {
-		resp["deployment"] = map[string]interface{}{"mode": "runtime", "runtimeApply": true, "rebootAllowed": !s.devMode && os.Getenv("NIXOS_ROUTER_ALLOW_REBOOT") == "1", "profile": "ipv4-single-lan"}
+		resp["deployment"] = map[string]interface{}{"mode": "runtime", "runtimeApply": true, "rebootAllowed": s.rebootAllowed(), "profile": "managed-router"}
 		resp["startupWarning"] = s.startupWarning
-		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "wanModes": []string{"dhcp", "static"}, "singleLAN": true, "singleAP": true, "unsupported": []string{"pppoe", "ipv6", "qos", "ddns", "parental", "plugins", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
+		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "modules": s.modules, "wanModes": []string{"dhcp", "static", "pppoe"}, "singleLAN": false, "singleWiredLAN": true, "independentWiFiLAN": true, "singleAP": true, "ipv6WanModes": []string{"slaac", "dhcpv6", "pppoe6"}, "unsupported": []string{"qos", "ddns", "parental", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -476,6 +491,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		cfg := s.configSnapshot()
+		w.Header().Set("ETag", strconv.Quote(cfg.Revision))
 		if redact {
 			cfg = cfg.RedactedCopy()
 		}
@@ -487,34 +503,38 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// accept either full config object or { "config": { ... } }
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			apiHTTPError(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		var wrapper struct {
-			Config *config.Config `json:"config"`
-		}
-		var newCfg config.Config
-		if err := json.Unmarshal(body, &wrapper); err == nil && wrapper.Config != nil {
-			newCfg = *wrapper.Config
-		} else {
-			if err := json.Unmarshal(body, &newCfg); err != nil {
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
+		newCfg, clearSecrets, err := decodeConfigWrite(body)
+		if err != nil {
+			writeConfigError(w, err)
+			return
 		}
 		s.cfgMu.Lock()
 		defer s.cfgMu.Unlock()
+		if !s.checkConfigRevisionLocked(w, r) {
+			return
+		}
 		// Preserve secrets if placeholders or empty are provided
+		newCfg.Plugins, err = config.ResolvePluginSecrets(s.cfg, newCfg.Plugins)
+		if err != nil {
+			writeConfigError(w, err)
+			return
+		}
 		newCfg = s.mergeSecrets(s.cfg, newCfg)
+		newCfg, err = config.ClearSecrets(newCfg, clearSecrets)
+		if err != nil {
+			writeConfigError(w, err)
+			return
+		}
 		if err := newCfg.Validate(); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"errors": []string{err.Error()},
-			})
+			writeConfigError(w, err)
 			return
 		}
 		// persist
-		if err := config.SaveToFile(s.cfgPath, newCfg); err != nil {
-			http.Error(w, "failed to save config", http.StatusInternalServerError)
+		if err := s.saveConfigLocked(w, &newCfg); err != nil {
+			writeConfigSaveError(w, err)
 			return
 		}
 		// set new in-memory copy
@@ -530,7 +550,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			"applied": false,
 		})
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -541,10 +561,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// Stubbed status derived from config
 	lanCIDR := cfg.LAN.IPv4CIDR
-	clientCount := 0
-	if ls := s.readDnsmasqLeases(); len(ls) > 0 {
-		clientCount = len(ls)
-	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	leases, clientsSource, _ := s.leaseSnapshot(ctx)
+	clientCount := len(leases)
 	// Interfaces: best-effort live via sysfs + config roles
 	var interfaces []map[string]interface{}
 	// WAN
@@ -579,10 +599,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		srcs["interfaces"] = "stub"
 	}
 	// Clients source for summary (from leases vs static)
-	clientsSource := "stub"
-	if ls := s.readDnsmasqLeases(); len(ls) > 0 {
-		clientsSource = "leases"
-	}
 	srcs["clients"] = clientsSource
 	// WiFi source (stub for now)
 	srcs["wifi"] = "stub"
@@ -597,6 +613,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if jobs, err := s.db.ListJobs(50); err == nil {
 			for _, j := range jobs {
 				if strings.EqualFold(j.Kind, "apply") {
+					if reconciled, err := s.reconcileRemoteJob(ctx, j); err == nil {
+						j = reconciled
+					} else {
+						j = unknownRemoteJob(j, "unavailable")
+					}
 					// try parse mode from payload ({"mode":"..."})
 					mode := ""
 					if strings.TrimSpace(j.Payload) != "" {
@@ -667,11 +688,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"nat":          cfg.Firewall.NATEnabled,
 			"portForwards": cfg.Firewall.PortForwards,
 		},
-		"ssh": map[string]interface{}{
-			"enabled":      cfg.SSH.Enable,
-			"port":         cfg.SSH.Port,
-			"passwordAuth": cfg.SSH.PasswordAuth,
-		},
 		"ddns": map[string]interface{}{
 			"enabled":  cfg.DDNS.Enable,
 			"provider": cfg.DDNS.Provider,
@@ -715,7 +731,7 @@ func (s *Server) collectUnitStatuses() ([]map[string]string, string) {
 		}
 	}
 	if s.managedRuntime != nil {
-		known = []struct{ id, unit string }{{"dnsmasq", "nixos-router-dnsmasq.service"}, {"hostapd", "nixos-router-hostapd.service"}, {"wan", "nixos-router-wan.service"}}
+		known = []struct{ id, unit string }{{"dnsmasq", "nixos-router-dnsmasq.service"}, {"hostapd", "nixos-router-hostapd.service"}, {"wan", "nixos-router-wan.service"}, {"pppoe", "nixos-router-pppoe.service"}}
 	}
 	// If systemctl is absent, return stub states
 	if err := s.runner.LookPath("systemctl"); err != nil {
@@ -774,129 +790,18 @@ func (s *Server) handleUINav(w http.ResponseWriter, r *http.Request) {
 		}},
 		{"id": "system", "title": "System", "path": "/system"},
 	}
-	// Enabled plugins appended
-	for name, p := range cfg.Plugins {
-		if p.Enable {
-			nav = append(nav, map[string]interface{}{
-				"id":    "plugin:" + name,
-				"title": fmt.Sprintf("Plugin: %s", name),
-				"path":  "/plugins/" + name,
-			})
+	for _, d := range modules.All() {
+		if cfg.Plugins[d.ID].Enable && slices.Contains(s.modules, d.ID) && d.Runtime {
+			nav = append(nav, map[string]interface{}{"id": "plugin:" + d.ID, "title": d.Title, "path": d.Path})
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"nav": nav})
 }
 
-func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		cfg := s.configSnapshot()
-		builtins := []struct {
-			id    string
-			title string
-			group string
-			path  string
-		}{
-			{"adblock", "AdBlock", "网络服务", "/adblock"},
-			{"traffic", "Traffic", "网络服务", "/traffic"},
-			{"mihomo", "Mihomo", "网络服务", "/mihomo"},
-			{"vlan", "VLAN", "网络服务", "/vlan"},
-			{"tailscale", "Tailscale", "网络服务", "/tailscale"},
-			{"zerotier", "Zerotier", "网络服务", "/zerotier"},
-			{"qos", "QoS", "网络服务", "/qos"},
-			{"parental", "家长控制", "网络服务", "/parental"},
-			{"ddns", "动态DNS", "网络服务", "/ddns"},
-			{"ipv6", "IPv6", "网络服务", "/ipv6"},
-		}
-		list := []map[string]interface{}{}
-		seen := map[string]bool{}
-		for _, b := range builtins {
-			p := cfg.Plugins[b.id]
-			item := map[string]interface{}{
-				"id":      b.id,
-				"title":   b.title,
-				"enabled": p.Enable,
-				"nav": map[string]interface{}{
-					"group": b.group,
-					"path":  b.path,
-				},
-			}
-			if p.Config != nil {
-				item["configKeys"] = keysOf(p.Config)
-			}
-			list = append(list, item)
-			seen[b.id] = true
-		}
-		// Include any extra plugin entries not in builtins
-		for name, p := range cfg.Plugins {
-			if seen[name] {
-				continue
-			}
-			list = append(list, map[string]interface{}{
-				"id":      name,
-				"title":   name,
-				"enabled": p.Enable,
-				"nav":     map[string]interface{}{},
-				"configKeys": func() []string {
-					if p.Config != nil {
-						return keysOf(p.Config)
-					}
-					return nil
-				}(),
-			})
-		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"plugins": list})
-		return
-	}
-	if r.Method == http.MethodPut || r.Method == http.MethodPatch {
-		// PUT /api/v1/plugins/{id}
-		id := strings.TrimPrefix(r.URL.Path, "/api/v1/plugins/")
-		if id == "" || strings.Contains(id, "/") {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		var body struct {
-			Enabled *bool                  `json:"enabled"`
-			Config  map[string]interface{} `json:"config"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		s.cfgMu.Lock()
-		defer s.cfgMu.Unlock()
-		cfg := cloneConfig(s.cfg)
-		cur := cfg.Plugins[id]
-		// Merge config with secret-preserve
-		if body.Config != nil {
-			cur.Config = mergePreserveSecretsMap(cur.Config, body.Config)
-		}
-		if body.Enabled != nil {
-			cur.Enable = *body.Enabled
-		}
-		if cfg.Plugins == nil {
-			cfg.Plugins = map[string]config.PluginConfig{}
-		}
-		cfg.Plugins[id] = cur
-		// persist
-		if err := config.SaveToFile(s.cfgPath, cfg); err != nil {
-			http.Error(w, "failed to save config", http.StatusInternalServerError)
-			return
-		}
-		s.cfg = cfg
-		s.db.AddAudit("plugins", "update", fmt.Sprintf("%s enabled=%v", id, cur.Enable))
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"ok":     true,
-			"plugin": map[string]interface{}{"id": id, "enabled": cur.Enable, "configKeys": keysOf(cur.Config)},
-		})
-		return
-	}
-	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-}
-
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 	cfg := s.configSnapshot()
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Prefer a known leases file; else stub from static leases; else empty
@@ -912,15 +817,20 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		BlockedSource       string `json:"blockedSource,omitempty"`
 		BlockedRuntimeKnown *bool  `json:"blockedRuntimeKnown,omitempty"`
 	}
-	var clients []Client
-	source := "stub"
-	leases := s.readDnsmasqLeases()
+	clients := []Client{}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	leases, source, err := s.leaseSnapshot(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"error": "leases_unavailable", "source": source, "clients": clients})
+		return
+	}
 	if len(leases) > 0 {
 		source = "leases"
 		// index static leases for hostnames
 		mac2host := map[string]string{}
 		ip2host := map[string]string{}
-		for _, sl := range cfg.LAN.StaticLeases {
+		for _, sl := range clientStaticLeases(cfg) {
 			if sl.MAC != "" && sl.Hostname != "" {
 				mac2host[strings.ToLower(sl.MAC)] = sl.Hostname
 			}
@@ -951,9 +861,9 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 				Blocked: isMacBlocked(cfg, L.MAC),
 			})
 		}
-	} else {
+	} else if source == "stub" {
 		// From static leases fallback
-		for _, sl := range cfg.LAN.StaticLeases {
+		for _, sl := range clientStaticLeases(cfg) {
 			clients = append(clients, Client{IP: sl.IP, MAC: sl.MAC, Hostname: sl.Hostname, Source: "static", Blocked: isMacBlocked(cfg, sl.MAC)})
 		}
 	}
@@ -975,7 +885,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Identify MAC from path or query
@@ -984,7 +894,7 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 		id = r.URL.Query().Get("mac")
 	}
 	if id == "" {
-		http.Error(w, "missing client id (mac)", http.StatusBadRequest)
+		apiHTTPError(w, "missing client id (mac)", http.StatusBadRequest)
 		return
 	}
 	// URL-decoding for path mac
@@ -994,31 +904,37 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 		Hostname *string `json:"hostname"`
 		Blocked  *bool   `json:"blocked"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+	data, readErr := io.ReadAll(r.Body)
+	if readErr != nil || config.DecodeStrictJSON(data, &body) != nil {
+		apiHTTPError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
-	cfg := cloneConfig(s.cfg)
-	// update static lease hostname
-	found := false
-	for i := range cfg.LAN.StaticLeases {
-		if strings.ToLower(cfg.LAN.StaticLeases[i].MAC) == mac {
-			if body.Hostname != nil {
-				cfg.LAN.StaticLeases[i].Hostname = *body.Hostname
-			}
-			found = true
-			break
-		}
+	if !s.checkConfigRevisionLocked(w, r) {
+		return
 	}
-	if !found {
-		// create entry if hostname provided
-		sl := config.StaticLease{MAC: strings.ToUpper(mac)}
-		if body.Hostname != nil {
-			sl.Hostname = *body.Hostname
+	cfg := cloneConfig(s.cfg)
+	// Hostnames belong to existing reservations in either managed network.
+	// A block-only request must not manufacture an incomplete reservation.
+	if body.Hostname != nil {
+		found := false
+		groups := [][]config.StaticLease{cfg.LAN.StaticLeases}
+		if cfg.WiFi.Network != nil {
+			groups = append(groups, cfg.WiFi.Network.StaticLeases)
 		}
-		cfg.LAN.StaticLeases = append(cfg.LAN.StaticLeases, sl)
+		for _, leases := range groups {
+			for i := range leases {
+				if strings.EqualFold(leases[i].MAC, mac) {
+					leases[i].Hostname = *body.Hostname
+					found = true
+				}
+			}
+		}
+		if !found {
+			apiHTTPError(w, "configure a static lease before renaming this client", http.StatusBadRequest)
+			return
+		}
 	}
 	// update blocked list
 	if body.Blocked != nil {
@@ -1039,11 +955,11 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 	}
 	// persist
 	if err := cfg.Validate(); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": []string{err.Error()}})
+		writeConfigError(w, err)
 		return
 	}
-	if err := config.SaveToFile(s.cfgPath, cfg); err != nil {
-		http.Error(w, "failed to save config", http.StatusInternalServerError)
+	if err := s.saveConfigLocked(w, &cfg); err != nil {
+		writeConfigSaveError(w, err)
 		return
 	}
 	s.cfg = cfg
@@ -1051,9 +967,18 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
 }
 
+// clientStaticLeases returns reservations visible to the current client list.
+func clientStaticLeases(cfg config.Config) []config.StaticLease {
+	leases := append([]config.StaticLease(nil), cfg.LAN.StaticLeases...)
+	if cfg.WiFi.Enable && !cfg.WiFi.BridgeToLan && cfg.WiFi.Network != nil {
+		leases = append(leases, cfg.WiFi.Network.StaticLeases...)
+	}
+	return leases
+}
+
 func (s *Server) handleWifiCaps(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", 405)
+		apiHTTPError(w, "method not allowed", 405)
 		return
 	}
 	if s.managedRuntime != nil {
@@ -1076,7 +1001,7 @@ func (s *Server) handleWifiCaps(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// forward to /session create
@@ -1093,7 +1018,7 @@ func keysOf(m map[string]interface{}) []string {
 
 func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	user, _, ok := s.getSession(r)
@@ -1106,7 +1031,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		NewPassword     string `json:"newPassword"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		apiHTTPError(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(body.NewPassword) == "" || len(body.NewPassword) < 8 {
@@ -1116,7 +1041,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	// verify current
 	hash, err := s.db.GetUserPasswordHash(user)
 	if err != nil || hash == "" {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.CurrentPassword)) != nil {
@@ -1126,11 +1051,11 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	// update
 	newHash, err := bcrypt.GenerateFromPassword([]byte(body.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	if err := s.db.UpdateUserPassword(user, string(newHash)); err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	// invalidate other sessions
@@ -1148,7 +1073,7 @@ func isRedactedOrEmpty(s string) bool {
 func (s *Server) mergeSecrets(oldCfg config.Config, in config.Config) config.Config {
 	out := in
 	// PPPoE password
-	if in.WAN.Mode == "pppoe" && in.WAN.PPPoE != nil {
+	if in.WAN.PPPoE != nil {
 		if isRedactedOrEmpty(in.WAN.PPPoE.Password) && oldCfg.WAN.PPPoE != nil {
 			pp := *in.WAN.PPPoE
 			pp.Password = oldCfg.WAN.PPPoE.Password
@@ -1177,38 +1102,30 @@ func (s *Server) mergeSecrets(oldCfg config.Config, in config.Config) config.Con
 		out.WiFi.APs = aps
 	}
 	// DDNS tokens/secrets
-	if in.DDNS.Provider == oldCfg.DDNS.Provider {
-		switch in.DDNS.Provider {
-		case "cloudflare":
-			if in.DDNS.Cloudflare != nil && oldCfg.DDNS.Cloudflare != nil && isRedactedOrEmpty(in.DDNS.Cloudflare.APIToken) {
-				cc := *in.DDNS.Cloudflare
-				cc.APIToken = oldCfg.DDNS.Cloudflare.APIToken
-				out.DDNS.Cloudflare = &cc
-			}
-		case "duckdns":
-			if in.DDNS.DuckDNS != nil && oldCfg.DDNS.DuckDNS != nil && isRedactedOrEmpty(in.DDNS.DuckDNS.Token) {
-				dd := *in.DDNS.DuckDNS
-				dd.Token = oldCfg.DDNS.DuckDNS.Token
-				out.DDNS.DuckDNS = &dd
-			}
-		case "aliyun":
-			if in.DDNS.Aliyun != nil && oldCfg.DDNS.Aliyun != nil {
-				al := *in.DDNS.Aliyun
-				if isRedactedOrEmpty(al.AccessKey) {
-					al.AccessKey = oldCfg.DDNS.Aliyun.AccessKey
-				}
-				if isRedactedOrEmpty(al.SecretKey) {
-					al.SecretKey = oldCfg.DDNS.Aliyun.SecretKey
-				}
-				out.DDNS.Aliyun = &al
-			}
-		case "custom":
-			if in.DDNS.Custom != nil && oldCfg.DDNS.Custom != nil && isRedactedOrEmpty(in.DDNS.Custom.Token) {
-				cu := *in.DDNS.Custom
-				cu.Token = oldCfg.DDNS.Custom.Token
-				out.DDNS.Custom = &cu
-			}
+	if in.DDNS.Cloudflare != nil && oldCfg.DDNS.Cloudflare != nil && isRedactedOrEmpty(in.DDNS.Cloudflare.APIToken) {
+		cc := *in.DDNS.Cloudflare
+		cc.APIToken = oldCfg.DDNS.Cloudflare.APIToken
+		out.DDNS.Cloudflare = &cc
+	}
+	if in.DDNS.DuckDNS != nil && oldCfg.DDNS.DuckDNS != nil && isRedactedOrEmpty(in.DDNS.DuckDNS.Token) {
+		dd := *in.DDNS.DuckDNS
+		dd.Token = oldCfg.DDNS.DuckDNS.Token
+		out.DDNS.DuckDNS = &dd
+	}
+	if in.DDNS.Aliyun != nil && oldCfg.DDNS.Aliyun != nil {
+		al := *in.DDNS.Aliyun
+		if isRedactedOrEmpty(al.AccessKey) {
+			al.AccessKey = oldCfg.DDNS.Aliyun.AccessKey
 		}
+		if isRedactedOrEmpty(al.SecretKey) {
+			al.SecretKey = oldCfg.DDNS.Aliyun.SecretKey
+		}
+		out.DDNS.Aliyun = &al
+	}
+	if in.DDNS.Custom != nil && oldCfg.DDNS.Custom != nil && isRedactedOrEmpty(in.DDNS.Custom.Token) {
+		cu := *in.DDNS.Custom
+		cu.Token = oldCfg.DDNS.Custom.Token
+		out.DDNS.Custom = &cu
 	}
 	if in.Plugins != nil {
 		out.Plugins = make(map[string]config.PluginConfig, len(in.Plugins))
@@ -1248,11 +1165,7 @@ func mergePreserveSecretsMap(old, in map[string]interface{}) map[string]interfac
 		if okNew {
 			// Only secret fields use empty/redacted as "keep"; ordinary
 			// strings (e.g. controllerUrl) must remain explicitly clearable.
-			key := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(k))
-			secret := false
-			for _, marker := range []string{"password", "passwd", "psk", "secret", "token", "authkey", "privatekey", "accesskey", "apikey"} {
-				secret = secret || strings.Contains(key, marker)
-			}
+			secret := config.IsSecretKey(k)
 			if sv, ok := nv.(string); ok && okOld && secret && isRedactedOrEmpty(sv) {
 				out[k] = ov
 				continue
@@ -1423,7 +1336,7 @@ func (s *Server) rollbackToLastGood(genDir string) []string {
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	limit := 20
@@ -1434,11 +1347,17 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs, err := s.db.ListJobs(limit)
 	if err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	items := make([]map[string]interface{}, 0, len(jobs))
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
 	for _, j := range jobs {
+		j, err = s.reconcileRemoteJob(ctx, j)
+		if err != nil {
+			j = unknownRemoteJob(j, "unavailable")
+		}
 		items = append(items, map[string]interface{}{
 			"id":        j.ID,
 			"kind":      j.Kind,
@@ -1454,7 +1373,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	limit := 50
@@ -1484,7 +1403,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Always return JSON bundle of config for v1
@@ -1492,7 +1411,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	cfg, err := config.LoadFromFile(s.cfgPath)
 	s.cfgMu.RUnlock()
 	if err != nil {
-		http.Error(w, "failed to load config", http.StatusInternalServerError)
+		apiHTTPError(w, "failed to load config", http.StatusInternalServerError)
 		return
 	}
 	filename := "nixos-router-backup-" + time.Now().UTC().Format("20060102") + ".json"
@@ -1508,7 +1427,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Try multipart first
@@ -1517,48 +1436,48 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		if err := r.ParseMultipartForm(10 << 20); err != nil { // 10MB
-			http.Error(w, "bad multipart form", http.StatusBadRequest)
+			apiHTTPError(w, "bad multipart form", http.StatusBadRequest)
 			return
 		}
 		file, _, err := r.FormFile("file")
 		if err != nil {
-			http.Error(w, "missing file", http.StatusBadRequest)
+			apiHTTPError(w, "missing file", http.StatusBadRequest)
 			return
 		}
 		defer file.Close()
 		data, _ := io.ReadAll(file)
-		var wrapper struct {
-			Config *config.Config `json:"config"`
-		}
-		if json.Unmarshal(data, &wrapper) == nil && wrapper.Config != nil {
-			newCfg = *wrapper.Config
-		} else if json.Unmarshal(data, &newCfg) != nil {
-			http.Error(w, "invalid JSON in backup", http.StatusBadRequest)
+		newCfg, err = config.DecodeDocument(data)
+		if err != nil {
+			writeConfigError(w, err)
 			return
 		}
 	} else {
 		// JSON body: either {config:{...}} or raw config object
 		body, _ := io.ReadAll(r.Body)
-		var wrapper struct {
-			Config *config.Config `json:"config"`
-		}
-		if json.Unmarshal(body, &wrapper) == nil && wrapper.Config != nil {
-			newCfg = *wrapper.Config
-		} else if json.Unmarshal(body, &newCfg) != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+		newCfg, err = config.DecodeDocument(body)
+		if err != nil {
+			writeConfigError(w, err)
 			return
 		}
 	}
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
-	// Secret-aware merge to preserve placeholders if present
-	newCfg = s.mergeSecrets(s.cfg, newCfg)
-	if err = newCfg.Validate(); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": []string{err.Error()}})
+	if !s.checkConfigRevisionLocked(w, r) {
 		return
 	}
-	if err := config.SaveToFile(s.cfgPath, newCfg); err != nil {
-		http.Error(w, "failed to save config", http.StatusInternalServerError)
+	// Secret-aware merge to preserve placeholders if present
+	newCfg.Plugins, err = config.ResolvePluginSecrets(s.cfg, newCfg.Plugins)
+	if err != nil {
+		writeConfigError(w, err)
+		return
+	}
+	newCfg = s.mergeSecrets(s.cfg, newCfg)
+	if err = newCfg.Validate(); err != nil {
+		writeConfigError(w, err)
+		return
+	}
+	if err := s.saveConfigLocked(w, &newCfg); err != nil {
+		writeConfigSaveError(w, err)
 		return
 	}
 	s.cfg = newCfg
@@ -1566,13 +1485,19 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "applied": false})
 }
 
+// Remote APIs have no direct reboot privilege. A future executor operation must
+// implement its own explicit contract before this capability can be advertised.
+func (s *Server) rebootAllowed() bool {
+	_, remote := s.managedRuntime.(remoteRuntime)
+	return !remote && !s.devMode && os.Getenv("NIXOS_ROUTER_ALLOW_REBOOT") == "1"
+}
+
 func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	allow := os.Getenv("NIXOS_ROUTER_ALLOW_REBOOT") == "1"
-	if s.devMode || !allow {
+	if !s.rebootAllowed() {
 		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "reboot disabled"})
 		return
 	}
@@ -1588,21 +1513,28 @@ func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
 	if id == "" {
-		http.NotFound(w, r)
+		apiHTTPError(w, "not found", http.StatusNotFound)
 		return
 	}
 	j, ok, err := s.db.GetJob(id)
 	if err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	if !ok {
-		http.NotFound(w, r)
+		apiHTTPError(w, "not found", http.StatusNotFound)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	j, err = s.reconcileRemoteJob(ctx, j)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "executor_result_unavailable"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -1618,7 +1550,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if s.managedRuntime != nil {
@@ -1648,14 +1580,17 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "invalid_config", "jobId": jid})
 		return
 	}
+	if s.applyReload {
+		for id,pc:=range cfg.Plugins { if pc.Enable {writeConfigError(w,&config.ValidationError{Path:"plugins."+id+".enable",Code:"module_unavailable",Message:"module runtime requires managed executor mode"});return} }
+	}
 	// create running job
 	jid := newSessionID()
 	jobMode := "generate-only"
 	if s.applyReload {
 		jobMode = "generate+reload"
 	}
-	if err := s.db.CreateJob(jid, "apply", fmt.Sprintf(`{"mode":"%s"}`, jobMode)); err != nil {
-		http.Error(w, "server error", http.StatusInternalServerError)
+	if err := s.db.CreateJob(jid, "apply", fmt.Sprintf(`{"mode":%q,"configRevision":%q}`, jobMode, cfg.Revision)); err != nil {
+		apiHTTPError(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	if s.applyReload {
@@ -1802,6 +1737,9 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 				dns += fmt.Sprintf("dhcp-host=%s,%s\n", sl.MAC, sl.IP)
 			}
 		}
+	}
+	if pc:=cfg.Plugins["adblock"];pc.Enable {
+		rules,err:=modules.RenderDNS(pc.Config);if err!=nil{return err};dns+=rules
 	}
 	if err := os.WriteFile(filepath.Join(dir, "dnsmasq.conf.fragment"), []byte(dns), 0o644); err != nil {
 		return err
@@ -1989,33 +1927,13 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 	pdir := filepath.Join(dir, "plugins")
 	_ = os.MkdirAll(pdir, 0o755)
 	// adblock
-	genAdblock := func() {
-		id := "adblock"
-		pc, ok := cfg.Plugins[id]
-		if !ok || !pc.Enable {
-			_ = os.WriteFile(filepath.Join(pdir, id+".DISABLED"), []byte("# disabled\n"), 0o644)
-			return
-		}
-		var lines []string
-		lines = append(lines, "# adblock fragment (generate-only)")
-		lines = append(lines, "# units: dnsmasq.service (reload: try-reload-or-restart)")
-		if lists, ok := pc.Config["lists"].([]interface{}); ok {
-			for _, v := range lists {
-				if s, ok := v.(string); ok {
-					lines = append(lines, "# list: "+s)
-				}
-			}
-		}
-		if entries, ok := pc.Config["entries"].([]interface{}); ok {
-			for _, v := range entries {
-				if d, ok := v.(string); ok && d != "" {
-					lines = append(lines, "address=/"+d+"/0.0.0.0")
-				}
-			}
-		}
-		_ = os.WriteFile(filepath.Join(pdir, "adblock.conf.fragment"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	if pc:=cfg.Plugins["adblock"];pc.Enable {
+		rules,err:=modules.RenderDNS(pc.Config)
+		if err!=nil{return err}
+		if err=os.WriteFile(filepath.Join(pdir,"adblock.conf.fragment"),[]byte(rules),0600);err!=nil{return err}
+	} else {
+		if err:=os.WriteFile(filepath.Join(pdir,"adblock.DISABLED"),[]byte("# disabled\n"),0600);err!=nil{return err}
 	}
-	genAdblock()
 	// traffic
 	genTraffic := func() {
 		id := "traffic"
@@ -2150,13 +2068,7 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 	return nil
 }
 
-type dnsmasqLease struct {
-	Expires  time.Time
-	MAC      string
-	IP       string
-	Hostname string
-	ClientID string
-}
+type dnsmasqLease = managed.Lease
 
 func (s *Server) readDnsmasqLeases() []dnsmasqLease {
 	paths := []string{}
@@ -2180,40 +2092,10 @@ func (s *Server) readDnsmasqLeases() []dnsmasqLease {
 
 func parseDnsmasqLeasesFile(path string) []dnsmasqLease {
 	data, err := os.ReadFile(path)
-	if err != nil || len(data) == 0 {
+	if err != nil {
 		return nil
 	}
-	lines := strings.Split(string(data), "\n")
-	var out []dnsmasqLease
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		// Format: <expiry> <mac|duid> <ip> <hostname> <client-id or *>
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-		var exp time.Time
-		if secs, err := strconv.ParseInt(fields[0], 10, 64); err == nil && secs > 0 {
-			exp = time.Unix(secs, 0)
-		}
-		mac := fields[1]
-		ip := fields[2]
-		hostname := fields[3]
-		clientID := ""
-		if len(fields) >= 5 {
-			clientID = fields[4]
-		}
-		out = append(out, dnsmasqLease{
-			Expires:  exp,
-			MAC:      mac,
-			IP:       ip,
-			Hostname: hostname,
-			ClientID: clientID,
-		})
-	}
-	return out
+	return managed.ParseLeases(data)
 }
 
 func isMacBlocked(cfg config.Config, mac string) bool {
@@ -2239,11 +2121,11 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		}
 		var c creds
 		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			apiHTTPError(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		if strings.TrimSpace(c.Username) == "" || c.Password == "" {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			apiHTTPError(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		hash, err := s.db.GetUserPasswordHash(c.Username)
@@ -2261,7 +2143,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.resetLoginFail(r)
 		sid := newSessionID()
 		if err := s.db.CreateSession(sid, c.Username, defaultSessionTTL); err != nil {
-			http.Error(w, "server error", http.StatusInternalServerError)
+			apiHTTPError(w, "server error", http.StatusInternalServerError)
 			return
 		}
 		exp := time.Now().Add(defaultSessionTTL)
@@ -2298,7 +2180,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.db.AddAudit("session", "logout", "by cookie")
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -2398,68 +2280,9 @@ func (s *Server) reloadCoreUnits() (bool, string) {
 // orchestratePlugins performs best-effort unit orchestration per plugin.
 // It NEVER fails the apply; instead it returns human-readable notes.
 func (s *Server) orchestratePlugins(cfg config.Config) []string {
-	notes := []string{}
-	// If systemctl is missing, skip silently with a note.
-	if err := s.runner.LookPath("systemctl"); err != nil {
-		return append(notes, "systemctl not found, skipped plugin orchestration")
-	}
-	type plug struct {
-		name           string
-		units          []string
-		enabled        bool
-		extraHeadscale bool
-	}
-	var planned []plug
-	// mihomo
-	if pc, ok := cfg.Plugins["mihomo"]; ok {
-		planned = append(planned, plug{name: "mihomo", enabled: pc.Enable, units: []string{"mihomo.service"}})
-	}
-	// tailscale
-	if pc, ok := cfg.Plugins["tailscale"]; ok {
-		cp, _ := pc.Config["controlPlane"].(string)
-		p := plug{name: "tailscale", enabled: pc.Enable, units: []string{"tailscaled.service"}}
-		if strings.EqualFold(cp, "headscale") {
-			p.extraHeadscale = true
-			p.units = append(p.units, "headscale.service")
-		}
-		planned = append(planned, p)
-	}
-	// zerotier
-	if pc, ok := cfg.Plugins["zerotier"]; ok {
-		planned = append(planned, plug{name: "zerotier", enabled: pc.Enable, units: []string{"zerotier-one.service"}})
-	}
-	// vlan: notes-only, no units
-	if pc, ok := cfg.Plugins["vlan"]; ok {
-		if pc.Enable {
-			notes = append(notes, "vlan: notes-only; manage via systemd-networkd if configured")
-		} else {
-			notes = append(notes, "vlan: disabled; no units to stop")
-		}
-	}
-	for _, p := range planned {
-		if len(p.units) == 0 {
-			continue
-		}
-		if p.enabled {
-			for _, u := range p.units {
-				if err := s.runner.Run("systemctl", "-q", "try-reload-or-restart", u); err != nil {
-					notes = append(notes, fmt.Sprintf("%s: unit %s missing or not reloadable (%v)", p.name, u, err))
-				} else {
-					notes = append(notes, fmt.Sprintf("%s: reloaded %s", p.name, u))
-				}
-			}
-		} else {
-			for _, u := range p.units {
-				if err := s.runner.Run("systemctl", "-q", "try-stop", u); err != nil {
-					notes = append(notes, fmt.Sprintf("%s: unit %s not running or absent (%v)", p.name, u, err))
-				} else {
-					notes = append(notes, fmt.Sprintf("%s: stopped %s", p.name, u))
-				}
-			}
-		}
-	}
-	return notes
+	return []string{"Optional system services remain managed by NixOS; generated files alone are not runtime activation"}
 }
+
 func (s *Server) clientKey(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -2603,52 +2426,46 @@ func (s *Server) handleManagedWifiCaps(w http.ResponseWriter, r *http.Request) {
 		unknown("Cannot query configured PHY capabilities")
 		return
 	}
+	channelInfo, err := s.runner.Output("iw", "phy", phy, "channels")
+	if err != nil {
+		unknown("Cannot query configured PHY channel restrictions")
+		return
+	}
+	if !strings.HasPrefix(strings.TrimSpace(info), "Wiphy "+phy+"\n") {
+		unknown("PHY observation identity mismatch")
+		return
+	}
+	observed, err := wifi.ParseCapabilities(info, channelInfo)
+	if err != nil {
+		unknown("Cannot interpret configured PHY capabilities")
+		return
+	}
 	bands := []string{}
+	for name := range observed.Bands {
+		bands = append(bands, name)
+	}
+	sort.Strings(bands)
+	frequencies := []int{}
+	for frequency := range observed.Channels {
+		frequencies = append(frequencies, frequency)
+	}
+	sort.Ints(frequencies)
 	channels := []map[string]interface{}{}
-	ap := false
-	for _, line := range strings.Split(info, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "* AP" {
-			ap = true
-		}
-		var frequency, channel int
-		if n, _ := fmt.Sscanf(line, "* %d MHz [%d]", &frequency, &channel); n != 2 {
-			continue
-		}
-		band := ""
-		switch {
-		case frequency >= 2400 && frequency < 2500:
-			band = "2g"
-		case frequency >= 4900 && frequency < 5925:
-			band = "5g"
-		case frequency >= 5925 && frequency <= 7125:
-			band = "6g"
-		}
+	for _, frequency := range frequencies {
+		ch := observed.Channels[frequency]
+		band := ch.Band
 		if band == "" {
 			continue
 		}
-		found := false
-		for _, v := range bands {
-			if v == band {
-				found = true
-			}
-		}
-		if !found {
-			bands = append(bands, band)
-		}
-		channels = append(channels, map[string]interface{}{"band": band, "channel": channel, "frequencyMHz": frequency, "disabled": strings.Contains(line, "disabled"), "noIR": strings.Contains(line, "no IR")})
-	}
-	if !strings.Contains(info, "Wiphy "+phy) || len(channels) == 0 {
-		unknown("iw returned no usable capability description")
-		return
+		channels = append(channels, map[string]interface{}{"band": band, "channel": ch.Number, "frequencyMHz": frequency, "disabled": ch.Disabled, "noIR": ch.NoIR, "radar": ch.Radar, "restricted": ch.Restricted, "widths": ch.Widths})
 	}
 	maxAP := 0
-	if ap {
+	if observed.AP {
 		maxAP = 1
 	}
 	driver := "unknown"
 	if link, err := os.Readlink(filepath.Join(s.sysClassNet, s.wifiInterface, "device", "driver")); err == nil {
 		driver = filepath.Base(link)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"source": "iw", "available": true, "interface": s.wifiInterface, "phy": phy, "driver": driver, "apSupported": ap, "maxAP": maxAP, "managedMaxAP": 1, "bands": bands, "channels": channels, "note": "maxAP is the managed profile limit, not a measured hardware maximum; regulatory and driver restrictions still apply"})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"source": "iw", "available": true, "interface": s.wifiInterface, "phy": phy, "driver": driver, "apSupported": observed.AP, "maxAP": maxAP, "managedMaxAP": 1, "bands": bands, "radioBands": observed.Bands, "channels": channels, "note": "maxAP is the managed profile limit, not a measured hardware maximum; regulatory and driver restrictions still apply"})
 }

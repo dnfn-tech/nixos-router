@@ -27,13 +27,12 @@
     ],
     parental: ["家长控制", "服务", "按设备与时间段保存访问规则。"],
     ddns: ["动态 DNS", "服务", "为动态公网地址配置域名更新服务。"],
-    ssh: ["SSH", "服务", "管理远程终端访问方式和授权公钥。"],
     plugins: [
       "插件管理",
       "扩展",
       "配置可选扩展；基础网络服务使用各自的唯一配置入口。",
     ],
-    adblock: ["广告拦截", "扩展", "管理域名拦截规则与订阅来源。"],
+    adblock: ["广告拦截", "扩展", "管理本地 DNS 域名拦截规则。"],
     traffic: [
       "流量统计",
       "扩展",
@@ -69,6 +68,7 @@
     configCache: null,
     health: null,
     confirmedCapabilities: null,
+    modules: null,
     pending: false,
     epoch: 0,
     route: "overview",
@@ -126,10 +126,11 @@
       ),
     );
   }
+  const pathParts = (path) => Array.isArray(path) ? path : path.split(".");
   const get = (object, path) =>
-    path.split(".").reduce((v, k) => v?.[k], object);
+    pathParts(path).reduce((v, k) => v?.[k], object);
   function set(object, path, value) {
-    const keys = path.split(".");
+    const keys = pathParts(path);
     let parent = object;
     keys.slice(0, -1).forEach((key) => {
       parent = parent[key] ||= {};
@@ -141,6 +142,80 @@
       .split(/[\n,，]+/)
       .map((s) => s.trim())
       .filter(Boolean);
+  function objectSegments(root, target, prefix = []) {
+    if (root === target) return prefix;
+    if (!root || typeof root !== "object") return null;
+    for (const [key, value] of Object.entries(root)) {
+      if (!value || typeof value !== "object") continue;
+      const found = objectSegments(value, target, [...prefix, key]);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  function objectPath(root, target) {
+    return objectSegments(root, target)?.join(".") ?? null;
+  }
+  function setSecretClear(section, owner, key, selected) {
+    let keys = section.secretClears.get(owner);
+    if (!keys) section.secretClears.set(owner, keys = new Set());
+    if (selected) keys.add(key); else keys.delete(key);
+    if (!keys.size) section.secretClears.delete(owner);
+  }
+  function secretClearChoice(section, owner, key, label, changed = () => {}) {
+    const checkbox = node("input", { type: "checkbox" });
+    checkbox.checked = !!section.secretClears.get(owner)?.has(key);
+    checkbox.addEventListener("change", () => {
+      setSecretClear(section, owner, key, checkbox.checked);
+      changed(checkbox.checked);
+      dirty();
+    });
+    return { checkbox, element: node("label", { class: "secret-clear" }, checkbox, node("span", {}, label)) };
+  }
+  function pendingSecretPaths(section) {
+    const paths = [];
+    for (const [owner, keys] of section.secretClears) {
+      const current = objectSegments(section.data, owner);
+      if (current === null) continue; // deleted collection item
+      for (const key of keys) paths.push([...pathParts(section.path), ...current, key]);
+    }
+    return paths;
+  }
+  function clearFieldError(input) {
+    const errorId = `${input.id}-error`;
+    document.getElementById(errorId)?.remove();
+    input.removeAttribute("aria-invalid");
+    const descriptions = (input.getAttribute("aria-describedby") || "")
+      .split(/\s+/).filter((id) => id && id !== errorId);
+    if (descriptions.length) input.setAttribute("aria-describedby", descriptions.join(" "));
+    else input.removeAttribute("aria-describedby");
+  }
+  function showFieldErrors(errors = {}) {
+    const controls = [...document.querySelectorAll("#config-form [data-config-path]")];
+    controls.forEach(clearFieldError);
+    let first;
+    const hidden = [];
+    for (const [path, message] of Object.entries(errors)) {
+      if (typeof message !== "string") continue;
+      const input = controls.filter((el) => path === el.dataset.configPath || path.startsWith(`${el.dataset.configPath}.`))
+        .sort((a, b) => b.dataset.configPath.length - a.dataset.configPath.length)[0];
+      if (!input || !input.getClientRects().length || input.disabled) {
+        hidden.push(`${path}: ${message}`);
+        continue;
+      }
+      const errorId = `${input.id}-error`;
+      let detail = document.getElementById(errorId);
+      if (!detail) {
+        detail = node("p", { id: errorId, class: "help field-error" });
+        input.closest(".form-row").append(detail);
+        input.setAttribute("aria-describedby", [input.getAttribute("aria-describedby"), errorId].filter(Boolean).join(" "));
+      }
+      detail.textContent += `${detail.textContent ? "；" : ""}${message}`;
+      input.setAttribute("aria-invalid", "true");
+      first ||= input;
+    }
+    first?.focus();
+    return hidden.length ? `另有配置字段需要检查：${hidden.join("；")}` : "";
+  }
   function field(data, path, label, options = {}) {
     const id = `field-${++fieldId}`,
       type = options.type || "text";
@@ -155,6 +230,9 @@
       options.choices.forEach(([value, title]) =>
         input.append(node("option", { value }, title)),
       );
+    const relative = state.section ? objectPath(state.section.data, data) : null;
+    const configPath = options.configPath ?? (relative !== null ? [...pathParts(state.section.path), relative, ...pathParts(path)].filter(Boolean).join(".") : null);
+    if (configPath) input.dataset.configPath = configPath;
     let value = get(data, path);
     if (value == null && (options.default != null || options.choices)) {
       value = options.default ?? options.choices[0][0];
@@ -200,9 +278,28 @@
       input.setAttribute("aria-describedby", help.id);
       row.append(help);
     }
+    let clearChoice;
+    if (type === "password" && value && relative !== null) {
+      const section = state.section, keys = pathParts(path);
+      const owner = keys.length === 1 ? data : get(data, keys.slice(0, -1));
+      const key = keys.at(-1), required = input.required;
+      clearChoice = secretClearChoice(section, owner, key, `清空${label}`, (selected) => {
+        input.required = selected ? false : required;
+        input.placeholder = selected ? "保存时清空；取消勾选可保留" : "已设置；留空保留";
+      });
+      if (clearChoice.checkbox.checked) input.required = false;
+      row.append(clearChoice.element);
+      clearChoice.cancel = () => {
+        clearChoice.checkbox.checked = false;
+        setSecretClear(section, owner, key, false);
+        input.required = required;
+        input.placeholder = "已设置；留空保留";
+      };
+    }
     input.addEventListener(
       type === "checkbox" || options.choices ? "change" : "input",
       () => {
+        clearFieldError(input);
         const next =
           type === "checkbox"
             ? input.checked
@@ -213,6 +310,7 @@
                   ? 0
                   : Number(input.value)
                 : input.value;
+        if (type === "password" && next !== "") clearChoice?.cancel();
         // An empty password retains the existing secret; new credentials start empty.
         if (type !== "password" || next !== "") set(data, path, next);
         else if (!value) set(data, path, "");
@@ -317,12 +415,13 @@
   }
   async function api(
     path,
-    { method = "GET", body, raw = false, timeout = 12000 } = {},
+    { method = "GET", body, raw = false, timeout = 12000, revision } = {},
   ) {
     const controller = new AbortController(),
       timer = setTimeout(() => controller.abort(), timeout);
     try {
       const headers = { Accept: "application/json" };
+      if (revision !== undefined) headers["If-Match"] = JSON.stringify(revision);
       if (body && !(body instanceof FormData)) {
         headers["Content-Type"] = "application/json";
         body = JSON.stringify(body);
@@ -355,11 +454,16 @@
             `请求失败（HTTP ${response.status}）`,
         );
         error.status = response.status;
+        error.code = data?.code;
+        error.fieldErrors = data?.fieldErrors && typeof data.fieldErrors === "object" && !Array.isArray(data.fieldErrors) ? data.fieldErrors : {};
         throw error;
       }
       if (raw) return response;
       if (response.status === 204) return {};
-      return await response.json();
+      const data = await response.json();
+      const etag = response.headers.get("ETag");
+      if (etag) data.revision = JSON.parse(etag);
+      return data;
     } catch (error) {
       if (error.name === "AbortError") {
         const timeoutError = new Error(
@@ -430,8 +534,17 @@
         : mode === "runtime"
           ? "应用会修改部署环境；生成和应用结果请以作业记录为准。"
           : "暂不能确认部署能力，请刷新连接。";
-    if (state.health?.deployment?.profile === "ipv4-single-lan") {
-      $("#deployment-description").textContent = "首版：IPv4 单内网，WAN 支持 DHCP / 静态地址，最多一个接入点，5 GHz 仅支持非 DFS 信道；不支持 PPPoE、IPv6、QoS、DDNS、家长控制、插件、UPnP 和访客网络。SSH 与系统设置由 NixOS 管理，本页应用不会修改它们。";
+    if (state.health?.deployment?.profile === "managed-router") {
+      const caps = state.health.capabilities || {};
+      const modes = (caps.wanModes || []).map(mode => ({dhcp:"DHCP",static:"静态地址",pppoe:"PPPoE"})[mode] || mode).join(" / ");
+      const ipv6 = (caps.ipv6WanModes || []).length ? "IPv4 / IPv6" : "IPv4";
+      const networks = caps.independentWiFiLAN ? "有线内网与可选独立无线网段" : "有线内网";
+      $("#deployment-description").textContent = `${ipv6} 配置框架，${networks}，WAN 支持 ${modes}，最多一个接入点。无线标准与带宽按实际设备能力校验；当前 5 GHz 仅支持非 DFS 信道。配置能力不代表当前联网状态，请查看接口与作业结果。SSH 与系统设置由 NixOS 管理。`;
+    } else if (state.health?.deployment?.profile === "ipv4-single-lan") {
+      const ppp = state.health?.capabilities?.wanModes?.includes("pppoe");
+      const modes = ppp ? "DHCP / 静态地址 / PPPoE" : "DHCP / 静态地址";
+      const unsupported = ppp ? "IPv6" : "PPPoE、IPv6";
+      $("#deployment-description").textContent = `IPv4 单内网，WAN 支持 ${modes}，最多一个接入点，5 GHz 仅支持非 DFS 信道；不支持 ${unsupported}、QoS、DDNS、家长控制、插件、UPnP 和访客网络。SSH 与系统设置由 NixOS 管理，本页应用不会修改它们。`;
     }
     $("#apply-run").textContent =
       mode === "generate-only" ? "生成配置" : "应用配置";
@@ -446,7 +559,7 @@
     return { id, tab: new URLSearchParams(query).get("tab") || "general" };
   }
   function navigation(id) {
-    const info = pages[id] || [id, "扩展", "管理扩展配置。"];
+    const info = pages[id] || [moduleSupport(id)?.title || id, "扩展", "管理扩展配置。"];
     $("#page-title").textContent = info[0];
     $("#page-description").textContent = info[2];
     document.title = `${info[0]} · NixOS 路由器`;
@@ -462,7 +575,8 @@
         ),
       ),
     );
-    const items = Object.entries(pages).filter(([, v]) => v[1] === info[1]);
+    const items = Object.entries(pages).filter(([key, v]) => v[1] === info[1] && (!pluginIds.includes(key) || state.modules?.find(m => m.id === key)?.available));
+    items.push(...(state.modules || []).filter(m => m.available && !pages[m.id] && info[1] === "扩展").map(m => [m.id, [m.title, "扩展"]]));
     $("#section-tabs").replaceChildren(
       ...items.map(([key, v]) =>
         node(
@@ -476,7 +590,7 @@
   }
   function beginEditor(cfg, path) {
     const data = clone(get(cfg, path));
-    state.section = { path, data };
+    state.section = { path, data, base: clone(cfg), revision: cfg.revision, secretClears: new Map() };
     return data;
   }
   function editor(...cards) {
@@ -505,24 +619,38 @@
     }
     const section = state.section,
       candidate = clone(section.data);
+    let rejected;
+    showFieldErrors();
     state.busy = true;
     syncActions();
     try {
-      const latest = await api("/api/v1/config");
-      const cfg = clone(latest.config || latest);
+      const cfg = clone(section.base);
       set(cfg, section.path, candidate);
-      await api("/api/v1/config", { method: "PUT", body: cfg });
+      const clearSecrets = pendingSecretPaths(section);
+      const body = clearSecrets.length ? { config: cfg, clearSecrets } : cfg;
+      const result = await api("/api/v1/config", { method: "PUT", body, revision: section.revision });
+      cfg.revision = result.revision;
+      section.revision = result.revision;
+      section.base = clone(cfg);
       state.configCache = clone(cfg);
       state.pageDirty = false;
       state.pending = true;
+      // Plugin secret references belong to a revision. Rebind the editor to
+      // newly redacted values after saving, including advanced JSON closures.
+      if (clearSecrets.length || Object.keys(cfg.plugins || {}).length) await renderRoute();
       feedback("配置已保存，尚未生成或应用。", "good");
       return true;
     } catch (e) {
+      rejected = e;
       feedback(`保存失败：${e.message}`, "error");
       return false;
     } finally {
       state.busy = false;
       syncActions();
+      if (rejected) {
+        const hidden = showFieldErrors(rejected.fieldErrors);
+        if (hidden) feedback(`保存失败：${rejected.message}；${hidden}`, "error");
+      }
     }
   }
   function resultMessage(result) {
@@ -655,7 +783,7 @@
     if (!caps?.available || caps.source !== "iw") {
       return unavailable(`无线硬件能力未确认；不会把预览值当作硬件检测结果。${caps?.reason ? "检测说明：" + caps.reason : "请检查设备和 iw 工具后刷新。"}`);
     }
-    const usable = (caps.channels || []).filter((c) => !c.disabled && !c.noIR).length;
+    const usable = (caps.channels || []).filter((c) => !c.disabled && !c.noIR && !c.radar && !c.restricted).length;
     return notice(`来源：iw · 接口 ${caps.interface} · ${caps.phy}。硬件报告频段：${(caps.bands || []).join("、")}；AP 模式：${caps.apSupported ? "支持" : "不支持"}；当前未标记禁用或禁止发射的信道：${usable} 个。管理配置最多 ${caps.managedMaxAP} 个接入点（不是硬件上限）。首版 5 GHz 仅支持 36/40/44/48/149/153/157/161/165 非 DFS 信道；仍需确认监管域、驱动和实际关联结果。`);
   }
   function coreEditor(id, cfg, status) {
@@ -792,16 +920,50 @@
       );
     if (id === "wifi") {
       d.aps ||= [];
+      d.network ||= { ipv4Cidr: "", dhcp: { enable: true, rangeStart: "", rangeEnd: "", leaseMins: 1440 }, allowManagement: false, allowWiredAccess: false };
+      d.network.dhcp ||= {};
+      d.network.staticLeases ||= [];
+      const refreshNetwork = () => {
+        const independent = !d.bridgeToLan;
+        for (const panel of [networkCard, networkLeases]) {
+          panel.hidden = !independent;
+          panel.querySelectorAll("input,select,textarea,button").forEach(input => {
+            const path = input.dataset.configPath || "";
+            const dhcpParameter = path.startsWith("wifi.network.dhcp.") && !path.endsWith(".enable");
+            input.disabled = !independent || (dhcpParameter && !d.network.dhcp.enable);
+          });
+        }
+        for (const [path, required] of [
+          ["wifi.network.ipv4Cidr", independent && d.enable],
+          ["wifi.network.dhcp.rangeStart", independent && d.enable && d.network.dhcp.enable],
+          ["wifi.network.dhcp.rangeEnd", independent && d.enable && d.network.dhcp.enable],
+        ]) networkCard.querySelector(`[data-config-path="${path}"]`).required = !!required;
+      };
+      const networkCard = formCard("独立无线网段", fields(
+        ["network.ipv4Cidr", "无线网关 / CIDR", {help:"使用与有线内网及外网不重叠的独立网段；地址由部署方配置。"}],
+        ["network.dhcp.enable", "启用无线 DHCP", {type:"checkbox",change:refreshNetwork}],
+        ["network.dhcp.rangeStart", "无线地址池起始地址"],
+        ["network.dhcp.rangeEnd", "无线地址池结束地址"],
+        ["network.dhcp.leaseMins", "无线租约时间（分钟）", {type:"number",min:1}],
+        ["network.allowManagement", "允许无线管理路由器", {type:"checkbox",help:"允许此网段访问 Web 管理和宿主 SSH 端口。关闭后仍可使用 DHCP、DNS 和网关连通性检查。"}],
+        ["network.allowWiredAccess", "允许有线与无线互访", {type:"checkbox",help:"显式允许两个内网双向发起连接；关闭后仅保留各自到外网的访问。"}],
+      ));
+      const networkLeases = collection("无线静态租约", d.network.staticLeases, lease => [
+        field(lease,"hostname","无线设备名称"), field(lease,"ip","无线租约 IP"),
+        field(lease,"mac","无线租约 MAC"), field(lease,"comment","无线租约备注"),
+      ], () => ({hostname:"",ip:"",mac:"",comment:""}));
       const originalNames = new WeakMap(d.aps.map((ap) => [ap, ap.ssid]));
-      return editor(
+      const form = editor(
         wifiCapabilitiesNotice(),
         formCard(
           "无线设置",
           fields(
-            ["enable", "启用 WiFi", { type: "checkbox" }],
-            ["bridgeToLan", "桥接到内网", { type: "checkbox" }],
+            ["enable", "启用 WiFi", { type: "checkbox", change: refreshNetwork }],
+            ["bridgeToLan", "桥接到内网", { type: "checkbox", change: refreshNetwork }],
           ),
         ),
+        networkCard,
+        networkLeases,
         collection(
           "接入点",
           d.aps,
@@ -829,9 +991,26 @@
                   ["6g", "6 GHz"],
                 ],
               }),
+              field(ap, "standard", "无线标准", {
+                choices: [["", "兼容现有配置"], ["wifi4", "WiFi 4（HT）"], ["wifi5", "WiFi 5（VHT）"], ["wifi6", "WiFi 6（HE）"], ["wifi7", "WiFi 7（EHT）"]],
+                help: "应用前会核对对应频段的 AP 能力；不支持时明确拒绝，不会自动降级。",
+              }),
+              field(ap, "channelWidthMHz", "信道带宽", {
+                type: "number",
+                choices: [[0, "默认（20 MHz）"], [20, "20 MHz"], [40, "40 MHz"], [80, "80 MHz"]],
+                help: "80 MHz 需要 5 GHz 和 WiFi 5 或更新标准；全部子信道均须允许发射。",
+              }),
               field(ap, "channel", "信道", {
                 type: "number",
-                help: "0 表示自动；实际支持能力取决于无线设备。",
+                help: "受管模式需要显式信道；5 GHz 当前支持列出的非 DFS 信道，165 仅支持 20 MHz。",
+              }),
+              field(ap, "security", "安全模式", {
+                choices: [
+                  ["", "WPA2-PSK（兼容现有配置）"],
+                  ["wpa2-psk", "WPA2-PSK"],
+                  ["wpa3-sae", "WPA3-SAE"],
+                ],
+                help: "WPA3-SAE 要求客户端支持受保护管理帧，不会自动降级为 WPA2。",
               }),
               password,
               field(ap, "enable", "启用此接入点", { type: "checkbox" }),
@@ -844,6 +1023,9 @@
           },
           () => ({
             ssid: "",
+            security: "wpa2-psk",
+            standard: "",
+            channelWidthMHz: 0,
             band: "2g",
             channel: 0,
             psk: "",
@@ -853,6 +1035,8 @@
           }),
         ),
       );
+      refreshNetwork();
+      return form;
     }
     if (id === "firewall") {
       d.portForwards ||= [];
@@ -914,27 +1098,6 @@
         stringList(d, "blockedMacs", "阻止的设备", "MAC 地址"),
       );
     }
-    if (id === "ssh")
-      return editor(
-        formCard(
-          "SSH 访问",
-          fields(
-            ["enable", "启用 SSH", { type: "checkbox" }],
-            ["port", "监听端口", { type: "number", min: 1, max: 65535 }],
-            ["passwordAuth", "允许密码登录", { type: "checkbox" }],
-          ),
-        ),
-        stringList(
-          d,
-          "authorizedKeys",
-          "授权公钥",
-          "SSH 公钥",
-          "ssh-ed25519 …",
-        ),
-        unavailable(
-          "此处展示 SSH 配置。实际监听端口与认证策略需在目标设备上验证。",
-        ),
-      );
     if (id === "qos") {
       d.devicePolicy ||= [];
       return editor(
@@ -1127,71 +1290,57 @@
       ),
     );
   }
+  function moduleSupport(id) {
+    return state.modules?.find(m => m.id === id);
+  }
+  function moduleDescription(m) {
+    if (!m) return "模块能力暂不可用，请刷新后重试。";
+    if (m.ownership === "system") return "系统管理：请通过 NixOS 配置此服务。";
+    if (!m.available) return "当前部署不支持此模块；历史配置可保留或导出。";
+    const observed = {"not-applied":"尚未应用运行态",unknown:"运行状态未知",disabled:"已应用停用", "service-active":"已应用，DNS 服务运行中"}[m.status] || "运行状态未知";
+    return `${m.runtimeSupported ? "支持运行应用" : "仅支持生成文件"}；${observed}。`;
+  }
+  function moduleToggle(id, data) {
+    const control=field(data,"enable",`启用 ${moduleSupport(id)?.title || pages[id]?.[0] || id}`,{type:"checkbox"});
+    const input=control.querySelector("input");
+    // Allow an existing unsupported enabled draft to be explicitly disabled.
+    if (!moduleSupport(id)?.available && !data.enable) input.disabled=true;
+    return control;
+  }
   function pluginsEditor(cfg) {
     const d = beginEditor(cfg, "plugins");
-    const ids = [
-      ...pluginIds,
-      ...Object.keys(d).filter((id) => !pluginIds.includes(id) && !pages[id]),
-    ];
+    const ids = [...new Set([...(state.modules || []).map(m=>m.id), ...Object.keys(d)])];
     return editor(
-      notice(
-        "开关表示配置意图；插件是否安装、启动及正常工作，需要在运行环境确认。",
-      ),
-      node(
-        "div",
-        { class: "grid" },
-        ids.map((id) => {
-          d[id] ||= { enable: false, config: {} };
-          return card(
-            pages[id]?.[0] || id,
-            field(d[id], "enable", `启用 ${pages[id]?.[0] || id}`, {
-              type: "checkbox",
-            }),
-            node(
-              "p",
-              { class: "help" },
-              pages[id]?.[2] || "自定义扩展；已有配置会保留。",
-            ),
-            link(`plugins/${encodeURIComponent(id)}`, "配置详情"),
-          );
-        }),
-      ),
-      card(
-        "基础服务",
-        node("p", {}, "带宽管理、家长控制、IPv6 与动态 DNS 使用独立配置入口。"),
-        node(
-          "div",
-          { class: "toolbar" },
-          ["qos", "parental", "ipv6", "ddns"].map((id) => link(id)),
-        ),
-      ),
+      notice("插件能力由当前部署声明。保存、生成与实际应用状态分别展示。"),
+      stack(ids.map(id => {
+        d[id] ||= {enable:false,config:{}};
+        return card(moduleSupport(id)?.title || id,
+          moduleToggle(id,d[id]),
+          node("p",{class:"help"},moduleDescription(moduleSupport(id))),
+          link(`plugins/${encodeURIComponent(id)}`,"配置详情"));
+      })),
+      card("基础服务",node("p",{},"IPv6 等核心网络功能保持独立配置，不受插件开关影响。"))
     );
   }
   function pluginEditor(id, cfg) {
-    const d = beginEditor(cfg, `plugins.${id}`);
+    const d = beginEditor(cfg, ["plugins", id]);
     d.config ||= {};
     const c = d.config,
       fields = (...defs) => defs.map((args) => field(c, ...args));
     const parts = [
       notice(
-        "此页编辑插件配置；保存或生成文件不证明插件已经安装、接入或生效。",
+        moduleDescription(moduleSupport(id)),
       ),
       formCard("插件开关", [
-        field(d, "enable", `启用 ${pages[id]?.[0] || id}`, {
-          type: "checkbox",
-        }),
+        moduleToggle(id, d),
       ]),
     ];
     if (id === "adblock")
       parts.push(
-        stringList(
-          c,
-          "lists",
-          "规则订阅",
-          "订阅 URL",
-          "https://example.com/hosts",
-        ),
-        stringList(c, "entries", "自定义规则", "域名或规则"),
+        notice("仅支持域名规则，同时拦截域名及子域的 IPv4/IPv6 解析；订阅下载暂不支持。依赖本地 DNS 服务。"),
+        stringList(c, "entries", "拦截域名", "每行一个域名", "ads.example.com"),
+        c.lists?.length ? notice("检测到历史订阅来源；启用前请先清空订阅。订阅不会被下载。") : null,
+        c.lists?.length ? node("button",{type:"button",onclick:()=>{c.lists=[];dirty();}},"清空历史订阅") : null,
       );
     else if (id === "traffic")
       parts.push(
@@ -1322,9 +1471,28 @@
         },
         2,
       );
+      const section = state.section;
+      const clearOptions = node("div", { class: "form-row" });
+      const references = (value, path = [], found = []) => {
+        if (!value || typeof value !== "object") return found;
+        for (const [key, item] of Object.entries(value)) {
+          if (typeof item === "string" && item.startsWith("__router_secret_ref_v1_"))
+            found.push({ owner: value, key, ref: item, path: [...path, key] });
+          else references(item, [...path, key], found);
+        }
+        return found;
+      };
+      const drawClearOptions = () => {
+        clearOptions.replaceChildren(...references(d.config).map(({ owner, key, path }) =>
+          secretClearChoice(section, owner, key, `清空密钥：${path.join(".")}`).element));
+      };
+      drawClearOptions();
       input.addEventListener("input", () => {
         dirty();
         try {
+          const selected = new Set(references(d.config)
+            .filter(({ owner, key }) => section.secretClears.get(owner)?.has(key))
+            .map(({ ref }) => ref));
           const value = JSON.parse(input.value, (_, item) =>
             typeof item === "string" && secretRefs.has(item)
               ? clone(secretRefs.get(item))
@@ -1332,7 +1500,16 @@
           );
           if (!value || Array.isArray(value) || typeof value !== "object")
             throw new Error("参数必须是 JSON 对象");
+          const next = references(value);
+          for (const ref of selected) {
+            if (next.filter((item) => item.ref === ref).length > 1)
+              throw new Error("待清空密钥的标记被复制，请撤销清空或删除重复标记");
+          }
+          section.secretClears.clear();
+          for (const { owner, key, ref } of next)
+            if (selected.has(ref)) setSecretClear(section, owner, key, true);
           d.config = value;
+          drawClearOptions();
           input.setCustomValidity("");
         } catch (e) {
           input.setCustomValidity(`参数格式错误：${e.message}`);
@@ -1350,6 +1527,7 @@
             node("label", { for: input.id }, "高级配置（JSON）"),
             input,
           ),
+          clearOptions,
         ),
       );
     }
@@ -1526,6 +1704,7 @@
     );
   }
   function editClient(client) {
+    const revision = state.configCache?.revision;
     const d = { hostname: client.hostname || "", blocked: !!(client.draftBlocked ?? client.blocked) };
     // This dialog owns its draft independently of the page configuration editor.
     const name = node("input", { id: "client-name", value: d.hostname }),
@@ -1544,9 +1723,13 @@
         state.busy = true;
         syncActions();
         try {
+          const changes = {};
+          if (name.value !== d.hostname) changes.hostname = name.value;
+          if (blocked.checked !== d.blocked) changes.blocked = blocked.checked;
           await api(`/api/v1/clients/${encodeURIComponent(client.mac)}`, {
             method: "PATCH",
-            body: { hostname: name.value, blocked: blocked.checked },
+            body: changes,
+            revision,
           });
           state.pending = true;
           close();
@@ -1633,7 +1816,7 @@
       ),
     );
     if (tab === "general") return stack(nav, coreEditor("system", cfg, status));
-    if (tab === "account") return stack(nav, accountPage());
+    if (tab === "account") return stack(nav, accountPage(cfg));
     if (tab === "diagnostics")
       return stack(
         nav,
@@ -1734,7 +1917,8 @@
       lists,
     );
   }
-  function accountPage() {
+  function accountPage(cfg) {
+    let revision = cfg.revision;
     const current = node("input", {
       id: "password-current",
       type: "password",
@@ -1846,7 +2030,8 @@
       try {
         const form = new FormData();
         form.append("file", file.files[0]);
-        await api("/api/v1/backup/restore", { method: "POST", body: form });
+        const result = await api("/api/v1/backup/restore", { method: "POST", body: form, revision });
+        revision = result.revision;
         state.configCache = null;
         state.pending = true;
         file.value = "";
@@ -1937,7 +2122,7 @@
       });
     try {
       const needsStatus = ["overview", "wan", "lan", "system"].includes(id);
-      const [response, health, status, clients, jobs, audit, wifiCaps] =
+      const [response, health, status, clients, jobs, audit, wifiCaps, manifest] =
         await Promise.all([
           api("/api/v1/config"),
           optional(api("/api/v1/health")),
@@ -1952,6 +2137,7 @@
             ? optional(api("/api/v1/audit"))
             : null,
           id === "wifi" ? optional(api("/api/v1/capabilities/wifi")) : null,
+          optional(api("/api/v1/plugins")),
         ]);
       if (epoch !== state.epoch || !state.loggedIn) return;
       const cfg = response.config || response;
@@ -1961,14 +2147,18 @@
       if (health?.deployment?.mode)
         state.confirmedCapabilities = clone(health.capabilities || {});
       state.wifiCaps = wifiCaps;
+      state.modules = manifest?.plugins || null;
+      navigation(id);
       deployment();
       let content;
-      if (id === "overview") content = overview(cfg, status, clients);
+      if (id === "ssh") content = card("SSH 由系统管理", notice("请通过 NixOS 的 services.openssh 配置监听端口、认证策略和授权公钥。"));
+      else if (id === "overview") content = overview(cfg, status, clients);
       else if (id === "clients") content = clientsPage(clients);
       else if (id === "plugins") content = pluginsEditor(cfg);
       else if (id === "system")
         content = systemPage(cfg, status, tab, { jobs, audit });
       else if (
+        moduleSupport(id) ||
         pluginIds.includes(id) ||
         (!pages[id] && Object.hasOwn(cfg.plugins || {}, id))
       )
@@ -1977,8 +2167,8 @@
       else content = card("页面不存在", link("overview", "返回总览"));
       if (sectionReadOnly()) {
         content = stack(notice(ownershipNotice()), content);
-      } else if ((state.confirmedCapabilities?.unsupported || []).includes(id) || (state.confirmedCapabilities?.managedNetwork && pluginIds.includes(id))) {
-        content = stack(notice("当前网络版本不支持应用此功能。保存草稿不代表生效；启用后提交应用将被拒绝。"), content);
+      } else if ((state.confirmedCapabilities?.unsupported || []).includes(id) || (state.confirmedCapabilities?.managedNetwork && (pluginIds.includes(id) || moduleSupport(id)) && !moduleSupport(id)?.runtimeSupported)) {
+        content = stack(notice("当前网络版本不支持应用此功能。可保留或导出历史设置；启用将被拒绝。"), content);
       }
       target.replaceChildren(content);
       target.dataset.route = id;

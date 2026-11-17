@@ -8,6 +8,7 @@ import (
 	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 )
@@ -138,4 +139,62 @@ func TestManagedApplyFlushesJobBeforeNetworkMutation(t *testing.T) {
 	}
 	s.applyMu.Lock()
 	s.applyMu.Unlock()
+}
+
+func TestManagedHealthReportsPPPoECapability(t *testing.T) {
+	s := concurrentServer(t)
+	s.managedRuntime = &runtimeStub{}
+	w := httptest.NewRecorder()
+	s.handleHealth(w, httptest.NewRequest("GET", "/api/v1/health", nil))
+	var body struct {
+		Capabilities struct {
+			WANModes    []string `json:"wanModes"`
+			Unsupported []string `json:"unsupported"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, mode := range body.Capabilities.WANModes {
+		if mode == "pppoe" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("implemented PPPoE missing from WAN capabilities")
+	}
+	for _, feature := range body.Capabilities.Unsupported {
+		if feature == "pppoe" {
+			t.Fatal("PPPoE still reported unsupported")
+		}
+	}
+}
+
+func TestManagedHealthReportsDualStackNetworks(t *testing.T) {
+	s := concurrentServer(t)
+	s.managedRuntime = &runtimeStub{}
+	w := httptest.NewRecorder()
+	s.handleHealth(w, httptest.NewRequest("GET", "/api/v1/health", nil))
+	var body struct {
+		Deployment struct {
+			Profile string `json:"profile"`
+		} `json:"deployment"`
+		Capabilities struct {
+			IndependentWiFiLAN bool     `json:"independentWiFiLAN"`
+			IPv6WANModes       []string `json:"ipv6WanModes"`
+			Unsupported        []string `json:"unsupported"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Deployment.Profile != "managed-router" || !body.Capabilities.IndependentWiFiLAN || !slices.Equal(body.Capabilities.IPv6WANModes, []string{"slaac", "dhcpv6", "pppoe6"}) {
+		t.Fatalf("stale profile: %s", w.Body.String())
+	}
+	for _, feature := range body.Capabilities.Unsupported {
+		if feature == "ipv6" {
+			t.Fatal("verified IPv6 path reported unsupported")
+		}
+	}
 }

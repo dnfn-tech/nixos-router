@@ -2,8 +2,8 @@ package config
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
+	"github.com/dnfn-tech/nixos-router/backend/internal/modules"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,24 +11,27 @@ import (
 )
 
 const (
-	DefaultStateDir  = "/var/lib/nixos-router"
+	DefaultStateDir       = "/var/lib/nixos-router"
 	DefaultConfigBasename = "config.json"
+	// MaxDocumentBytes bounds API configuration requests and durable draft files.
+	MaxDocumentBytes = 16 << 20
 )
 
 // Root configuration describing the intended network state.
 type Config struct {
-	System   SystemConfig            `json:"system"`
-	WAN      WANConfig               `json:"wan"`
-	LAN      LANConfig               `json:"lan"`
-	DNS      DNSConfig               `json:"dns"`
-	WiFi     WiFiConfig              `json:"wifi"`
-	Firewall FirewallConfig          `json:"firewall"`
-	SSH      SSHConfig               `json:"ssh"`
-	DDNS     DDNSConfig              `json:"ddns"`
-	QoS      QoSConfig               `json:"qos"`
-	Parental ParentalConfig          `json:"parental"`
-	IPv6     IPv6Config              `json:"ipv6"`
-	Plugins  map[string]PluginConfig `json:"plugins,omitempty"`
+	SchemaVersion int                     `json:"schemaVersion,omitempty"`
+	Revision      string                  `json:"revision,omitempty"`
+	System        SystemConfig            `json:"system"`
+	WAN           WANConfig               `json:"wan"`
+	LAN           LANConfig               `json:"lan"`
+	DNS           DNSConfig               `json:"dns"`
+	WiFi          WiFiConfig              `json:"wifi"`
+	Firewall      FirewallConfig          `json:"firewall"`
+	DDNS          DDNSConfig              `json:"ddns"`
+	QoS           QoSConfig               `json:"qos"`
+	Parental      ParentalConfig          `json:"parental"`
+	IPv6          IPv6Config              `json:"ipv6"`
+	Plugins       map[string]PluginConfig `json:"plugins,omitempty"`
 }
 
 type SystemConfig struct {
@@ -57,10 +60,10 @@ type PPPoEConfig struct {
 
 // LAN: br-lan bridge with IPv4 CIDR and DHCP pool (stub).
 type LANConfig struct {
-	BridgeName string       `json:"bridgeName"` // e.g. "br-lan"
-	IPv4CIDR   string       `json:"ipv4Cidr"`   // e.g. "192.168.1.1/24"
-	DHCP       DHCPv4Config `json:"dhcp"`
-	Ports      []string     `json:"ports,omitempty"` // physical ports in br-lan (optional)
+	BridgeName   string        `json:"bridgeName"` // e.g. "br-lan"
+	IPv4CIDR     string        `json:"ipv4Cidr"`   // e.g. "192.168.1.1/24"
+	DHCP         DHCPv4Config  `json:"dhcp"`
+	Ports        []string      `json:"ports,omitempty"` // physical ports in br-lan (optional)
 	StaticLeases []StaticLease `json:"staticLeases,omitempty"`
 }
 
@@ -85,41 +88,45 @@ type DNSConfig struct {
 }
 
 type WiFiConfig struct {
-	Enable      bool     `json:"enable"`
-	BridgeToLan bool     `json:"bridgeToLan"`
-	APs         []WiFiAP `json:"aps,omitempty"`
+	Network     *WiFiNetwork `json:"network,omitempty"`
+	Enable      bool         `json:"enable"`
+	BridgeToLan bool         `json:"bridgeToLan"`
+	APs         []WiFiAP     `json:"aps,omitempty"`
 }
 
 type WiFiAP struct {
-	SSID    string `json:"ssid"`
-	Band    string `json:"band,omitempty"`    // "2g" | "5g" | "6g" (stub)
-	Channel int    `json:"channel,omitempty"` // stub
-	PSK     string `json:"psk,omitempty"`     // redacted
-	Enable  bool   `json:"enable"`
-	Guest   bool   `json:"guest,omitempty"`
-	Isolate bool   `json:"isolate,omitempty"`
+	Standard        string `json:"standard,omitempty"`
+	ChannelWidthMHz int    `json:"channelWidthMHz,omitempty"`
+	Security        string `json:"security,omitempty"` // empty/wpa2-psk or pure wpa3-sae
+	SSID            string `json:"ssid"`
+	Band            string `json:"band,omitempty"`    // "2g" | "5g" | "6g" (stub)
+	Channel         int    `json:"channel,omitempty"` // stub
+	PSK             string `json:"psk,omitempty"`     // redacted
+	Enable          bool   `json:"enable"`
+	Guest           bool   `json:"guest,omitempty"`
+	Isolate         bool   `json:"isolate,omitempty"`
 }
 
 type FirewallConfig struct {
-	Enable      bool   `json:"enable"`
-	NATEnabled  bool   `json:"natEnabled"`
-	UPnPEnable  bool   `json:"upnpEnable,omitempty"`
-	Description string `json:"description,omitempty"`
+	Enable       bool          `json:"enable"`
+	NATEnabled   bool          `json:"natEnabled"`
+	UPnPEnable   bool          `json:"upnpEnable,omitempty"`
+	Description  string        `json:"description,omitempty"`
 	PortForwards []PortForward `json:"portForwards,omitempty"`
-	BlockedMACs []string `json:"blockedMacs,omitempty"`
+	BlockedMACs  []string      `json:"blockedMacs,omitempty"`
 	// Future: lanServices...
 }
 
 type PortForward struct {
-	Protocol string `json:"protocol"`           // "tcp" | "udp"
-	ExternalPort int `json:"externalPort"`      // 1-65535 (single port)
-	ExternalPortEnd int `json:"externalPortEnd,omitempty"` // optional range end
-	DestIP    string `json:"destIp"`           // internal dest IP
-	DestPort  int    `json:"destPort"`         // 1-65535
-	Description string `json:"description,omitempty"`
+	Protocol        string `json:"protocol"`                  // "tcp" | "udp"
+	ExternalPort    int    `json:"externalPort"`              // 1-65535 (single port)
+	ExternalPortEnd int    `json:"externalPortEnd,omitempty"` // optional range end
+	DestIP          string `json:"destIp"`                    // internal dest IP
+	DestPort        int    `json:"destPort"`                  // 1-65535
+	Description     string `json:"description,omitempty"`
 }
 
-type SSHConfig struct {
+type legacySSHConfig struct {
 	Enable         bool     `json:"enable"`
 	Port           int      `json:"port,omitempty"`
 	PasswordAuth   bool     `json:"passwordAuth,omitempty"`
@@ -128,8 +135,8 @@ type SSHConfig struct {
 
 // DDNS providers (stubs)
 type DDNSConfig struct {
-	Enable   bool   `json:"enable"`
-	Provider string `json:"provider,omitempty"` // "cloudflare" | "duckdns" | "aliyun" | "custom"
+	Enable     bool            `json:"enable"`
+	Provider   string          `json:"provider,omitempty"` // "cloudflare" | "duckdns" | "aliyun" | "custom"
 	Cloudflare *CloudflareDDNS `json:"cloudflare,omitempty"`
 	DuckDNS    *DuckDNSConfig  `json:"duckdns,omitempty"`
 	Aliyun     *AliyunDDNS     `json:"aliyun,omitempty"`
@@ -143,7 +150,7 @@ type CloudflareDDNS struct {
 }
 
 type DuckDNSConfig struct {
-	Token string `json:"token"` // secret
+	Token  string `json:"token"` // secret
 	Domain string `json:"domain"`
 }
 
@@ -166,22 +173,22 @@ type PluginConfig struct {
 
 // QoS: global bandwidth and per-device stubs
 type QoSConfig struct {
-	Enable       bool                 `json:"enable"`
-	UpMbps       int                  `json:"upMbps,omitempty"`
-	DownMbps     int                  `json:"downMbps,omitempty"`
-	DevicePolicy []QoSDevicePolicy    `json:"devicePolicy,omitempty"`
+	Enable       bool              `json:"enable"`
+	UpMbps       int               `json:"upMbps,omitempty"`
+	DownMbps     int               `json:"downMbps,omitempty"`
+	DevicePolicy []QoSDevicePolicy `json:"devicePolicy,omitempty"`
 }
 type QoSDevicePolicy struct {
-	MAC      string `json:"mac,omitempty"`
-	IP       string `json:"ip,omitempty"`
-	Priority string `json:"priority,omitempty"` // "low"|"normal"|"high"
-	LimitKbps int   `json:"limitKbps,omitempty"`
+	MAC       string `json:"mac,omitempty"`
+	IP        string `json:"ip,omitempty"`
+	Priority  string `json:"priority,omitempty"` // "low"|"normal"|"high"
+	LimitKbps int    `json:"limitKbps,omitempty"`
 }
 
 // Parental control: device/group schedule stubs
 type ParentalConfig struct {
-	Enable bool            `json:"enable"`
-	Rules  []ParentalRule  `json:"rules,omitempty"`
+	Enable bool           `json:"enable"`
+	Rules  []ParentalRule `json:"rules,omitempty"`
 }
 type ParentalRule struct {
 	TargetMACs []string `json:"targetMacs,omitempty"`
@@ -192,7 +199,7 @@ type ParentalRule struct {
 
 // IPv6: WAN mode and LAN PD/RA stubs
 type IPv6Config struct {
-	Enable bool   `json:"enable"`
+	Enable  bool   `json:"enable"`
 	WANMode string `json:"wanMode,omitempty"` // "dhcpv6"|"slaac"|"pppoe6"|"disabled"
 	LANPD   bool   `json:"lanPrefixDelegation,omitempty"`
 	LANRA   bool   `json:"lanRouterAdvertisement,omitempty"`
@@ -232,11 +239,6 @@ func DefaultConfig() Config {
 			Enable:     true,
 			NATEnabled: true,
 		},
-		SSH: SSHConfig{
-			Enable:       true,
-			Port:         22,
-			PasswordAuth: false,
-		},
 		DDNS: DDNSConfig{
 			Enable: false,
 		},
@@ -250,10 +252,10 @@ func DefaultConfig() Config {
 			Rules:  []ParentalRule{},
 		},
 		IPv6: IPv6Config{
-			Enable: false,
+			Enable:  false,
 			WANMode: "disabled",
-			LANPD:  false,
-			LANRA:  false,
+			LANPD:   false,
+			LANRA:   false,
 		},
 		Plugins: map[string]PluginConfig{},
 	}
@@ -261,166 +263,229 @@ func DefaultConfig() Config {
 
 // Validate returns an error describing the first invalid setting encountered.
 func (c *Config) Validate() error {
+	if err := c.validateDocumentMetadata(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.System.Hostname) == "" {
-		return errors.New("system.hostname must not be empty")
+		return invalidField("system.hostname", "must not be empty")
 	}
 	switch c.WAN.Mode {
 	case "dhcp":
 	case "static":
 		if c.WAN.Static == nil {
-			return errors.New("wan.static must be set when wan.mode is 'static'")
+			return invalidField("wan.static", "must be set when wan.mode is 'static'")
 		}
 		if _, _, err := net.ParseCIDR(c.WAN.Static.AddressCIDR); err != nil {
-			return fmt.Errorf("wan.static.addressCidr invalid: %w", err)
+			return invalidField("wan.static.addressCidr", "invalid CIDR address")
 		}
 		if c.WAN.Static.Gateway != "" && net.ParseIP(c.WAN.Static.Gateway) == nil {
-			return errors.New("wan.static.gateway invalid IP")
+			return invalidField("wan.static.gateway", "invalid IP")
 		}
-		for _, ip := range c.WAN.Static.DNS {
+		for i, ip := range c.WAN.Static.DNS {
 			if net.ParseIP(ip) == nil {
-				return fmt.Errorf("wan.static.dns contains invalid IP: %s", ip)
+				return invalidField(fmt.Sprintf("wan.static.dns.%d", i), "invalid IP address")
 			}
 		}
 	case "pppoe":
 		if c.WAN.PPPoE == nil {
-			return errors.New("wan.pppoe must be set when wan.mode is 'pppoe'")
+			return invalidField("wan.pppoe", "must be set when wan.mode is 'pppoe'")
 		}
 		if c.WAN.PPPoE.Username == "" {
-			return errors.New("wan.pppoe.username must not be empty")
+			return invalidField("wan.pppoe.username", "must not be empty")
 		}
 		if c.WAN.PPPoE.Password == "" {
-			return errors.New("wan.pppoe.password must not be empty")
+			return invalidField("wan.pppoe.password", "must not be empty")
 		}
 	default:
-		return errors.New("wan.mode must be one of: dhcp, static, pppoe")
+		return invalidField("wan.mode", "must be one of: dhcp, static, pppoe")
 	}
 
 	if _, _, err := net.ParseCIDR(c.LAN.IPv4CIDR); err != nil {
-		return fmt.Errorf("lan.ipv4Cidr invalid: %w", err)
+		return invalidField("lan.ipv4Cidr", "invalid CIDR address")
 	}
 	if c.LAN.DHCP.Enable {
 		if net.ParseIP(c.LAN.DHCP.RangeStart) == nil {
-			return errors.New("lan.dhcp.rangeStart invalid IP")
+			return invalidField("lan.dhcp.rangeStart", "invalid IP")
 		}
 		if net.ParseIP(c.LAN.DHCP.RangeEnd) == nil {
-			return errors.New("lan.dhcp.rangeEnd invalid IP")
+			return invalidField("lan.dhcp.rangeEnd", "invalid IP")
 		}
 		if c.LAN.DHCP.LeaseMins < 1 {
-			return errors.New("lan.dhcp.leaseMins must be >= 1")
+			return invalidField("lan.dhcp.leaseMins", "must be >= 1")
 		}
 	}
 	// Static leases
 	if len(c.LAN.StaticLeases) > 0 {
 		_, lanNet, _ := net.ParseCIDR(c.LAN.IPv4CIDR)
-		for _, sl := range c.LAN.StaticLeases {
+		for i, sl := range c.LAN.StaticLeases {
 			if _, err := net.ParseMAC(sl.MAC); err != nil {
-				return fmt.Errorf("lan.staticLeases mac invalid: %s", sl.MAC)
+				return invalidField(fmt.Sprintf("lan.staticLeases.%d.mac", i), "invalid MAC address")
 			}
 			ip := net.ParseIP(sl.IP)
 			if ip == nil {
-				return fmt.Errorf("lan.staticLeases ip invalid: %s", sl.IP)
+				return invalidField(fmt.Sprintf("lan.staticLeases.%d.ip", i), "invalid IP address")
 			}
 			if lanNet != nil && !lanNet.Contains(ip) {
-				return fmt.Errorf("lan.staticLeases ip %s not in %s", sl.IP, c.LAN.IPv4CIDR)
+				return invalidField(fmt.Sprintf("lan.staticLeases.%d.ip", i), "address must be in the LAN subnet")
 			}
 		}
 	}
 
-	for _, u := range c.DNS.Upstreams {
+	for i, u := range c.DNS.Upstreams {
 		if net.ParseIP(u) == nil {
-			return fmt.Errorf("dns.upstreams contains invalid IP: %s", u)
+			return invalidField(fmt.Sprintf("dns.upstreams.%d", i), "invalid IP address")
 		}
 	}
 
 	// Basic WiFi checks (more in later milestones)
-	for _, ap := range c.WiFi.APs {
+	for i, ap := range c.WiFi.APs {
+		if err := validateWiFiRadio(ap, i, c.WiFi.Enable && ap.Enable); err != nil {
+			return err
+		}
+		switch ap.Security {
+		case "", "wpa2-psk", "wpa3-sae":
+		default:
+			return invalidField(fmt.Sprintf("wifi.aps.%d.security", i), "must be wpa2-psk or wpa3-sae")
+		}
 		if ap.SSID == "" {
-			return errors.New("wifi.aps[].ssid must not be empty")
+			return invalidField(fmt.Sprintf("wifi.aps.%d.ssid", i), "must not be empty")
 		}
 		if ap.PSK != "" && len(ap.PSK) < 8 {
-			return errors.New("wifi.aps[].psk must be at least 8 characters if set")
+			return invalidField(fmt.Sprintf("wifi.aps.%d.psk", i), "must be at least 8 characters if set")
 		}
 		switch ap.Band {
 		case "", "2g", "5g", "6g":
 		default:
-			return fmt.Errorf("wifi.aps[].band invalid: %s", ap.Band)
+			return invalidField(fmt.Sprintf("wifi.aps.%d.band", i), "unsupported band")
 		}
 	}
 
-	// SSH port sanity
-	if c.SSH.Port < 0 || c.SSH.Port > 65535 {
-		return errors.New("ssh.port must be 0-65535")
+	if err := c.validateWiFiNetwork(); err != nil {
+		return err
 	}
+
 	// QoS sanity
-	for _, dp := range c.QoS.DevicePolicy {
+	for i, dp := range c.QoS.DevicePolicy {
 		if dp.MAC == "" && dp.IP == "" {
-			return errors.New("qos.devicePolicy[] requires mac or ip")
+			return invalidField(fmt.Sprintf("qos.devicePolicy.%d.mac", i), "MAC or IP address is required")
 		}
 		if dp.MAC != "" {
 			if _, err := net.ParseMAC(dp.MAC); err != nil {
-				return fmt.Errorf("qos.devicePolicy mac invalid: %s", dp.MAC)
+				return invalidField(fmt.Sprintf("qos.devicePolicy.%d.mac", i), "invalid MAC address")
 			}
 		}
 		if dp.IP != "" && net.ParseIP(dp.IP) == nil {
-			return fmt.Errorf("qos.devicePolicy ip invalid: %s", dp.IP)
+			return invalidField(fmt.Sprintf("qos.devicePolicy.%d.ip", i), "invalid IP address")
 		}
 		if dp.LimitKbps < 0 {
-			return errors.New("qos.devicePolicy.limitKbps must be >=0")
+			return invalidField(fmt.Sprintf("qos.devicePolicy.%d.limitKbps", i), "must be >=0")
 		}
 	}
 	// IPv6 sanity
 	switch c.IPv6.WANMode {
 	case "dhcpv6", "slaac", "pppoe6", "disabled", "":
 	default:
-		return errors.New("ipv6.wanMode must be one of: dhcpv6, slaac, pppoe6, disabled")
+		return invalidField("ipv6.wanMode", "must be one of: dhcpv6, slaac, pppoe6, disabled")
+	}
+	if c.IPv6.Enable {
+		if c.IPv6.WANMode == "" || c.IPv6.WANMode == "disabled" {
+			return invalidField("ipv6.wanMode", "select a WAN acquisition mode when IPv6 is enabled")
+		}
+		if (c.IPv6.WANMode == "pppoe6") != (c.WAN.Mode == "pppoe") {
+			return invalidField("ipv6.wanMode", "PPPoE IPv6 must use the PPPoE WAN connection")
+		}
+		if c.IPv6.LANPD && c.IPv6.WANMode == "slaac" {
+			return invalidField("ipv6.lanPrefixDelegation", "prefix delegation requires DHCPv6 or PPPoE IPv6")
+		}
+		if c.IPv6.LANRA && !c.IPv6.LANPD {
+			return invalidField("ipv6.lanRouterAdvertisement", "LAN advertisements require a delegated LAN prefix")
+		}
 	}
 	// Firewall port forwards
-	for _, pf := range c.Firewall.PortForwards {
+	for i, pf := range c.Firewall.PortForwards {
 		if pf.Protocol != "tcp" && pf.Protocol != "udp" {
-			return fmt.Errorf("firewall.portForwards[].protocol invalid: %s", pf.Protocol)
+			return invalidField(fmt.Sprintf("firewall.portForwards.%d.protocol", i), "must be tcp or udp")
 		}
 		if pf.ExternalPort < 1 || pf.ExternalPort > 65535 {
-			return errors.New("firewall.portForwards[].externalPort 1-65535")
+			return invalidField(fmt.Sprintf("firewall.portForwards.%d.externalPort", i), "must be 1-65535")
 		}
 		if pf.ExternalPortEnd != 0 {
 			if pf.ExternalPortEnd < pf.ExternalPort || pf.ExternalPortEnd > 65535 {
-				return errors.New("firewall.portForwards[].externalPortEnd invalid")
+				return invalidField(fmt.Sprintf("firewall.portForwards.%d.externalPortEnd", i), "invalid end port")
 			}
 		}
 		if net.ParseIP(pf.DestIP) == nil {
-			return fmt.Errorf("firewall.portForwards[].destIp invalid: %s", pf.DestIP)
+			return invalidField(fmt.Sprintf("firewall.portForwards.%d.destIp", i), "invalid IP address")
 		}
 		if pf.DestPort < 1 || pf.DestPort > 65535 {
-			return errors.New("firewall.portForwards[].destPort 1-65535")
+			return invalidField(fmt.Sprintf("firewall.portForwards.%d.destPort", i), "must be 1-65535")
 		}
 	}
 	// Firewall blocked MACs
-	for _, m := range c.Firewall.BlockedMACs {
+	for i, m := range c.Firewall.BlockedMACs {
 		if _, err := net.ParseMAC(m); err != nil {
-			return fmt.Errorf("firewall.blockedMacs invalid: %s", m)
+			return invalidField(fmt.Sprintf("firewall.blockedMacs.%d", i), "invalid MAC address")
 		}
 	}
 	// DDNS sanity
 	if c.DDNS.Enable {
 		switch c.DDNS.Provider {
 		case "cloudflare":
-			if c.DDNS.Cloudflare == nil || c.DDNS.Cloudflare.APIToken == "" || c.DDNS.Cloudflare.Zone == "" || c.DDNS.Cloudflare.Record == "" {
-				return errors.New("ddns.cloudflare requires apiToken, zone, record")
+			if c.DDNS.Cloudflare == nil {
+				return invalidField("ddns.cloudflare", "provider configuration is required")
+			}
+			if c.DDNS.Cloudflare.APIToken == "" {
+				return invalidField("ddns.cloudflare.apiToken", "must not be empty")
+			}
+			if c.DDNS.Cloudflare.Zone == "" {
+				return invalidField("ddns.cloudflare.zone", "must not be empty")
+			}
+			if c.DDNS.Cloudflare.Record == "" {
+				return invalidField("ddns.cloudflare.record", "must not be empty")
 			}
 		case "duckdns":
-			if c.DDNS.DuckDNS == nil || c.DDNS.DuckDNS.Token == "" || c.DDNS.DuckDNS.Domain == "" {
-				return errors.New("ddns.duckdns requires token, domain")
+			if c.DDNS.DuckDNS == nil {
+				return invalidField("ddns.duckdns", "provider configuration is required")
+			}
+			if c.DDNS.DuckDNS.Token == "" {
+				return invalidField("ddns.duckdns.token", "must not be empty")
+			}
+			if c.DDNS.DuckDNS.Domain == "" {
+				return invalidField("ddns.duckdns.domain", "must not be empty")
 			}
 		case "aliyun":
-			if c.DDNS.Aliyun == nil || c.DDNS.Aliyun.AccessKey == "" || c.DDNS.Aliyun.SecretKey == "" || c.DDNS.Aliyun.Domain == "" || c.DDNS.Aliyun.Record == "" {
-				return errors.New("ddns.aliyun requires accessKey, secretKey, domain, record")
+			if c.DDNS.Aliyun == nil {
+				return invalidField("ddns.aliyun", "provider configuration is required")
+			}
+			if c.DDNS.Aliyun.AccessKey == "" {
+				return invalidField("ddns.aliyun.accessKey", "must not be empty")
+			}
+			if c.DDNS.Aliyun.SecretKey == "" {
+				return invalidField("ddns.aliyun.secretKey", "must not be empty")
+			}
+			if c.DDNS.Aliyun.Domain == "" {
+				return invalidField("ddns.aliyun.domain", "must not be empty")
+			}
+			if c.DDNS.Aliyun.Record == "" {
+				return invalidField("ddns.aliyun.record", "must not be empty")
 			}
 		case "custom":
-			if c.DDNS.Custom == nil || c.DDNS.Custom.URL == "" {
-				return errors.New("ddns.custom requires url")
+			if c.DDNS.Custom == nil {
+				return invalidField("ddns.custom", "provider configuration is required")
+			}
+			if c.DDNS.Custom.URL == "" {
+				return invalidField("ddns.custom.url", "must not be empty")
 			}
 		default:
-			return errors.New("ddns.provider must be one of: cloudflare, duckdns, aliyun, custom")
+			return invalidField("ddns.provider", "must be one of: cloudflare, duckdns, aliyun, custom")
+		}
+	}
+	for id, pc := range c.Plugins {
+		if err := modules.Validate(id, pc.Enable, pc.Config, c.DNS.EnableDNSMasq); err != nil {
+			if field, ok := err.(*modules.FieldError); ok {
+				return invalidField(field.Path, field.Message)
+			}
+			return err
 		}
 	}
 	return nil
@@ -429,6 +494,7 @@ func (c *Config) Validate() error {
 // RedactedCopy returns a deep-copied config with secrets masked for safe API output.
 func (c *Config) RedactedCopy() Config {
 	clone := *c
+	clone.Plugins = redactPlugins(*c, nil)
 	if clone.WAN.PPPoE != nil && clone.WAN.PPPoE.Password != "" {
 		pp := *clone.WAN.PPPoE
 		pp.Password = "****"
@@ -497,17 +563,20 @@ func SaveToFile(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+	if len(data)+1 > MaxDocumentBytes {
+		return invalidField("config", "configuration document exceeds 16 MiB")
+	}
+	tmp, err := writeSyncedTemp(path, append(data, '\n'))
+	if err != nil {
 		return err
 	}
+	defer os.Remove(tmp)
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	return nil
+	return syncConfigDirectory(path)
 }
-

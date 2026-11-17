@@ -1,120 +1,72 @@
-# 插件与功能模块总览
+# 内置插件与功能模块
 
-本项目后端采用“稳定核心 + 模块/插件”的扩展模型：核心仅提供通用能力（配置注册、作业队列、审计、会话/鉴权、机密、在线设备），各网络功能以模块实现（v1 作为内置一方模块编译进二进制），并为将来第三方插件预留扩展点与协议。
+插件实现位于 `backend/internal/modules/`。当前支持编译进二进制的一方模块，不支持在线安装、动态 Go 插件、第三方子进程或任意命令钩子。
 
-- 合同：Manifest（id/name/version/routes/ui/configSchema/applyHooks/capabilities）
-- 生命周期：discover → register → enable/disable → configure → apply（pre/post validate、generate、reload）
-- 隔离：统一中间件链（LAN-only、鉴权、CSRF）；能力按需授权；生成配置由核心统一 reload/restart
-- 打包：v1 内置模块随核心编译；第三方将来可作为子进程插件（JSON-RPC over stdio）与静态资源目录
-- 配置：插件配置位于 `config.json` 的 `plugins.<id>`；schema 片段合并入总 schema
-- 热/冷：v1 建议启用/禁用后重启 API/Apply（冷加载）；热加载后续评估
+## 当前支持
 
-详细设计、Go 接口草图与示例模块映射请见 `docs/backend-architecture.md` 的“插件 / 功能模块”章节。
+| 模块 | 归属与能力 |
+|---|---|
+| AdBlock | 路由器管理；支持托管模式实际应用及仅生成模式文件输出 |
+| Mihomo、Tailscale、ZeroTier | 系统管理；保留历史配置，不通过本项目启停服务 |
+| Traffic、VLAN | 运行期未实现；不提供可成功启用的开关 |
+| 未知历史模块 | 禁用配置可保留、编辑和导出；不能启用或执行 |
 
-## UI / 页面控制
+IPv6 是核心网络功能，使用 `ipv6` 配置，不受 `plugins.ipv6` 开关控制。其他核心服务同样保持唯一配置入口。
 
-为避免前端菜单硬编码、支持按模块裁剪功能，WebUI 导航与页面由插件/功能模块贡献并由后端汇总。
+## 注册与权限
 
-### Manifest 中的 UI 声明
-- `ui.nav[]`（侧栏入口，按分组/顺序渲染）
-  - 结构：`{ id, label, group, icon?, order?, page }`
-    - `group`：如「基础」「网络服务」「系统」
-    - `page`：点击后跳转的页面 id（由 `ui.pages` 注册）
-- `ui.pages[]`（页面注册）
-  - 结构：`{ id, route, title, asset }`
-    - `route`：如 `/wifi`、`/ddns`，前端路由映射
-    - `asset`：组件或静态资源路径（由前端构建/静态目录提供）
-- 预留：`ui.sections[]`（向现有页面注入分区/面板），v1 可延后实现，仅作为文档占位
+每个已注册模块声明 ID、版本、标题、导航、配置 schema、能力要求及资源归属。ID 和导航路径冲突会被拒绝。模块通过纯校验和 DNS 配置贡献接口接入核心，不能访问 root 命令执行器。
 
-### 启用/禁用与可见性
-- 启用的插件：其 `ui.nav` 与 `ui.pages` 对应的导航与页面可见；相关 API 路由可用
-- 禁用的插件：隐藏对应导航与页面；其 API 路由返回 404/disabled
-- 内置“核心页面”不可在运行期禁用（或仅能通过编译期构建标记禁用）：
-  - 概览（overview）、WAN、LAN、WiFi、设备（clients）、DNS、防火墙（firewall）、SSH、系统（system）、插件管理（plugins-mgmt）
-- 可选内置（QoS、家长控制、DDNS、IPv6 …）：与插件 1:1 对应，可通过 `config.json` 的 `plugins.<id>.enabled` 进行运行期开启/关闭
+NixOS 托管部署通过 `services.nixos-router.backend.managed.modules` 设置允许清单，默认 `[ "adblock" ]`，空清单禁止所有可选模块。该清单由 NixOS 同时传给 API 和 executor，不属于可编辑 HTTP 配置。两端分别校验，不能通过直接 RPC 绕过部署限制。
 
-### 前端加载方式
-- 前端通过 `GET /api/v1/ui/nav` 或 `GET /api/v1/plugins`（返回 manifest + enabled）拉取导航/页面定义
-- Shell/导航不硬编码完整功能清单，而是根据返回结果动态绘制
-- v1 冷加载：启用/禁用后可能需要 API 进程重启；在 apply 作业完成后刷新前端即可生效
+托管模式的生命周期为：校验完整配置及依赖 → 生成候选代际 → dnsmasq 配置预检 → 核心事务激活 → 持久化 last-good → 发布已应用配置。停用也是一次完整应用，仅移除模块拥有的配置。失败反映在作业终态，并使用已有恢复机制；不新增 LAN 改址倒计时回滚。
 
-## 可选内置模块示例
+仅生成模式不会应用运行状态。旧的非托管 reload 路径不支持插件运行应用，会拒绝启用的模块，而不是把生成成功报告为生效。
 
-### AdBlock（广告过滤）
-- 目标：基于 DNS 层的拦截（dnsmasq），支持引入常见 Blocklist；后续可选 AdGuard Home 方案
-- 配置：`plugins.adblock`（例如）
-  - `enabled`：是否启用
-  - `lists[]`：订阅 URL 或内置集合名（后端解析为 dnsmasq 可读格式）
-  - `mode`：`hosts` / `address` / `custom`（生成 `address=/domain/0.0.0.0` 等）
-  - `updateInterval`：列表刷新周期（可选）
-- UI：侧栏“网络服务”分组新增“广告过滤”，页面展示订阅、启用状态与（later）统计
-- Apply：下载/刷新列表至状态目录（不进入 `config.json`），生成 `dnsmasq.d/adblock.conf` 或等价片段；`dnsmasq` reload
+## AdBlock 配置
 
-### Traffic（流量统计）
-- 目标：接口/客户端的流量统计与可视化（vnstat，或基于 nft/conntrack 聚合）
-- 配置：`plugins.traffic`（例如）
-  - `enabled`：是否启用
-  - `retentionDays`：保留天数（或数据源自身保留策略）
-  - `collectors[]`：`vnstat` / `nft` / `conntrack`（可选其一或组合，v1 选择保守方案）
-- UI：侧栏“网络服务”分组新增“流量统计”，页面展示开关、保留期与图表（后端提供只读数据）
-- Apply：启停采集器相关服务/定时任务；读路径为只读 API（查询统计），写路径主要用于 `enabled` 切换
+```json
+{
+  "plugins": {
+    "adblock": {
+      "enable": true,
+      "config": { "entries": ["ads.example.com", "tracking.example.org"] }
+    }
+  }
+}
+```
 
-### Mihomo（Clash Meta 代理）
-- 目标：提供基于 mihomo（Clash Meta）的代理能力，可选启用；默认不属于核心路径
-- 配置：`plugins.mihomo`（例如）
-  - `enabled`：是否启用
-  - `profile`：配置来源（文件路径或订阅 URL）
-  - `mode`：`redir-host` / `fake-ip`
-  - `tun.enable`：是否启用 TUN（可选）
-  - `dns.port`：mihomo 内部 DNS 端口（与 dnsmasq 的交互需谨慎）
-  - `updateInterval`：订阅/规则更新周期（可选）
-- UI：侧栏“网络服务”分组新增“代理（Mihomo）”，页面包含启用/配置/状态；（later）连接统计
-- Apply：生成 mihomo 配置文件至状态目录并管理 `mihomo.service`；如 `tun.enable=true` 则创建/管理 TUN；与 dnsmasq 的交互：\n  - 在 `redir-host`/`fake-ip` 场景下，可将 dnsmasq 上游指向 mihomo 的 DNS（保留内网域名在本机解析）\n  - `fake-ip` 模式需在文档中标注注意事项（本地域名绕过、可能的冲突处理）\n- 禁用：隐藏页面并在下一次 apply 停止服务
+- 依赖 `dns.enableDnsmasq=true`，否则保存/应用前拒绝。
+- 最多 4096 条 ASCII DNS 域名；标签最多 63 字节，规范化后域名最多 253 字节。
+- 大小写规范化、去掉末尾根点并去重；不接受 URL、IP、通配符、原始 dnsmasq 指令或换行。
+- 规则覆盖域名及子域，同时阻断 A/AAAA。客户端若绕过网关 DNS，不属于该模块的拦截范围。
+- 订阅下载、自动刷新、命中统计及 AdGuard Home 集成未实现。
+- 旧 `config.lists` 禁用时保留；非空列表会阻止启用，页面可明确清空。不会静默忽略或下载。
+- 禁用并应用后，规则从当前 DNS 代际移除；正常上游解析恢复。
 
-### VLAN（虚拟局域网，多 LAN 可选）
-- 目标：在保持默认“单一 br-lan”的前提下，通过可选插件提供多 VLAN/LAN 的能力
-- 配置：`plugins.vlan`（例如）
-  - `enabled`：是否启用
-  - `vlans[]`：`{ vid, name, bridge, ipv4.address, dhcp.{enable,rangeStart,rangeEnd,leaseTime,domain}, isolate }`
-  - `lan.ports`：可选的端口-VID 映射/打标（具体结构依实现细化）
-- UI：侧栏“网络服务”分组新增“VLAN”，页面用于新增/编辑/删除 VLAN，设置子网/DHCP/隔离；（later）将 WiFi BSS 映射到某 VLAN
-- Apply：为每个 VLAN 创建/更新 802.1Q 子接口与桥，生成 dnsmasq 的每 VLAN 段配置，按 `isolate` 生成 nftables 隔离规则；默认插件关闭时维持单一 `br-lan`
+## API 与页面
 
-### Tailscale（可选远程接入）
-- 目标：通过 Tailscale 提供远程接入/overlay 网络能力（可选），谨慎发布局域网路由；支持三种控制面模式
-- 配置：`plugins.tailscale`（例如）
-  - `enabled`：是否启用
-  - `controlPlane`：`official | selfhost | headscale`
-    - `official`：使用 tailscale.com 官方控制面
-    - `selfhost`：连接外部自建 Headscale，需提供 `loginServer`
-    - `headscale`：在本机运行 Headscale 作为控制面（见下）
-  - `loginServer`：当 `controlPlane=selfhost` 时必填（Headscale URL，如 `https://headscale.example.com`）
-  - `authKey`：可选一次性授权秘钥（建议通过机密存储而非明文）
-  - `advertiseRoutes[]`：对外通告的 CIDR（如 `192.168.88.0/24`），需配合防火墙策略
-  - `acceptRoutes`：是否接受来自管理面的路由下发
-  - `userspaceNetworking`：可选（视设备能力）
-  - `headscale`：（当 `controlPlane=headscale` 时生效）
-    - `listen`：Headscale 监听地址（如 `0.0.0.0:8085`，仅 LAN 放行）
-    - `baseURL`：Headscale 对外可访问的 URL（如 `https://router.lan:8085`）
-    - `dataDir`：数据目录（默认位于状态目录 `stateDir/headscale`）
-    - `preAuthKeyTTL`：预授权密钥有效期（可选）
-    - `tls`：可选 TLS 配置（later）
-- UI：侧栏“网络服务”分组新增“Tailscale”，管理启用/登录状态/路由通告/（本机 Headscale 时）控制面状态与预授权密钥
-- Apply：
-  - `official`：管理 `tailscaled`/`tailscale up`
-  - `selfhost`：与上同，但追加 `--login-server=$loginServer`
-  - `headscale`：生成 Headscale 配置与数据目录，管理 `headscale.service`，通过 headscale CLI 生成预授权密钥；本机 `tailscale up --login-server=$localURL`；nftables 仅对 LAN 放行 Headscale HTTP 管理端口；禁用时停止 `tailscaled` 与 `headscale` 并撤销路由
+`GET /api/v1/plugins` 返回清单，`GET /api/v1/plugins/{id}` 返回单项。清单包含 `available`、`runtimeSupported`、`ownership`、`configSchema`、期望 `enabled`、可用时的 `appliedEnabled`/`appliedRevision` 及 `status`。
 
-### Zerotier（可选远程接入）
-- 目标：通过 Zerotier 提供 overlay 网络能力（可选），谨慎加入网络与路由通告
-- 配置：`plugins.zerotier`（例如）
-  - `enabled`：是否启用
-  - `controlPlane`：`official | selfhost`
-  - `controllerUrl`：当 `controlPlane=selfhost` 时用于指向自建控制器的 API/控制端点
-  - `apiToken`：访问自建控制器所需凭据（建议机密存储）
-  - `networks[]`：加入的网络 ID 列表
-  - `managedRoutes[]`：需要通告/安装的路由（按网络）
-  - `authToken`：可选，用于本机控制器交互（建议机密存储）
-- UI：侧栏“网络服务”分组新增“Zerotier”，管理启用/加入网络/路由
-- Apply：管理 `zerotier-one` 服务，针对 `selfhost` 将客户端指向自建控制器并使用 `apiToken` 完成所需操作；加入/离开网络，按配置设置路由；nftables 放行必要流量；禁用时停止服务并撤销路由
+`status=service-active` 仅说明确认配置已应用且托管 DNS 服务观测为 active，不代表每个客户端查询已经实测。未能观测时显示 unknown，不从草稿开关推断运行状态。
 
+主配置写入和模块 PUT/PATCH 均保持 revision 并发校验及原有秘密引用约束。模块错误给出 `plugins.<id>...` 字段路径，不回显秘密。未知或系统管理模块不能启用；历史禁用配置不会阻断基础路由。
+
+前端保留原生 JavaScript 框架；能力和菜单可见性来自注册表 API。扩展管理页保留不可用项及原因，详细导航只呈现可用模块。`web/` 和 `backend/web/` 必须同步。
+
+## SSH
+
+SSH 完全由 NixOS `services.openssh` 和系统用户公钥配置管理。本项目不提供 SSH 编辑页面、草稿设置或配置型运行状态，不写 sshd 配置或启停服务。
+
+配置 schema v2 移除 `ssh`。旧文件与备份兼容读取，编辑草稿首次迁移保存原始字节的私有 `.v0.bak`/`.v1.bak`；读取 last-good 不改写原文件。当前配置写入携带 `ssh` 将得到字段错误。
+
+系统声明的实际 SSH 端口仍作为防火墙管理面策略输入，包含显式 ListenAddress 端口。SSH 关闭时不假定 22 端口；访问边界不会因移除配置入口而放宽。
+
+## 验证入口
+
+- Go：`cd backend && go test ./...`。
+- 浏览器：`tests/package.json` 的 `test:web`，需要测试后台二进制和 Chromium。
+- 模块契约：`nix eval --impure --json --file tests/module-managed.nix`。
+- 实际 DNS 生命周期：`nix build .#checks.x86_64-linux.vm-managed-adblock -L`。
+
+VM 检查由真实 API 配置/应用，客户端验证上游 A/AAAA、域名与子域拦截、无关解析、非法配置拒绝、规则替换、执行器重启、整机重启及停用恢复。测试定义不等同于本次运行结果，结果另见验收记录。

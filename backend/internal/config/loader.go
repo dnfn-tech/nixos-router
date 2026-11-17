@@ -49,7 +49,7 @@ func LoadOrDefault(opts LoadOptions) (Config, string, error) {
 	stateDir, configPath := ResolvePaths(opts)
 
 	if _, err := os.Stat(configPath); err == nil {
-		cfg, err := LoadFromFile(configPath)
+		cfg, err := LoadDraft(configPath)
 		return cfg, configPath, err
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Config{}, configPath, fmt.Errorf("stat config: %w", err)
@@ -57,6 +57,10 @@ func LoadOrDefault(opts LoadOptions) (Config, string, error) {
 
 	// Missing: seed default in memory (and optionally write it)
 	cfg := DefaultConfig()
+	cfg, err := WithNewRevision(cfg)
+	if err != nil {
+		return Config{}, configPath, err
+	}
 	if opts.SeedDefaultIfMissing && stateDir != "" {
 		if err := SaveToFile(configPath, cfg); err != nil {
 			return Config{}, configPath, fmt.Errorf("seed default config: %w", err)
@@ -64,4 +68,3 @@ func LoadOrDefault(opts LoadOptions) (Config, string, error) {
 	}
 	return cfg, configPath, nil
 }
-

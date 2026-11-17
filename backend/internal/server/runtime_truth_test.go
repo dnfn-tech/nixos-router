@@ -74,3 +74,21 @@ func TestManagedClientBlockUsesAppliedSnapshot(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedUnitsIncludeDedicatedPPPoE(t *testing.T) {
+	s := New(Options{Config: config.DefaultConfig(), ManagedRuntime: &runtimeStub{}})
+	s.runner = &exitedStatusRunner{stdout: "failed\n"}
+	units, source := s.collectUnitStatuses()
+	if source != "systemctl" {
+		t.Fatal(source)
+	}
+	for _, unit := range units {
+		if unit["id"] == "pppoe" {
+			if unit["unit"] != "nixos-router-pppoe.service" || unit["state"] != "failed" {
+				t.Fatal(unit)
+			}
+			return
+		}
+	}
+	t.Fatal("dedicated PPPoE unit missing from runtime status")
+}

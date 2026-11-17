@@ -826,3 +826,16 @@ td details > summary {
     display: inline-flex;
   }
 }
+
+/* Server validation shares the existing form layout and accessible help text. */
+.form-row [aria-invalid="true"] { border-color: var(--error); }
+.form-row .field-error { color: var(--error); }
+
+.form-row .secret-clear {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  overflow-wrap: anywhere;
+}
+.secret-clear input[type="checkbox"] { width: auto; flex: 0 0 auto; }

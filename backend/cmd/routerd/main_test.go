@@ -128,13 +128,13 @@ func TestParseManagedSSHPorts(t *testing.T) {
 	for _, tc := range []struct {
 		input string
 		want  []int
-	}{{"22", []int{22}}, {"22,2222,65535", []int{22, 2222, 65535}}, {" 22, 2200 ", []int{22, 2200}}} {
+	}{{"", []int{}}, {"22", []int{22}}, {"22,2222,65535", []int{22, 2222, 65535}}, {" 22, 2200 ", []int{22, 2200}}} {
 		ports, err := parseManagedSSHPorts(tc.input)
 		if err != nil || !reflect.DeepEqual(ports, tc.want) {
 			t.Fatalf("%q: got %v, %v", tc.input, ports, err)
 		}
 	}
-	for _, input := range []string{"", ",22", "22,", "0", "65536", "-1", "+22", "22,22", "22; reboot", "22\n23", "22\n", "tcp/22", "999999999999999999999999"} {
+	for _, input := range []string{",22", "22,", "0", "65536", "-1", "+22", "22,22", "22; reboot", "22\n23", "22\n", "tcp/22", "999999999999999999999999"} {
 		if ports, err := parseManagedSSHPorts(input); err == nil {
 			t.Fatalf("invalid %q accepted: %v", input, ports)
 		}

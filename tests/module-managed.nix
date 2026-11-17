@@ -22,20 +22,60 @@ let
   failures = c: lib.filter (a: !a.assertion) c.assertions;
 in {
   integrated = assert lib.assertMsg (failures cfg == []) (lib.concatMapStringsSep "\n" (a:a.message) (failures cfg));
-    assert cfg.services.nixos-router.backend.applyReload;
-    assert cfg.services.nixos-router.backend.privilegedApply;
+    assert !cfg.services.nixos-router.backend.applyReload;
+    assert !cfg.services.nixos-router.backend.privilegedApply;
     assert !cfg.services.nixos-router.backend.consumeGenerated;
     assert cfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MANAGED == "1";
-    assert cfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22";
+    assert cfg.systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "";
     assert cfg.systemd.services.nixos-router-dnsmasq.serviceConfig.Type == "forking";
     assert builtins.hasAttr "nixos-router-wan" cfg.systemd.services;
+    assert builtins.hasAttr "nixos-router-wan6" cfg.systemd.services;
+    assert cfg.systemd.services.nixos-router-wan6.serviceConfig.KillMode == "control-group";
+    assert cfg.systemd.services.nixos-router-wan.serviceConfig.TimeoutStopSec >= 60;
+    assert cfg.systemd.services.nixos-router-pppoe.serviceConfig.TimeoutStopSec >= 60;
+    assert cfg.systemd.services.nixos-router-wan6.serviceConfig.TimeoutStopSec >= 60;
+    assert cfg.systemd.services.nixos-router-wan6.serviceConfig.User == "root";
+    assert cfg.systemd.services.nixos-router-wan6.serviceConfig.RuntimeDirectoryMode == "0700";
+    assert cfg.systemd.services.nixos-router-wan6.serviceConfig.EnvironmentFile == "/var/lib/nixos-router/managed/current/wan6.env";
+    assert builtins.hasAttr "nixos-router-pppoe" cfg.systemd.services;
+    assert cfg.systemd.services.nixos-router-pppoe.serviceConfig.KillMode == "control-group";
+    assert cfg.systemd.services.nixos-router-pppoe.serviceConfig.TemporaryFileSystem == [ "/etc/ppp:rw,mode=0700" ];
+    assert lib.hasInfix "file /var/lib/nixos-router/managed/current/pppoe.options" cfg.systemd.services.nixos-router-pppoe.serviceConfig.ExecStart;
+    assert lib.elem "pppoe" cfg.boot.kernelModules;
+    assert lib.hasInfix "net-init-script" cfg.systemd.services.nixos-router-pppoe.serviceConfig.ExecStart;
+    assert lib.hasInfix "net-pre-up-script" cfg.systemd.services.nixos-router-pppoe.serviceConfig.ExecStart;
+    assert lib.hasInfix "ipv6-up-script" cfg.systemd.services.nixos-router-pppoe.serviceConfig.ExecStart;
+    assert lib.hasInfix "ipv6-down-script" cfg.systemd.services.nixos-router-pppoe.serviceConfig.ExecStart;
     assert builtins.hasAttr "nixos-router-dnsmasq" cfg.systemd.services;
     assert builtins.hasAttr "nixos-router-hostapd" cfg.systemd.services;
     assert cfg.networking.firewall.allowedTCPPorts == [];
+    assert cfg.systemd.services.nixos-router-backend.serviceConfig.User == "nixos-router-api";
+    assert cfg.systemd.services.nixos-router-backend.serviceConfig.CapabilityBoundingSet == [];
+    assert cfg.systemd.services.nixos-router-backend.serviceConfig.NoNewPrivileges;
+    assert cfg.systemd.services.nixos-router-executor.serviceConfig.User == "root";
+    assert cfg.systemd.services.nixos-router-executor.serviceConfig.Type == "notify";
+    assert cfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_STATE_DIR == "/var/lib/nixos-router-api";
+    assert cfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_EXECUTOR_SOCKET == "/run/nixos-router-executor/control.sock";
+    assert lib.elem "nixos-router-executor.service" cfg.systemd.services.nixos-router-backend.after;
+    assert lib.elem "nixos-router-state-init.service" cfg.systemd.services.nixos-router-executor.requires;
+    assert !lib.hasInfix "--apply-reload" cfg.systemd.services.nixos-router-backend.serviceConfig.ExecStart;
     true;
-  hostSSHPorts = assert (evaluate { services.openssh.ports = [ 22 2223 ]; }).systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22,2223"; true;
+  wanUDPServices = let
+    configured = evaluate { services.nixos-router.backend.managed.wanUDPPorts = [ 9993 51820 ]; };
+    command = configured.systemd.services.nixos-router-executor.serviceConfig.ExecStart;
+    excessive = evaluate { services.nixos-router.backend.managed.wanUDPPorts = lib.replicate 65 9993; };
+    zero = evaluate { services.nixos-router.backend.managed.wanUDPPorts = [ 0 ]; };
+  in assert cfg.services.nixos-router.backend.managed.wanUDPPorts == [];
+    assert lib.hasInfix "--wan-udp-ports" command && lib.hasInfix "9993,51820" command;
+    assert lib.any (a: !a.assertion && lib.hasInfix "WAN UDP allowlist" a.message) excessive.assertions;
+    assert lib.any (a: !a.assertion && lib.hasInfix "WAN UDP allowlist" a.message) zero.assertions;
+    true;
+  noSSHPorts = assert (evaluate {}).systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == ""; true;
+  modulePolicy = assert (evaluate {}).systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MODULES == "adblock"; true;
+  hostSSHPorts = assert (evaluate { services.openssh.enable = true; services.openssh.ports = [ 22 2223 ]; }).systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22,2223"; true;
   hostSSHListenPorts = let
     sshCfg = evaluate { services.openssh = {
+      enable = true;
       ports = [ 22 2223 ];
       listenAddresses = [
         { addr = "0.0.0.0"; }
@@ -45,7 +85,7 @@ in {
         { addr = "127.0.0.1"; port = 22; }
       ];
     }; };
-  in assert sshCfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22,2223,2224"; true;
+  in assert sshCfg.systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22,2223,2224"; true;
   wifiOwnership = let
     radio = { services.nixos-router.backend.managed.wifiInterface = "wlan0"; };
     address = { address = "192.168.99.1"; prefixLength = 24; };
@@ -63,6 +103,27 @@ in {
       networking.interfaces.wlan0.ipv4.addresses = [ address ];
     });
   };
+  ipv6Ownership = let
+    address = { address = "2001:db8:99::1"; prefixLength = 64; };
+    rejected = message: extra:
+      assert lib.any (a: !a.assertion && lib.hasInfix message a.message) (evaluate extra).assertions; true;
+    allowed = extra: assert failures (evaluate extra) == []; true;
+  in {
+    wiredAddress = rejected "managed interfaces" { networking.interfaces.eth1.ipv6.addresses = [ address ]; };
+    wifiAddress = rejected "managed interfaces" {
+      services.nixos-router.backend.managed.wifiInterface = "wlan0";
+      networking.interfaces.wlan0.ipv6.addresses = [ address ];
+    };
+    dhcp6 = rejected "owns DHCP/DNS" { services.kea.dhcp6 = { enable = true; settings = {}; }; };
+    ra = rejected "owns IPv6 router advertisements" { services.radvd.enable = true; };
+    unmanagedAddress = allowed { networking.interfaces.external0.ipv6.addresses = [ address ]; };
+    preview = allowed {
+      services.nixos-router.backend.managed.enable = lib.mkForce false;
+      networking.interfaces.eth1.ipv6.addresses = [ address ];
+      services.kea.dhcp6 = { enable = true; settings = {}; };
+      services.radvd.enable = true;
+    };
+  };
   conflictRejected = map (extra: assert failures (evaluate extra) != []; true) [
     {networking.networkmanager.enable = true;}
     {systemd.network.enable = true;}
@@ -71,6 +132,8 @@ in {
     {services.hostapd.enable = true;}
     {networking.firewall.enable = true;}
     {services.nixos-router.backend.dev = true;}
+    {services.nixos-router.backend.allowReboot = true;}
+    {services.nixos-router.backend.managed.apiStateDir = "/var/lib/nixos-router/api";}
     {services.nixos-router.backend.managed.interfaces = lib.mkForce [];}
   ];
 }
