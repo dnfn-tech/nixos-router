@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/dnfn-tech/nixos-router/backend/internal/modules"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,26 +11,25 @@ import (
 )
 
 const (
-	DefaultStateDir  = "/var/lib/nixos-router"
+	DefaultStateDir       = "/var/lib/nixos-router"
 	DefaultConfigBasename = "config.json"
 )
 
 // Root configuration describing the intended network state.
 type Config struct {
-	SchemaVersion int `json:"schemaVersion,omitempty"`
-	Revision string `json:"revision,omitempty"`
-	System   SystemConfig            `json:"system"`
-	WAN      WANConfig               `json:"wan"`
-	LAN      LANConfig               `json:"lan"`
-	DNS      DNSConfig               `json:"dns"`
-	WiFi     WiFiConfig              `json:"wifi"`
-	Firewall FirewallConfig          `json:"firewall"`
-	SSH      SSHConfig               `json:"ssh"`
-	DDNS     DDNSConfig              `json:"ddns"`
-	QoS      QoSConfig               `json:"qos"`
-	Parental ParentalConfig          `json:"parental"`
-	IPv6     IPv6Config              `json:"ipv6"`
-	Plugins  map[string]PluginConfig `json:"plugins,omitempty"`
+	SchemaVersion int                     `json:"schemaVersion,omitempty"`
+	Revision      string                  `json:"revision,omitempty"`
+	System        SystemConfig            `json:"system"`
+	WAN           WANConfig               `json:"wan"`
+	LAN           LANConfig               `json:"lan"`
+	DNS           DNSConfig               `json:"dns"`
+	WiFi          WiFiConfig              `json:"wifi"`
+	Firewall      FirewallConfig          `json:"firewall"`
+	DDNS          DDNSConfig              `json:"ddns"`
+	QoS           QoSConfig               `json:"qos"`
+	Parental      ParentalConfig          `json:"parental"`
+	IPv6          IPv6Config              `json:"ipv6"`
+	Plugins       map[string]PluginConfig `json:"plugins,omitempty"`
 }
 
 type SystemConfig struct {
@@ -58,10 +58,10 @@ type PPPoEConfig struct {
 
 // LAN: br-lan bridge with IPv4 CIDR and DHCP pool (stub).
 type LANConfig struct {
-	BridgeName string       `json:"bridgeName"` // e.g. "br-lan"
-	IPv4CIDR   string       `json:"ipv4Cidr"`   // e.g. "192.168.1.1/24"
-	DHCP       DHCPv4Config `json:"dhcp"`
-	Ports      []string     `json:"ports,omitempty"` // physical ports in br-lan (optional)
+	BridgeName   string        `json:"bridgeName"` // e.g. "br-lan"
+	IPv4CIDR     string        `json:"ipv4Cidr"`   // e.g. "192.168.1.1/24"
+	DHCP         DHCPv4Config  `json:"dhcp"`
+	Ports        []string      `json:"ports,omitempty"` // physical ports in br-lan (optional)
 	StaticLeases []StaticLease `json:"staticLeases,omitempty"`
 }
 
@@ -87,44 +87,44 @@ type DNSConfig struct {
 
 type WiFiConfig struct {
 	Network     *WiFiNetwork `json:"network,omitempty"`
-	Enable      bool     `json:"enable"`
-	BridgeToLan bool     `json:"bridgeToLan"`
-	APs         []WiFiAP `json:"aps,omitempty"`
+	Enable      bool         `json:"enable"`
+	BridgeToLan bool         `json:"bridgeToLan"`
+	APs         []WiFiAP     `json:"aps,omitempty"`
 }
 
 type WiFiAP struct {
-	Standard string `json:"standard,omitempty"`
-	ChannelWidthMHz int `json:"channelWidthMHz,omitempty"`
-	Security string `json:"security,omitempty"` // empty/wpa2-psk or pure wpa3-sae
-	SSID    string `json:"ssid"`
-	Band    string `json:"band,omitempty"`    // "2g" | "5g" | "6g" (stub)
-	Channel int    `json:"channel,omitempty"` // stub
-	PSK     string `json:"psk,omitempty"`     // redacted
-	Enable  bool   `json:"enable"`
-	Guest   bool   `json:"guest,omitempty"`
-	Isolate bool   `json:"isolate,omitempty"`
+	Standard        string `json:"standard,omitempty"`
+	ChannelWidthMHz int    `json:"channelWidthMHz,omitempty"`
+	Security        string `json:"security,omitempty"` // empty/wpa2-psk or pure wpa3-sae
+	SSID            string `json:"ssid"`
+	Band            string `json:"band,omitempty"`    // "2g" | "5g" | "6g" (stub)
+	Channel         int    `json:"channel,omitempty"` // stub
+	PSK             string `json:"psk,omitempty"`     // redacted
+	Enable          bool   `json:"enable"`
+	Guest           bool   `json:"guest,omitempty"`
+	Isolate         bool   `json:"isolate,omitempty"`
 }
 
 type FirewallConfig struct {
-	Enable      bool   `json:"enable"`
-	NATEnabled  bool   `json:"natEnabled"`
-	UPnPEnable  bool   `json:"upnpEnable,omitempty"`
-	Description string `json:"description,omitempty"`
+	Enable       bool          `json:"enable"`
+	NATEnabled   bool          `json:"natEnabled"`
+	UPnPEnable   bool          `json:"upnpEnable,omitempty"`
+	Description  string        `json:"description,omitempty"`
 	PortForwards []PortForward `json:"portForwards,omitempty"`
-	BlockedMACs []string `json:"blockedMacs,omitempty"`
+	BlockedMACs  []string      `json:"blockedMacs,omitempty"`
 	// Future: lanServices...
 }
 
 type PortForward struct {
-	Protocol string `json:"protocol"`           // "tcp" | "udp"
-	ExternalPort int `json:"externalPort"`      // 1-65535 (single port)
-	ExternalPortEnd int `json:"externalPortEnd,omitempty"` // optional range end
-	DestIP    string `json:"destIp"`           // internal dest IP
-	DestPort  int    `json:"destPort"`         // 1-65535
-	Description string `json:"description,omitempty"`
+	Protocol        string `json:"protocol"`                  // "tcp" | "udp"
+	ExternalPort    int    `json:"externalPort"`              // 1-65535 (single port)
+	ExternalPortEnd int    `json:"externalPortEnd,omitempty"` // optional range end
+	DestIP          string `json:"destIp"`                    // internal dest IP
+	DestPort        int    `json:"destPort"`                  // 1-65535
+	Description     string `json:"description,omitempty"`
 }
 
-type SSHConfig struct {
+type legacySSHConfig struct {
 	Enable         bool     `json:"enable"`
 	Port           int      `json:"port,omitempty"`
 	PasswordAuth   bool     `json:"passwordAuth,omitempty"`
@@ -133,8 +133,8 @@ type SSHConfig struct {
 
 // DDNS providers (stubs)
 type DDNSConfig struct {
-	Enable   bool   `json:"enable"`
-	Provider string `json:"provider,omitempty"` // "cloudflare" | "duckdns" | "aliyun" | "custom"
+	Enable     bool            `json:"enable"`
+	Provider   string          `json:"provider,omitempty"` // "cloudflare" | "duckdns" | "aliyun" | "custom"
 	Cloudflare *CloudflareDDNS `json:"cloudflare,omitempty"`
 	DuckDNS    *DuckDNSConfig  `json:"duckdns,omitempty"`
 	Aliyun     *AliyunDDNS     `json:"aliyun,omitempty"`
@@ -148,7 +148,7 @@ type CloudflareDDNS struct {
 }
 
 type DuckDNSConfig struct {
-	Token string `json:"token"` // secret
+	Token  string `json:"token"` // secret
 	Domain string `json:"domain"`
 }
 
@@ -171,22 +171,22 @@ type PluginConfig struct {
 
 // QoS: global bandwidth and per-device stubs
 type QoSConfig struct {
-	Enable       bool                 `json:"enable"`
-	UpMbps       int                  `json:"upMbps,omitempty"`
-	DownMbps     int                  `json:"downMbps,omitempty"`
-	DevicePolicy []QoSDevicePolicy    `json:"devicePolicy,omitempty"`
+	Enable       bool              `json:"enable"`
+	UpMbps       int               `json:"upMbps,omitempty"`
+	DownMbps     int               `json:"downMbps,omitempty"`
+	DevicePolicy []QoSDevicePolicy `json:"devicePolicy,omitempty"`
 }
 type QoSDevicePolicy struct {
-	MAC      string `json:"mac,omitempty"`
-	IP       string `json:"ip,omitempty"`
-	Priority string `json:"priority,omitempty"` // "low"|"normal"|"high"
-	LimitKbps int   `json:"limitKbps,omitempty"`
+	MAC       string `json:"mac,omitempty"`
+	IP        string `json:"ip,omitempty"`
+	Priority  string `json:"priority,omitempty"` // "low"|"normal"|"high"
+	LimitKbps int    `json:"limitKbps,omitempty"`
 }
 
 // Parental control: device/group schedule stubs
 type ParentalConfig struct {
-	Enable bool            `json:"enable"`
-	Rules  []ParentalRule  `json:"rules,omitempty"`
+	Enable bool           `json:"enable"`
+	Rules  []ParentalRule `json:"rules,omitempty"`
 }
 type ParentalRule struct {
 	TargetMACs []string `json:"targetMacs,omitempty"`
@@ -197,7 +197,7 @@ type ParentalRule struct {
 
 // IPv6: WAN mode and LAN PD/RA stubs
 type IPv6Config struct {
-	Enable bool   `json:"enable"`
+	Enable  bool   `json:"enable"`
 	WANMode string `json:"wanMode,omitempty"` // "dhcpv6"|"slaac"|"pppoe6"|"disabled"
 	LANPD   bool   `json:"lanPrefixDelegation,omitempty"`
 	LANRA   bool   `json:"lanRouterAdvertisement,omitempty"`
@@ -237,11 +237,6 @@ func DefaultConfig() Config {
 			Enable:     true,
 			NATEnabled: true,
 		},
-		SSH: SSHConfig{
-			Enable:       true,
-			Port:         22,
-			PasswordAuth: false,
-		},
 		DDNS: DDNSConfig{
 			Enable: false,
 		},
@@ -255,10 +250,10 @@ func DefaultConfig() Config {
 			Rules:  []ParentalRule{},
 		},
 		IPv6: IPv6Config{
-			Enable: false,
+			Enable:  false,
 			WANMode: "disabled",
-			LANPD:  false,
-			LANRA:  false,
+			LANPD:   false,
+			LANRA:   false,
 		},
 		Plugins: map[string]PluginConfig{},
 	}
@@ -367,10 +362,6 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	// SSH port sanity
-	if c.SSH.Port < 0 || c.SSH.Port > 65535 {
-		return invalidField("ssh.port", "must be 0-65535")
-	}
 	// QoS sanity
 	for i, dp := range c.QoS.DevicePolicy {
 		if dp.MAC == "" && dp.IP == "" {
@@ -485,6 +476,14 @@ func (c *Config) Validate() error {
 			}
 		default:
 			return invalidField("ddns.provider", "must be one of: cloudflare, duckdns, aliyun, custom")
+		}
+	}
+	for id, pc := range c.Plugins {
+		if err := modules.Validate(id, pc.Enable, pc.Config, c.DNS.EnableDNSMasq); err != nil {
+			if field, ok := err.(*modules.FieldError); ok {
+				return invalidField(field.Path, field.Message)
+			}
+			return err
 		}
 	}
 	return nil

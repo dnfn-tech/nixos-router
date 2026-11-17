@@ -143,4 +143,3 @@ func TestLoginFailure(t *testing.T) {
 		t.Fatalf("expected 401 for wrong password, got %d", w.Code)
 	}
 }
-

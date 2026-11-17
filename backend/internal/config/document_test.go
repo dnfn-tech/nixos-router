@@ -15,7 +15,7 @@ func TestConfigRejectsAmbiguousOrUnsupportedDocuments(t *testing.T) {
 		"unknown nested":   `{"wan":{"mode":"dhcp","passwordTypo":"private-secret"}}`,
 		"duplicate root":   `{"wan":{},"wan":{}}`,
 		"duplicate plugin": `{"plugins":{"custom":{"config":{"secret":"private-secret","secret":"other"}}}}`,
-		"future schema":    `{"schemaVersion":2}`,
+		"future schema":    `{"schemaVersion":3}`,
 		"negative schema":  `{"schemaVersion":-1}`,
 		"invalid revision": `{"schemaVersion":1,"revision":"private-secret"}`,
 		"null":             `null`,
@@ -57,7 +57,7 @@ func TestLoadDraftMigratesOnceAndPreservesOriginal(t *testing.T) {
 		t.Fatalf("legacy read: %+v %v", readOnly, err)
 	}
 	c, err := LoadDraft(path)
-	if err != nil || c.SchemaVersion != 1 || len(c.Revision) != 32 {
+	if err != nil || c.SchemaVersion != CurrentSchemaVersion || len(c.Revision) != 32 {
 		t.Fatalf("migration: %+v %v", c, err)
 	}
 	backup, err := os.ReadFile(path + ".v0.bak")
@@ -121,7 +121,7 @@ func TestConfigStrictTagsAndNumericPreservation(t *testing.T) {
 	data, _ := json.Marshal(c)
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(data, &fields)
-	fields["plugins"] = json.RawMessage(`{"custom":{"enable":true,"config":{"large":9007199254740993,"fraction":0.123456789012345678901,"A":1,"a":2}}}`)
+	fields["plugins"] = json.RawMessage(`{"custom":{"enable":false,"config":{"large":9007199254740993,"fraction":0.123456789012345678901,"A":1,"a":2}}}`)
 	data, _ = json.Marshal(fields)
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, data, 0600); err != nil {

@@ -13,6 +13,15 @@ func decodeConfigWrite(data []byte) (config.Config, [][]string, error) {
 	if err := json.Unmarshal(data, &keys); err != nil {
 		return config.Config{}, nil, errors.New("invalid configuration document")
 	}
+	configKeys := keys
+	if raw, wrapped := keys["config"]; wrapped {
+		if err := json.Unmarshal(raw, &configKeys); err != nil {
+			return config.Config{}, nil, errors.New("invalid configuration document")
+		}
+	}
+	if _, retired := configKeys["ssh"]; retired {
+		return config.Config{}, nil, &config.ValidationError{Path: "ssh", Code: "retired_field", Message: "SSH is managed by the system; remove the retired field"}
+	}
 	if _, ok := keys["clearSecrets"]; !ok {
 		c, err := config.DecodeDocument(data)
 		return c, nil, err

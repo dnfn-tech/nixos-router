@@ -3,18 +3,18 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
 // fakeRunnerConsume allows controlling failures for specific commands.
 type fakeRunnerConsume struct {
-	look []string
-	run  [][]string
+	look           []string
+	run            [][]string
 	failNftForPath string
 }
 
@@ -159,4 +159,3 @@ func TestConsumeFailureRollbackToLastGood(t *testing.T) {
 		t.Fatalf("expected nft -f %s to be executed for rollback", lastNft)
 	}
 }
-

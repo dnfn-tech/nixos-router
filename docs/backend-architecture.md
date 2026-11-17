@@ -35,7 +35,7 @@
   - `PUT /api/v1/config` → 提交完整配置（或 `PATCH` 局部段）；返回作业 id
   - `POST /api/v1/apply` → 基于已保存配置触发一次应用（可用于快速重载服务）
 - 资源分段（便于前端分步保存/校验，可选暴露）
-  - `GET/PUT /api/v1/wan|lan|wifi|dns|firewall|nat|upnp|qos|parental|ddns|ipv6|ssh`
+  - `GET/PUT /api/v1/wan|lan|wifi|dns|firewall|nat|upnp|qos|parental|ddns|ipv6`
 - 运行态与资产
   - `GET /api/v1/clients` 在线设备（来源 dnsmasq/hostapd/nftables 统计）
   - `GET /api/v1/jobs` / `GET /api/v1/jobs/{id}` 作业状态/日志
@@ -80,7 +80,6 @@
   "parental": { "rules": [ /* 周历/对象规则 */ ] },
   "ddns": { "provider": "cloudflare|duckdns|aliyun|custom", "options": {/* 各自字段 */}, "interval": "10m" },
   "ipv6": { "enable": false, "wan": { "mode": "dhcpv6|slaac|pppoe" }, "lan": { "pd": "auto", "ra": true, "assign": "slaac", "dnsAdvertise": true }, "fw": { "wanInput": "drop", "icmpv6Essential": true } },
-  "ssh": { "enable": true, "allowPassword": false, "allowRoot": false, "wheelPasswordlessSudo": true },
   "system": { "uiPort": 8080 }
 }
 ```
@@ -152,6 +151,8 @@
 - 存储方案与 PR 中的 `docs/storage-choice.md`（混合：JSON + SQLite）一致；本文不再重复 rationale
 
 ## 插件 / 功能模块（Plugin / Feature Module）
+
+> 本节后续内容为早期扩展设计，不能视为当前实现能力。当前注册表、托管生命周期、AdBlock 及系统服务归属以 [plugins.md](plugins.md) 为准。SSH 已从配置与页面移除，由系统管理。
 
 为保证后续功能可扩展且不重写核心，后端采用“稳定内核 + 功能模块”的架构。核心仅提供通用能力：配置注册、作业队列、审计、会话/鉴权、设备与状态查询、机密存取；具体网络功能（如 WAN、LAN、WiFi、Firewall、QoS、Parental、DDNS、IPv6 等）以“内置一方模块”的方式实现，并为将来第三方模块预留扩展点。
 
@@ -275,7 +276,7 @@ type CoreRegistry interface {
 
 ### 模块化映射（内置一方）
 - 将当前功能以模块形态实现，即使在 v1 作为“内置”：
-  - 基础：`wan`、`lan`、`wifi`、`firewall`、`nat`/`upnp`、`ddns`、`ipv6`、`ssh`、`system`
+  - 基础：`wan`、`lan`、`wifi`、`firewall`、`nat`/`upnp`、`ddns`、`ipv6`、`system`
   - 可选：`qos`、`parental`、`adblock`（广告过滤，基于 dnsmasq 列表）、`traffic`（流量统计，vnstat 或 nft/conntrack 聚合）、`mihomo`（Clash Meta 代理）、`vlan`（多 VLAN/LAN）
   - 可选：`tailscale`（远程接入/overlay）、`zerotier`（远程接入/overlay）
 - 好处

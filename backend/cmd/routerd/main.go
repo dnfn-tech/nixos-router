@@ -20,6 +20,7 @@ import (
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/db"
 	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
+	"github.com/dnfn-tech/nixos-router/backend/internal/modules"
 	"github.com/dnfn-tech/nixos-router/backend/internal/privsep"
 	"github.com/dnfn-tech/nixos-router/backend/internal/server"
 	webfs "github.com/dnfn-tech/nixos-router/backend/web"
@@ -47,9 +48,17 @@ func main() {
 	managedInterfaces := flag.String("managed-interfaces", os.Getenv("NIXOS_ROUTER_MANAGED_INTERFACES"), "Comma-separated physical wired interface allowlist")
 	wifiInterface := flag.String("wifi-interface", os.Getenv("NIXOS_ROUTER_WIFI_INTERFACE"), "Explicit AP interface")
 	country := flag.String("country-code", getEnv("NIXOS_ROUTER_COUNTRY_CODE", "CN"), "AP regulatory country")
-	managedSSHPorts := flag.String("managed-ssh-ports", getEnv("NIXOS_ROUTER_MANAGED_SSH_PORTS", "22"), "Trusted NixOS sshd ports to preserve, comma-separated (not HTTP draft SSH settings)")
+	moduleList := flag.String("modules", getEnv("NIXOS_ROUTER_MODULES", "adblock"), "Allowed compiled-in router modules")
+	managedSSHPorts := flag.String("managed-ssh-ports", getEnv("NIXOS_ROUTER_MANAGED_SSH_PORTS", ""), "Trusted NixOS sshd ports to preserve, comma-separated (not HTTP draft SSH settings)")
 	executorSocket := flag.String("executor-socket", os.Getenv("NIXOS_ROUTER_EXECUTOR_SOCKET"), "Authenticated local executor socket; requires unprivileged managed API")
 	flag.Parse()
+	allowedModules := []string{}
+	if *moduleList != "" {
+		allowedModules = strings.Split(*moduleList, ",")
+	}
+	if err := modules.ValidateAllowed(allowedModules); err != nil {
+		log.Fatal(err)
+	}
 	var remote *privsep.Client
 	if *executorSocket != "" {
 		if err := validateExecutorMode(*executorSocket, *managedMode, *dev, *applyReload || *privApply || *consumeGen || *applyTC || *allowReboot, os.Geteuid()); err != nil {
@@ -132,7 +141,7 @@ func main() {
 			if e != nil {
 				log.Fatalf("managed SSH ports: %v", e)
 			}
-			manager, e := managed.New(managed.Options{StateDir: opts.StateDir, Interfaces: strings.Split(*managedInterfaces, ","), WiFiInterface: *wifiInterface, ManagementPort: port, CountryCode: *country, SSHPorts: sshPorts})
+			manager, e := managed.New(managed.Options{StateDir: opts.StateDir, Interfaces: strings.Split(*managedInterfaces, ","), WiFiInterface: *wifiInterface, ManagementPort: port, CountryCode: *country, SSHPorts: sshPorts, Modules: allowedModules})
 			if e != nil {
 				log.Fatalf("managed initialization: %v", e)
 			}
@@ -148,7 +157,7 @@ func main() {
 			runtime = manager
 		}
 	}
-	s := server.New(server.Options{
+	s := server.New(server.Options{Modules: allowedModules,
 		ManagedRuntime:      runtime,
 		StartupWarning:      startupWarning,
 		WiFiInterface:       *wifiInterface,
@@ -305,6 +314,9 @@ func acquireDaemonLock(stateDir string, managedMode bool) (*os.File, error) {
 
 // Parse trusted startup configuration, never the editable HTTP configuration.
 func parseManagedSSHPorts(value string) ([]int, error) {
+	if value == "" {
+		return []int{}, nil
+	}
 	if strings.ContainsAny(value, "\r\n") {
 		return nil, fmt.Errorf("SSH ports must be comma-separated integers in 1..65535")
 	}

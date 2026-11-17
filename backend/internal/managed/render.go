@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
+	"github.com/dnfn-tech/nixos-router/backend/internal/modules"
 	"net"
 	"path/filepath"
-	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -34,16 +35,13 @@ func (m *Manager) validate(c config.Config) error {
 	if c.QoS.Enable || c.DDNS.Enable || c.Parental.Enable || c.Firewall.UPnPEnable {
 		return errors.New("managed mode does not support QoS/DDNS/parental/UPnP")
 	}
-	for _, p := range c.Plugins {
-		if p.Enable {
-			return errors.New("managed mode does not support plugins")
+	for id, p := range c.Plugins {
+		if p.Enable && !slices.Contains(m.opts.Modules, id) {
+			return &config.ValidationError{Path: "plugins." + id + ".enable", Code: "module_unavailable", Message: "module is not allowed by deployment"}
 		}
 	}
 	if m.good != nil && (c.LAN.BridgeName != m.good.LAN.BridgeName || c.WAN.Interface != m.good.WAN.Interface) {
 		return errors.New("changing the owned bridge or WAN interface requires explicit offline migration")
-	}
-	if m.good != nil && !reflect.DeepEqual(c.SSH, m.good.SSH) {
-		return errors.New("SSH settings are controlled by NixOS; runtime changes unsupported")
 	}
 	if !m.allowed[c.WAN.Interface] || c.WAN.Interface == m.opts.WiFiInterface {
 		return errors.New("WAN interface not in wired allowlist")
@@ -197,6 +195,12 @@ func (m *Manager) render(c config.Config) map[string]string {
 		}
 		if c.DNS.Domain != "" {
 			dns += "domain=" + c.DNS.Domain + "\nlocal=/" + c.DNS.Domain + "/\n"
+		}
+	}
+	for _, d := range modules.All() {
+		if pc := c.Plugins[d.ID]; pc.Enable {
+			rules, _ := modules.Render(d.ID, pc.Config) // validate() ran before render.
+			dns += rules
 		}
 	}
 	if routedWiFi(c) {

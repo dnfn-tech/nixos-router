@@ -91,7 +91,7 @@ test("managed UI identifies detected radio and NixOS-owned settings",async()=>{
   assert.match(await page.locator("#deployment-description").innerText(),/IPv4/);
   await page.goto(`${base}/#/ssh`);await page.waitForFunction(()=>!window.app.state.loading&&window.app.state.route==="ssh");
   assert.match(await page.locator("#page-content").innerText(),/NixOS/);
-  assert.equal(await page.getByLabel("启用 SSH", {exact:true}).isDisabled(),true);
+  assert.equal(await page.getByLabel("启用 SSH", {exact:true}).count(),0);
   assert.equal(await page.locator("#apply-save").isDisabled(),true);
  }finally{await context.close()}
 });
@@ -135,11 +135,11 @@ test("health failure retains known managed ownership", async () => {
       : route.fulfill({ json: managedHealth }));
     await page.goto(`${base}/#/ssh`);
     await page.waitForFunction(() => !window.app.state.loading && window.app.state.route === "ssh");
-    assert.equal(await page.getByLabel("启用 SSH", { exact: true }).isDisabled(), true);
+    assert.equal(await page.getByLabel("启用 SSH", { exact: true }).count(), 0);
     unavailable = true;
     await page.locator("#page-refresh").click();
     await page.waitForFunction(() => !window.app.state.loading);
-    assert.equal(await page.getByLabel("启用 SSH", { exact: true }).isDisabled(), true);
+    assert.equal(await page.getByLabel("启用 SSH", { exact: true }).count(), 0);
     assert.match(await page.locator("#status-banner").innerText(), /健康状态暂时无法获取/);
     await page.goto(`${base}/#/system`);
     await page.waitForFunction(() => !window.app.state.loading && window.app.state.route === "system");
@@ -151,13 +151,13 @@ test("unknown ownership protects host settings until generate-only health is con
   const { page, context } = await pageAt("wifi");
   try {
     await page.route("**/api/v1/health", (route) => route.fulfill({ status: 503, json: { error: "temporarily unavailable" } }));
-    await page.goto(`${base}/?ownership-test=unknown#/ssh`);
-    await page.waitForFunction(() => !window.app.state.loading && window.app.state.section?.path === "ssh");
-    assert.equal(await page.getByLabel("启用 SSH", { exact: true }).isDisabled(), true);
+    await page.goto(`${base}/?ownership-test=unknown#/system`);
+    await page.waitForFunction(() => !window.app.state.loading && window.app.state.section?.path === "system");
+    assert.equal(await page.getByLabel("主机名", { exact: true }).isDisabled(), true);
     await page.unroute("**/api/v1/health");
     await page.locator("#page-refresh").click();
     await page.waitForFunction(() => !window.app.state.loading);
-    assert.equal(await page.getByLabel("启用 SSH", { exact: true }).isDisabled(), false, "confirmed generate-only deployment keeps its editor");
+    assert.equal(await page.getByLabel("主机名", { exact: true }).isDisabled(), false, "confirmed generate-only deployment keeps its editor");
   } finally { await context.close(); }
 });
 

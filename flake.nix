@@ -38,6 +38,7 @@
       checks."x86_64-linux" = let
         pkgs = import nixpkgs { system = "x86_64-linux"; };
       in {
+        vm-managed-adblock = pkgs.testers.runNixOSTest (import ./tests/vm-managed-adblock.nix { inherit pkgs self; });
         vm-managed-ipv6 = pkgs.testers.runNixOSTest (import ./tests/vm-managed-ipv6.nix { inherit pkgs self; });
         vm-managed-ipv6-dual-radio = pkgs.testers.runNixOSTest (import ./tests/vm-managed-ipv6-dual.nix { inherit pkgs self; advancedRadio = true; });
         vm-managed-ipv6-dual = pkgs.testers.runNixOSTest (import ./tests/vm-managed-ipv6-dual.nix { inherit pkgs self; });

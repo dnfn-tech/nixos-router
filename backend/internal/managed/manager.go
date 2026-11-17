@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
+	"github.com/dnfn-tech/nixos-router/backend/internal/modules"
 )
 
 type Runner interface {
@@ -38,6 +39,7 @@ type Options struct {
 	Interfaces     []string
 	WiFiInterface  string
 	ManagementPort int
+	Modules        []string // Trusted deployment allowlist; nil defaults to adblock.
 	SSHPorts       []int
 	WANUDPPorts    []int // Trusted deployment policy, outside Config/RPC.
 	CountryCode    string
@@ -58,6 +60,13 @@ type Manager struct {
 }
 
 func New(o Options) (*Manager, error) {
+	if o.Modules == nil {
+		o.Modules = []string{"adblock"}
+	}
+	if err := modules.ValidateAllowed(o.Modules); err != nil {
+		return nil, err
+	}
+	o.Modules = append([]string{}, o.Modules...)
 	if !filepath.IsAbs(o.StateDir) || !clean(o.StateDir) {
 		return nil, errors.New("absolute clean state directory required")
 	}
@@ -65,9 +74,6 @@ func New(o Options) (*Manager, error) {
 		return nil, errors.New("invalid management port")
 	}
 	ports := o.SSHPorts
-	if len(ports) == 0 {
-		ports = []int{22}
-	}
 	o.SSHPorts = nil
 	seenPorts := map[int]bool{}
 	for _, port := range ports {
@@ -222,6 +228,13 @@ func (m *Manager) transactionLock() (*os.File, error) {
 func (m *Manager) Apply(ctx context.Context, c config.Config) (Result, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := config.Config{}
+	if m.good != nil {
+		previous = *m.good
+	}
+	if err := c.ValidateModuleEdits(previous); err != nil {
+		return Result{Stage: "validate", RollbackStatus: "not-needed"}, err
+	}
 	lock, e := m.transactionLock()
 	if e != nil {
 		return Result{Stage: "lock", RollbackStatus: "not-needed"}, e

@@ -1,8 +1,8 @@
 # 实现现状与验收缺口
 
-核对日期：2026-11-09。本文随基于 PR #16 的权限隔离及配置契约工作分支更新，不等同于最新 main、运行中的本地预览或实体 gw 状态。下方 PR #16 的历史 CI 证据不覆盖权限隔离改造。
+核对日期：2026-11-12。本文描述当前本地工作分支，不等同于 main、远端 CI 或实体 gw 状态。表内早期测试记录为历史证据，不能替代本次候选验证；本次插件及 SSH 变更见 [插件说明](plugins.md)。
 
-当前具备显式启用的 IPv4 单 LAN managed 网关实现；**完整家用路由目标仍未完成**。基础候选的通过不能替代完整设计的 A01–A14 验收。完整范围见 [已确认设计](superpowers/specs/2026-10-15-usable-home-router-design.md)，首轮硬件候选范围见 [候选设计](superpowers/specs/2026-10-28-gw-readiness-design.md)。
+当前分支提供显式启用的有线/独立无线双栈 managed 网关框架，并接入 AdBlock 作为首个运行期插件；**完整家用路由目标仍未完成**。基础候选的通过不能替代完整设计的 A01–A14 验收。完整范围见 [已确认设计](superpowers/specs/2026-10-15-usable-home-router-design.md)，首轮硬件候选范围见 [候选设计](superpowers/specs/2026-10-28-gw-readiness-design.md)。
 
 本仓库负责通用模块、运行引擎、API、Web 和隔离测试。实际网口、地址、无线国家/信道、密钥和迁移安排在 nixos-home 集成时配置；这些专用配置不列为本仓库缺陷。
 
@@ -33,7 +33,7 @@
 | 应用与恢复 | 不可变候选、串行作业、last-good、失败恢复、重启恢复、坏草稿诊断 | 有线 VM 的失败注入/重启/改址；不增加 LAN 改址倒计时或超时自动回滚 |
 | 无线 | 显式单 AP、WPA2、独立 hostapd、检测及受支持信道校验 | `tests/managed-wifi.py` 使用 mac80211_hwsim 真实认证、租约、关闭/重开；不证明实体芯片/射频性能 |
 | Web/API | 同源登录、保存/重读、异步应用反馈、状态来源与能力限制、桌面/移动布局 | 两个 `tests/web-*.cjs`；真实临时 API 与注入响应的边界见测试说明；UI 模拟不作为网络证据 |
-| 系统/SSH | managed 下 SSH 和系统身份由宿主 NixOS 管理；有配置备份/恢复及账户操作 | Web/API 测试；不能宣称已实现完整设计中的所有系统/SSH 运行修改 |
+| 系统/SSH | SSH 配置和编辑页面已移除；schema v2 兼容迁移旧 SSH 字段，实际服务由系统管理；保留系统声明端口的管理面防火墙保护 | `ssh_retirement_test.go`、`module-managed.nix`、浏览器及 managed VM；不写 sshd 配置或启停服务 |
 
 源码入口：[managed 引擎](../backend/internal/managed/manager.go)、[配置校验和渲染](../backend/internal/managed/render.go)、[managed 模块](../modules/managed.nix)、[基础模块](../modules/default.nix)。
 
@@ -46,7 +46,7 @@
 | IPv6 路由 | managed 拒绝启用 IPv6/RA/PD | 上游获取/PD、LAN 地址与路由、双栈流量和管理隔离 |
 | 多 AP/访客 | managed 拒绝访客/不支持组合 | 能力裁剪与真实无线客户端；访客二层及三层隔离、禁用清理 |
 | QoS/家长控制/DDNS/UPnP | managed 拒绝启用 | 吞吐/时间规则/协议更新/映射创建撤销，含失败路径和停用清理 |
-| 可选插件 | managed 拒绝启用；旧生成器或服务钩子不能证明完整生命周期 | 按完整设计第 7 节逐个验证启用、配置、生效、失败、禁用及 overlay 信任边界 |
+| 可选插件 | 注册表、配置 schema、部署允许清单与模式/状态边界已接入；AdBlock 自定义域名支持托管 DNS 应用。订阅下载及其他模块运行期仍未实现，overlay 服务交系统管理 | `vm-managed-adblock` 验证实际 A/AAAA、子域、规则替换、禁用和恢复；其他模块不得沿用 AdBlock 的验收结论 |
 | 其余完整设计契约 | A01–A14 尚无全部完成证据；配置副本迁移、系统操作等须逐项审计 | 对应源码、真实 API/浏览器、部署和网络证据，不能仅靠基础候选测试推断 |
 
 实体 gw 测试仍须用户验收后决定；尚未执行。服务权限拆分属于通用框架实现工作，与提供 gw 专用配置无关。

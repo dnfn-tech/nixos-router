@@ -10,13 +10,47 @@ import (
 	"strings"
 )
 
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 // UnmarshalJSON makes every configuration ingress reject data it cannot retain.
 // Plugin Config maps deliberately remain open; their values are not schema fields.
 func (c *Config) UnmarshalJSON(data []byte) error {
 	if b := bytes.TrimSpace(data); len(b) == 0 || b[0] != '{' {
 		return fmt.Errorf("configuration must be a JSON object")
+	}
+	// Legacy snapshots are decoded read-only; only LoadDraft publishes a migration.
+	var fields map[string]json.RawMessage
+	scan := json.NewDecoder(bytes.NewReader(data))
+	scan.UseNumber()
+	if err := uniqueJSONKeys(scan, 0); err != nil {
+		return err
+	}
+	if _, err := scan.Token(); err != io.EOF {
+		return fmt.Errorf("unexpected trailing configuration data")
+	}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	var version int
+	if raw, ok := fields["schemaVersion"]; ok {
+		if err := json.Unmarshal(raw, &version); err != nil {
+			return invalidField("schemaVersion", "invalid schema version")
+		}
+	}
+	if raw, ok := fields["ssh"]; ok {
+		if version >= CurrentSchemaVersion {
+			return invalidField("ssh", "SSH is managed by the system; remove the retired field")
+		}
+		var legacy legacySSHConfig
+		if err := DecodeStrictJSON(raw, &legacy); err != nil {
+			return invalidField("ssh", "invalid legacy SSH configuration")
+		}
+		delete(fields, "ssh")
+		var err error
+		data, err = json.Marshal(fields)
+		if err != nil {
+			return err
+		}
 	}
 	type plain Config
 	var next plain
@@ -32,7 +66,7 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 }
 
 func (c Config) validateDocumentMetadata() error {
-	if c.SchemaVersion != 0 && c.SchemaVersion != CurrentSchemaVersion {
+	if c.SchemaVersion < 0 || c.SchemaVersion > CurrentSchemaVersion {
 		return invalidField("schemaVersion", "unsupported configuration schema version")
 	}
 	if c.Revision != "" {
@@ -147,6 +181,9 @@ func exactJSONFields(data []byte, typ reflect.Type) error {
 	if typ.Kind() == reflect.Pointer {
 		return exactJSONFields(data, typ.Elem())
 	}
+	if typ == reflect.TypeOf(Config{}) {
+		return nil
+	} // Config.UnmarshalJSON validates its complete document.
 	switch typ.Kind() {
 	case reflect.Struct:
 		var fields map[string]json.RawMessage

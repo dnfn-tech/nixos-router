@@ -21,11 +21,13 @@ import (
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
+	"github.com/dnfn-tech/nixos-router/backend/internal/modules"
 	"github.com/dnfn-tech/nixos-router/backend/internal/privsep"
 )
 
 type options struct {
 	stateDir, socket, bootstrap, apiUser, interfaces, wifi, country, prepareAPI string
+	modules                                                                     []string
 	port                                                                        int
 	sshPorts                                                                    []int
 	wanUDPPorts                                                                 []int
@@ -33,7 +35,7 @@ type options struct {
 
 func parseOptions(args []string) (options, error) {
 	var o options
-	var ports, udpPorts string
+	var ports, udpPorts, moduleList string
 	fs := flag.NewFlagSet("router-executor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&o.prepareAPI, "prepare-api-state", "", "Initialize or migrate the API state directory offline, then exit")
@@ -45,9 +47,17 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&o.wifi, "wifi-interface", "", "Explicit AP interface")
 	fs.StringVar(&o.country, "country-code", "CN", "AP regulatory country")
 	fs.IntVar(&o.port, "management-port", 8080, "Trusted HTTP management port")
-	fs.StringVar(&ports, "ssh-ports", "22", "Trusted host SSH listener ports")
+	fs.StringVar(&moduleList, "modules", "adblock", "Allowed compiled-in router modules")
+	fs.StringVar(&ports, "ssh-ports", "", "Trusted host SSH listener ports")
 	fs.StringVar(&udpPorts, "wan-udp-ports", "", "Trusted host UDP listeners allowed on the actual WAN exit")
 	if err := fs.Parse(args); err != nil {
+		return o, err
+	}
+	o.modules = []string{}
+	if moduleList != "" {
+		o.modules = strings.Split(moduleList, ",")
+	}
+	if err := modules.ValidateAllowed(o.modules); err != nil {
 		return o, err
 	}
 	if fs.NArg() != 0 || o.apiUser == "" || o.interfaces == "" {
@@ -65,6 +75,9 @@ func parseOptions(args []string) (options, error) {
 		return o, errors.New("invalid management port")
 	}
 	for _, s := range strings.Split(ports, ",") {
+		if ports == "" {
+			break
+		}
 		port, err := strconv.Atoi(s)
 		if err != nil || port < 1 || port > 65535 {
 			return o, errors.New("invalid SSH ports")
@@ -147,7 +160,7 @@ func run(o options) error {
 	if err = os.Chown(o.socket, int(uid), int(gid)); err != nil {
 		return err
 	}
-	manager, err := managed.New(managed.Options{StateDir: o.stateDir, Interfaces: strings.Split(o.interfaces, ","), WiFiInterface: o.wifi, ManagementPort: o.port, SSHPorts: o.sshPorts, WANUDPPorts: o.wanUDPPorts, CountryCode: o.country})
+	manager, err := managed.New(managed.Options{StateDir: o.stateDir, Interfaces: strings.Split(o.interfaces, ","), WiFiInterface: o.wifi, ManagementPort: o.port, SSHPorts: o.sshPorts, Modules: o.modules, WANUDPPorts: o.wanUDPPorts, CountryCode: o.country})
 	if err != nil {
 		return err
 	}

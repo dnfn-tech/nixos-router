@@ -26,7 +26,7 @@ in {
     assert !cfg.services.nixos-router.backend.privilegedApply;
     assert !cfg.services.nixos-router.backend.consumeGenerated;
     assert cfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MANAGED == "1";
-    assert cfg.systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22";
+    assert cfg.systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "";
     assert cfg.systemd.services.nixos-router-dnsmasq.serviceConfig.Type == "forking";
     assert builtins.hasAttr "nixos-router-wan" cfg.systemd.services;
     assert builtins.hasAttr "nixos-router-wan6" cfg.systemd.services;
@@ -70,9 +70,12 @@ in {
     assert lib.any (a: !a.assertion && lib.hasInfix "WAN UDP allowlist" a.message) excessive.assertions;
     assert lib.any (a: !a.assertion && lib.hasInfix "WAN UDP allowlist" a.message) zero.assertions;
     true;
-  hostSSHPorts = assert (evaluate { services.openssh.ports = [ 22 2223 ]; }).systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22,2223"; true;
+  noSSHPorts = assert (evaluate {}).systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == ""; true;
+  modulePolicy = assert (evaluate {}).systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MODULES == "adblock"; true;
+  hostSSHPorts = assert (evaluate { services.openssh.enable = true; services.openssh.ports = [ 22 2223 ]; }).systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "22,2223"; true;
   hostSSHListenPorts = let
     sshCfg = evaluate { services.openssh = {
+      enable = true;
       ports = [ 22 2223 ];
       listenAddresses = [
         { addr = "0.0.0.0"; }

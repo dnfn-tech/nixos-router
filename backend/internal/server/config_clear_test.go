@@ -15,6 +15,8 @@ func TestExplicitSecretClearingIsAtomicAndConditional(t *testing.T) {
 	c := s.configSnapshot()
 	c.WAN.PPPoE = &config.PPPoEConfig{Username: "user", Password: "wan-secret"}
 	c.Plugins = map[string]config.PluginConfig{"custom.with/slash": {Config: map[string]interface{}{"api.token": "plugin-secret", "label": "keep"}}}
+	// Model an existing archived ID: new writes cannot create malformed IDs.
+	s.cfg=c
 	put := func(body interface{}, stale bool) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(body)
 		r := withConfigRevision(s, httptest.NewRequest("PUT", "/api/v1/config", bytes.NewReader(raw)))

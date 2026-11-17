@@ -27,13 +27,12 @@
     ],
     parental: ["家长控制", "服务", "按设备与时间段保存访问规则。"],
     ddns: ["动态 DNS", "服务", "为动态公网地址配置域名更新服务。"],
-    ssh: ["SSH", "服务", "管理远程终端访问方式和授权公钥。"],
     plugins: [
       "插件管理",
       "扩展",
       "配置可选扩展；基础网络服务使用各自的唯一配置入口。",
     ],
-    adblock: ["广告拦截", "扩展", "管理域名拦截规则与订阅来源。"],
+    adblock: ["广告拦截", "扩展", "管理本地 DNS 域名拦截规则。"],
     traffic: [
       "流量统计",
       "扩展",
@@ -69,6 +68,7 @@
     configCache: null,
     health: null,
     confirmedCapabilities: null,
+    modules: null,
     pending: false,
     epoch: 0,
     route: "overview",
@@ -559,7 +559,7 @@
     return { id, tab: new URLSearchParams(query).get("tab") || "general" };
   }
   function navigation(id) {
-    const info = pages[id] || [id, "扩展", "管理扩展配置。"];
+    const info = pages[id] || [moduleSupport(id)?.title || id, "扩展", "管理扩展配置。"];
     $("#page-title").textContent = info[0];
     $("#page-description").textContent = info[2];
     document.title = `${info[0]} · NixOS 路由器`;
@@ -575,7 +575,8 @@
         ),
       ),
     );
-    const items = Object.entries(pages).filter(([, v]) => v[1] === info[1]);
+    const items = Object.entries(pages).filter(([key, v]) => v[1] === info[1] && (!pluginIds.includes(key) || state.modules?.find(m => m.id === key)?.available));
+    items.push(...(state.modules || []).filter(m => m.available && !pages[m.id] && info[1] === "扩展").map(m => [m.id, [m.title, "扩展"]]));
     $("#section-tabs").replaceChildren(
       ...items.map(([key, v]) =>
         node(
@@ -1097,27 +1098,6 @@
         stringList(d, "blockedMacs", "阻止的设备", "MAC 地址"),
       );
     }
-    if (id === "ssh")
-      return editor(
-        formCard(
-          "SSH 访问",
-          fields(
-            ["enable", "启用 SSH", { type: "checkbox" }],
-            ["port", "监听端口", { type: "number", min: 1, max: 65535 }],
-            ["passwordAuth", "允许密码登录", { type: "checkbox" }],
-          ),
-        ),
-        stringList(
-          d,
-          "authorizedKeys",
-          "授权公钥",
-          "SSH 公钥",
-          "ssh-ed25519 …",
-        ),
-        unavailable(
-          "此处展示 SSH 配置。实际监听端口与认证策略需在目标设备上验证。",
-        ),
-      );
     if (id === "qos") {
       d.devicePolicy ||= [];
       return editor(
@@ -1310,44 +1290,36 @@
       ),
     );
   }
+  function moduleSupport(id) {
+    return state.modules?.find(m => m.id === id);
+  }
+  function moduleDescription(m) {
+    if (!m) return "模块能力暂不可用，请刷新后重试。";
+    if (m.ownership === "system") return "系统管理：请通过 NixOS 配置此服务。";
+    if (!m.available) return "当前部署不支持此模块；历史配置可保留或导出。";
+    const observed = {"not-applied":"尚未应用运行态",unknown:"运行状态未知",disabled:"已应用停用", "service-active":"已应用，DNS 服务运行中"}[m.status] || "运行状态未知";
+    return `${m.runtimeSupported ? "支持运行应用" : "仅支持生成文件"}；${observed}。`;
+  }
+  function moduleToggle(id, data) {
+    const control=field(data,"enable",`启用 ${moduleSupport(id)?.title || pages[id]?.[0] || id}`,{type:"checkbox"});
+    const input=control.querySelector("input");
+    // Allow an existing unsupported enabled draft to be explicitly disabled.
+    if (!moduleSupport(id)?.available && !data.enable) input.disabled=true;
+    return control;
+  }
   function pluginsEditor(cfg) {
     const d = beginEditor(cfg, "plugins");
-    const ids = [
-      ...pluginIds,
-      ...Object.keys(d).filter((id) => !pluginIds.includes(id) && !pages[id]),
-    ];
+    const ids = [...new Set([...(state.modules || []).map(m=>m.id), ...Object.keys(d)])];
     return editor(
-      notice(
-        "开关表示配置意图；插件是否安装、启动及正常工作，需要在运行环境确认。",
-      ),
-      node(
-        "div",
-        { class: "grid" },
-        ids.map((id) => {
-          d[id] ||= { enable: false, config: {} };
-          return card(
-            pages[id]?.[0] || id,
-            field(d[id], "enable", `启用 ${pages[id]?.[0] || id}`, {
-              type: "checkbox",
-            }),
-            node(
-              "p",
-              { class: "help" },
-              pages[id]?.[2] || "自定义扩展；已有配置会保留。",
-            ),
-            link(`plugins/${encodeURIComponent(id)}`, "配置详情"),
-          );
-        }),
-      ),
-      card(
-        "基础服务",
-        node("p", {}, "带宽管理、家长控制、IPv6 与动态 DNS 使用独立配置入口。"),
-        node(
-          "div",
-          { class: "toolbar" },
-          ["qos", "parental", "ipv6", "ddns"].map((id) => link(id)),
-        ),
-      ),
+      notice("插件能力由当前部署声明。保存、生成与实际应用状态分别展示。"),
+      stack(ids.map(id => {
+        d[id] ||= {enable:false,config:{}};
+        return card(moduleSupport(id)?.title || id,
+          moduleToggle(id,d[id]),
+          node("p",{class:"help"},moduleDescription(moduleSupport(id))),
+          link(`plugins/${encodeURIComponent(id)}`,"配置详情"));
+      })),
+      card("基础服务",node("p",{},"IPv6 等核心网络功能保持独立配置，不受插件开关影响。"))
     );
   }
   function pluginEditor(id, cfg) {
@@ -1357,24 +1329,18 @@
       fields = (...defs) => defs.map((args) => field(c, ...args));
     const parts = [
       notice(
-        "此页编辑插件配置；保存或生成文件不证明插件已经安装、接入或生效。",
+        moduleDescription(moduleSupport(id)),
       ),
       formCard("插件开关", [
-        field(d, "enable", `启用 ${pages[id]?.[0] || id}`, {
-          type: "checkbox",
-        }),
+        moduleToggle(id, d),
       ]),
     ];
     if (id === "adblock")
       parts.push(
-        stringList(
-          c,
-          "lists",
-          "规则订阅",
-          "订阅 URL",
-          "https://example.com/hosts",
-        ),
-        stringList(c, "entries", "自定义规则", "域名或规则"),
+        notice("仅支持域名规则，同时拦截域名及子域的 IPv4/IPv6 解析；订阅下载暂不支持。依赖本地 DNS 服务。"),
+        stringList(c, "entries", "拦截域名", "每行一个域名", "ads.example.com"),
+        c.lists?.length ? notice("检测到历史订阅来源；启用前请先清空订阅。订阅不会被下载。") : null,
+        c.lists?.length ? node("button",{type:"button",onclick:()=>{c.lists=[];dirty();}},"清空历史订阅") : null,
       );
     else if (id === "traffic")
       parts.push(
@@ -2153,7 +2119,7 @@
       });
     try {
       const needsStatus = ["overview", "wan", "lan", "system"].includes(id);
-      const [response, health, status, clients, jobs, audit, wifiCaps] =
+      const [response, health, status, clients, jobs, audit, wifiCaps, manifest] =
         await Promise.all([
           api("/api/v1/config"),
           optional(api("/api/v1/health")),
@@ -2168,6 +2134,7 @@
             ? optional(api("/api/v1/audit"))
             : null,
           id === "wifi" ? optional(api("/api/v1/capabilities/wifi")) : null,
+          optional(api("/api/v1/plugins")),
         ]);
       if (epoch !== state.epoch || !state.loggedIn) return;
       const cfg = response.config || response;
@@ -2177,14 +2144,18 @@
       if (health?.deployment?.mode)
         state.confirmedCapabilities = clone(health.capabilities || {});
       state.wifiCaps = wifiCaps;
+      state.modules = manifest?.plugins || null;
+      navigation(id);
       deployment();
       let content;
-      if (id === "overview") content = overview(cfg, status, clients);
+      if (id === "ssh") content = card("SSH 由系统管理", notice("请通过 NixOS 的 services.openssh 配置监听端口、认证策略和授权公钥。"));
+      else if (id === "overview") content = overview(cfg, status, clients);
       else if (id === "clients") content = clientsPage(clients);
       else if (id === "plugins") content = pluginsEditor(cfg);
       else if (id === "system")
         content = systemPage(cfg, status, tab, { jobs, audit });
       else if (
+        moduleSupport(id) ||
         pluginIds.includes(id) ||
         (!pages[id] && Object.hasOwn(cfg.plugins || {}, id))
       )
@@ -2193,8 +2164,8 @@
       else content = card("页面不存在", link("overview", "返回总览"));
       if (sectionReadOnly()) {
         content = stack(notice(ownershipNotice()), content);
-      } else if ((state.confirmedCapabilities?.unsupported || []).includes(id) || (state.confirmedCapabilities?.managedNetwork && pluginIds.includes(id))) {
-        content = stack(notice("当前网络版本不支持应用此功能。保存草稿不代表生效；启用后提交应用将被拒绝。"), content);
+      } else if ((state.confirmedCapabilities?.unsupported || []).includes(id) || (state.confirmedCapabilities?.managedNetwork && (pluginIds.includes(id) || moduleSupport(id)) && !moduleSupport(id)?.runtimeSupported)) {
+        content = stack(notice("当前网络版本不支持应用此功能。可保留或导出历史设置；启用将被拒绝。"), content);
       }
       target.replaceChildren(content);
       target.dataset.route = id;

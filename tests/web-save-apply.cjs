@@ -79,7 +79,8 @@ async function waitAction(page, id) {
   await page.waitForFunction(() => !window.app.state.busy);
 }
 test("single plugin save persists through API and clears draft before apply", async () => {
-  const { page, context } = await pageAt("plugins/mihomo");
+  const { page, context } = await pageAt("plugins/adblock");
+  const original = await configOf(context);
   try {
     const input = page.locator("#page-content input[type=checkbox]").first();
     const pluginWrites = [];
@@ -98,13 +99,14 @@ test("single plugin save persists through API and clears draft before apply", as
     assert.equal(await page.locator("#apply-dirty").isVisible(), false);
     const response = await context.request.get(`${base}/api/v1/config`);
     const saved = await response.json();
-    assert.equal((saved.config || saved).plugins.mihomo.enable, enabled);
+    assert.equal((saved.config || saved).plugins.adblock.enable, enabled);
     await waitAction(page, "#apply-run");
     assert.match(
       await page.locator("#apply-msg").innerText(),
       /生成完成.*未应用运行态/,
     );
   } finally {
+    await putConfig(context, original);
     await context.close();
   }
 });
@@ -162,6 +164,7 @@ test("failed atomic plugin save keeps dirty and cancels apply", async () => {
 });
 test("all plugin saves clear dirty and stale cached values", async () => {
   const { page, context } = await pageAt("plugins");
+  const original = await configOf(context);
   try {
     const first = page.locator("#page-content input[type=checkbox]").first();
     const label = "adblock";
@@ -179,6 +182,7 @@ test("all plugin saves clear dirty and stale cached values", async () => {
       enabled,
     );
   } finally {
+    await putConfig(context, original);
     await context.close();
   }
 });
@@ -229,7 +233,8 @@ test("runtime success retains reported warnings", async () => {
   }
 });
 test("discarding edits after a save cannot leak into another page save", async () => {
-  const { page, context } = await pageAt("plugins/mihomo");
+  const { page, context } = await pageAt("plugins/adblock");
+  const original = await configOf(context);
   try {
     const input = page.locator("#page-content input[type=checkbox]").first();
     await input.click();
@@ -243,11 +248,12 @@ test("discarding edits after a save cannot leak into another page save", async (
       await context.request.get(`${base}/api/v1/config`)
     ).json();
     assert.equal(
-      (result.config || result).plugins.mihomo.enable,
+      (result.config || result).plugins.adblock.enable,
       savedValue,
       "discarded draft was persisted by another page",
     );
   } finally {
+    await putConfig(context, original);
     await context.close();
   }
 });
@@ -272,7 +278,7 @@ const allRoutes = [
   "vlan",
   "tailscale",
   "zerotier",
-  "plugins/mihomo",
+  "plugins/adblock",
   "system?tab=account",
   "system?tab=activity",
   "system?tab=diagnostics",
@@ -379,6 +385,7 @@ test("core and plugin fields survive real API saves with their correct schema", 
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.lan.staticLeases = [
       { mac: "02:00:00:00:00:01", ip: "192.168.1.10", hostname: "desktop" },
     ];
@@ -409,14 +416,14 @@ test("core and plugin fields survive real API saves with their correct schema", 
       },
     ];
     cfg.plugins.vlan = {
-      enable: true,
+      enable: false,
       config: {
         vlans: [{ vid: 10, name: "vlan10", bridge: "br-lan" }],
         extra: { keep: true },
       },
     };
     cfg.plugins.zerotier = {
-      enable: true,
+      enable: false,
       config: {
         controlPlane: "private",
         controllerUrl: "https://old.example.com",
@@ -425,7 +432,7 @@ test("core and plugin fields survive real API saves with their correct schema", 
       },
     };
     cfg.plugins.tailscale = {
-      enable: true,
+      enable: false,
       config: {
         controlPlane: "headscale",
         loginServer: "https://old.example.com",
@@ -530,7 +537,6 @@ test("core and plugin fields survive real API saves with their correct schema", 
         [["保留天数", "14"]],
         [["plugins.traffic.config.retentionDays", 14]],
       ],
-      ["ssh", [["监听端口", "2222"]], [["ssh.port", 2222]]],
       [
         "system",
         [["主机名", "router-ui-test"]],
@@ -569,6 +575,7 @@ test("WiFi deletes preserve the remaining AP secret and renames require a new pa
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.wifi.aps = [
       {
         ssid: "first",
@@ -636,6 +643,7 @@ test("system panels support backup, invalid restore feedback, restore refresh an
     await page.getByRole("button", { name: "恢复所选备份" }).click();
     await page.getByText(/恢复失败：/).waitFor();
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.system.hostname = "restored-router";
     await page.getByLabel("选择配置备份").setInputFiles({
       name: "config.json",
@@ -698,8 +706,9 @@ test("unknown plugin editing preserves typed JSON and diagnostics mask plugin se
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.plugins.custom = {
-      enable: true,
+      enable: false,
       config: {
         enabled: true,
         count: 2,
@@ -778,6 +787,7 @@ test("populated tables, system tabs and editors fit mobile and desktop; expired 
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.lan.staticLeases = Array.from({ length: 35 }, (_, i) => ({
       hostname: `家庭设备-${i}-` + "long-name-".repeat(5),
       ip: `192.168.1.${i + 10}`,
@@ -923,6 +933,7 @@ test("client edits persist and password changes remain usable", async () => {
   let changed = false;
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.lan.staticLeases = [
       { mac: "02:00:00:00:00:02", ip: "192.168.1.11", hostname: "old-name" },
     ];
@@ -1003,8 +1014,9 @@ test("advanced plugin JSON preserves secrets when nested arrays are reordered", 
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     (cfg.plugins ||= {}).arrayplugin = {
-      enable: true,
+      enable: false,
       config: {
         label: "original",
         peers: [
@@ -1068,6 +1080,7 @@ test("redrawing WiFi collections retains rename password validation", async () =
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.wifi.aps = [
       {
         ssid: "old",
@@ -1368,18 +1381,18 @@ test("secret clearing in advanced JSON follows its reference when rows are reord
  const {page,context}=await pageAt("plugins");const original=await configOf(context);
  try {
   const cfg=structuredClone(original);cfg.plugins ||= {};
-  cfg.plugins["clear.plugin"]={enable:false,config:{peers:[{name:"a","token.with/slash":"secret-a"},{name:"b","token.with/slash":"secret-b"}]}};
-  await putConfig(context,cfg);await navigate(page,"plugins/clear.plugin");
+  cfg.plugins["clear-plugin"]={enable:false,config:{peers:[{name:"a","token.with/slash":"secret-a"},{name:"b","token.with/slash":"secret-b"}]}};
+  await putConfig(context,cfg);await navigate(page,"plugins/clear-plugin");
   const choice=page.getByLabel("清空密钥：peers.1.token.with/slash",{exact:true});assert.equal(await choice.count(),1);await choice.check();
   const json=page.getByLabel("高级配置（JSON）");const data=JSON.parse(await json.inputValue());
   const duplicate=structuredClone(data);duplicate.peers.push(structuredClone(data.peers[1]));
   await json.fill(JSON.stringify(duplicate));
   assert.match(await json.evaluate(el=>el.validationMessage),/待清空密钥的标记被复制/);
-  assert.equal((await configOf(context)).plugins["clear.plugin"].config.peers[1]["token.with/slash"],"secret-b");
+  assert.equal((await configOf(context)).plugins["clear-plugin"].config.peers[1]["token.with/slash"],"secret-b");
   data.peers.reverse();await json.fill(JSON.stringify(data));
   assert.equal(await json.evaluate(el=>el.validationMessage),"");
   assert.equal(await page.getByLabel("清空密钥：peers.0.token.with/slash",{exact:true}).isChecked(),true);
-  await waitAction(page,"#apply-save");const saved=(await configOf(context)).plugins["clear.plugin"].config.peers;
+  await waitAction(page,"#apply-save");const saved=(await configOf(context)).plugins["clear-plugin"].config.peers;
   assert.equal(saved[0].name,"b");assert.equal(saved[0]["token.with/slash"],"");assert.equal(saved[1]["token.with/slash"],"secret-a");
  } finally {await putConfig(context,original);await context.close();}
 });
@@ -1422,6 +1435,7 @@ test("WiFi security selection persists SAE and keeps the existing secret", async
   const original = await configOf(context);
   try {
     const cfg = structuredClone(original);
+    cfg.plugins ||= {};
     cfg.wifi.aps = [{ssid:"security-test",band:"2g",channel:6,psk:"preserved-wifi-password",enable:true}];
     await putConfig(context,cfg);
     await navigate(page,"wifi");
@@ -1488,4 +1502,36 @@ test("WiFi radio standard and numeric channel width persist through the editor",
   assert.equal(await page.getByLabel("无线标准",{exact:true}).inputValue(),"wifi7");
   assert.equal(await page.getByLabel("信道带宽",{exact:true}).inputValue(),"80");
  }finally{await putConfig(context,original);await context.close()}
+});
+
+test("plugin capabilities expose AdBlock and keep system-owned services disabled", async () => {
+  const {page,context}=await pageAt("plugins");
+  try {
+    assert.equal(await page.getByLabel("启用 Mihomo",{exact:true}).isDisabled(),true);
+    assert.equal(await page.getByLabel("启用 广告拦截",{exact:true}).isDisabled(),false);
+    assert.match(await page.locator("#page-content").innerText(),/系统管理/);
+    await page.goto(`${base}/#/adblock`);
+    await page.waitForFunction(()=>window.app.state.route==="adblock"&&!window.app.state.loading);
+    assert.equal(await page.getByText("规则订阅",{exact:true}).count(),0);
+    await page.goto(`${base}/#/ssh`);
+    await page.waitForFunction(()=>window.app.state.route==="ssh"&&!window.app.state.loading);
+    assert.equal(await page.getByLabel("启用 SSH",{exact:true}).count(),0);
+    assert.match(await page.locator("#page-content").innerText(),/services.openssh/);
+  } finally {await context.close()}
+});
+
+test("registered module navigation works without a hardcoded page or existing config", async () => {
+ const {page,context}=await pageAt("plugins");
+ try {
+  await page.route("**/api/v1/plugins",async route=>{
+   const response=await route.fetch();const body=await response.json();
+   body.plugins.push({id:"new-module",title:"新增模块",available:true,runtimeSupported:false,ownership:"router",enabled:false,status:"not-applied",nav:{path:"/new-module"}});
+   await route.fulfill({json:body});
+  });
+  await page.locator("#page-refresh").click();await page.waitForFunction(()=>!window.app.state.loading);
+  await page.goto(`${base}/#/plugins/new-module`);await page.waitForFunction(()=>window.app.state.route==="new-module"&&!window.app.state.loading);
+  assert.equal(await page.getByLabel("启用 新增模块",{exact:true}).count(),1);
+  assert.equal(await page.getByLabel("高级配置（JSON）",{exact:true}).count(),1);
+  assert.equal(await page.locator("#section-tabs").getByRole("link",{name:"新增模块",exact:true}).count(),1);
+ } finally {await context.close()}
 });

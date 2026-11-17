@@ -83,7 +83,6 @@ func TestPutConfigInvalidDoesNotWrite(t *testing.T) {
 		"lan":      config.DefaultConfig().LAN,
 		"dns":      config.DefaultConfig().DNS,
 		"wifi":     config.DefaultConfig().WiFi,
-		"ssh":      config.DefaultConfig().SSH,
 		"system":   config.DefaultConfig().System,
 		"firewall": config.DefaultConfig().Firewall,
 		"plugins":  map[string]interface{}{},

@@ -10,12 +10,13 @@ let
     "--wifi-interface" m.wifiInterface "--country-code" m.countryCode
     "--management-port" (toString port)
     "--ssh-ports" (lib.concatMapStringsSep "," toString sshPorts)
-    "--wan-udp-ports" (lib.concatMapStringsSep "," toString m.wanUDPPorts) ];
+    "--wan-udp-ports" (lib.concatMapStringsSep "," toString m.wanUDPPorts)
+    "--modules" (lib.concatStringsSep "," m.modules) ];
   # ListenAddress may bind a port absent from the global Port directives.
   # Preserve every host SSH listener when optional WAN filtering is disabled.
-  sshPorts = lib.unique (config.services.openssh.ports
+  sshPorts = lib.optionals config.services.openssh.enable (lib.unique (config.services.openssh.ports
     ++ map (address: address.port)
-      (lib.filter (address: address.port != null) config.services.openssh.listenAddresses));
+      (lib.filter (address: address.port != null) config.services.openssh.listenAddresses)));
   current = "${cfg.stateDir}/managed/current";
   matchPort = builtins.match ".*:([0-9]+)$" cfg.address;
   port = if matchPort == null then 8080 else builtins.fromJSON (builtins.head matchPort);
@@ -158,6 +159,7 @@ let
   '';
 in {
   options.services.nixos-router.backend.managed = {
+    modules = lib.mkOption { type = lib.types.listOf (lib.types.enum [ "adblock" ]); default = [ "adblock" ]; description = "Allowed compiled-in modules, shared by API and executor. Empty disables optional runtime modules."; };
     apiStateDir = lib.mkOption { type = lib.types.path; default = "${cfg.stateDir}-api"; description = "Separate low-privilege API state. Migrated once from stateDir; must not overlap the private executor directory."; };
     enable = lib.mkEnableOption "explicit ownership of router interfaces (hardware-test candidate)";
     interfaces = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; description = "Explicit allowlist including physical wired WAN and LAN members. Never include a management/control interface owned elsewhere."; };
@@ -247,6 +249,7 @@ in {
         NIXOS_ROUTER_MANAGED = "1";
         NIXOS_ROUTER_EXECUTOR_SOCKET = socket;
         NIXOS_ROUTER_WIFI_INTERFACE = m.wifiInterface;
+        NIXOS_ROUTER_MODULES = lib.concatStringsSep "," m.modules;
         NIXOS_ROUTER_ADMIN_PASSWORD_FILE = if m.adminPasswordFile == "" then "" else "%d/admin-password";
       };
       serviceConfig = {

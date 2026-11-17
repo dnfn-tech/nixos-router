@@ -24,8 +24,10 @@ import (
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/db"
 	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
+	"github.com/dnfn-tech/nixos-router/backend/internal/modules"
 	"github.com/dnfn-tech/nixos-router/backend/internal/wifi"
 	"golang.org/x/crypto/bcrypt"
+	"slices"
 )
 
 const (
@@ -36,6 +38,7 @@ const (
 )
 
 type Server struct {
+	modules          []string
 	startupWarning   string
 	managedRuntime   ManagedRuntime
 	wifiInterface    string
@@ -67,6 +70,7 @@ type Server struct {
 }
 
 type Options struct {
+	Modules        []string
 	StartupWarning string
 	WiFiInterface  string // Trusted managed radio; never selected from request input.
 
@@ -124,8 +128,12 @@ type ifacePrev struct {
 }
 
 func New(opts Options) *Server {
+	if opts.Modules == nil {
+		opts.Modules = []string{"adblock"}
+	}
 	s := &Server{
 		managedRuntime:      opts.ManagedRuntime,
+		modules:             append([]string{}, opts.Modules...),
 		startupWarning:      opts.StartupWarning,
 		wifiInterface:       opts.WiFiInterface,
 		cfg:                 opts.Config,
@@ -467,7 +475,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.managedRuntime != nil {
 		resp["deployment"] = map[string]interface{}{"mode": "runtime", "runtimeApply": true, "rebootAllowed": s.rebootAllowed(), "profile": "managed-router"}
 		resp["startupWarning"] = s.startupWarning
-		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "wanModes": []string{"dhcp", "static", "pppoe"}, "singleLAN": false, "singleWiredLAN": true, "independentWiFiLAN": true, "singleAP": true, "ipv6WanModes": []string{"slaac", "dhcpv6", "pppoe6"}, "unsupported": []string{"qos", "ddns", "parental", "plugins", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
+		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "modules": s.modules, "wanModes": []string{"dhcp", "static", "pppoe"}, "singleLAN": false, "singleWiredLAN": true, "independentWiFiLAN": true, "singleAP": true, "ipv6WanModes": []string{"slaac", "dhcpv6", "pppoe6"}, "unsupported": []string{"qos", "ddns", "parental", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -526,7 +534,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		// persist
 		if err := s.saveConfigLocked(w, &newCfg); err != nil {
-			apiHTTPError(w, "failed to save config", http.StatusInternalServerError)
+			writeConfigSaveError(w, err)
 			return
 		}
 		// set new in-memory copy
@@ -680,11 +688,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"nat":          cfg.Firewall.NATEnabled,
 			"portForwards": cfg.Firewall.PortForwards,
 		},
-		"ssh": map[string]interface{}{
-			"enabled":      cfg.SSH.Enable,
-			"port":         cfg.SSH.Port,
-			"passwordAuth": cfg.SSH.PasswordAuth,
-		},
 		"ddns": map[string]interface{}{
 			"enabled":  cfg.DDNS.Enable,
 			"provider": cfg.DDNS.Provider,
@@ -787,132 +790,12 @@ func (s *Server) handleUINav(w http.ResponseWriter, r *http.Request) {
 		}},
 		{"id": "system", "title": "System", "path": "/system"},
 	}
-	// Enabled plugins appended
-	for name, p := range cfg.Plugins {
-		if p.Enable {
-			nav = append(nav, map[string]interface{}{
-				"id":    "plugin:" + name,
-				"title": fmt.Sprintf("Plugin: %s", name),
-				"path":  "/plugins/" + name,
-			})
+	for _, d := range modules.All() {
+		if cfg.Plugins[d.ID].Enable && slices.Contains(s.modules, d.ID) && d.Runtime {
+			nav = append(nav, map[string]interface{}{"id": "plugin:" + d.ID, "title": d.Title, "path": d.Path})
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"nav": nav})
-}
-
-func (s *Server) handlePlugins(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		cfg := s.configSnapshot()
-		builtins := []struct {
-			id    string
-			title string
-			group string
-			path  string
-		}{
-			{"adblock", "AdBlock", "网络服务", "/adblock"},
-			{"traffic", "Traffic", "网络服务", "/traffic"},
-			{"mihomo", "Mihomo", "网络服务", "/mihomo"},
-			{"vlan", "VLAN", "网络服务", "/vlan"},
-			{"tailscale", "Tailscale", "网络服务", "/tailscale"},
-			{"zerotier", "Zerotier", "网络服务", "/zerotier"},
-			{"qos", "QoS", "网络服务", "/qos"},
-			{"parental", "家长控制", "网络服务", "/parental"},
-			{"ddns", "动态DNS", "网络服务", "/ddns"},
-			{"ipv6", "IPv6", "网络服务", "/ipv6"},
-		}
-		list := []map[string]interface{}{}
-		seen := map[string]bool{}
-		for _, b := range builtins {
-			p := cfg.Plugins[b.id]
-			item := map[string]interface{}{
-				"id":      b.id,
-				"title":   b.title,
-				"enabled": p.Enable,
-				"nav": map[string]interface{}{
-					"group": b.group,
-					"path":  b.path,
-				},
-			}
-			if p.Config != nil {
-				item["configKeys"] = keysOf(p.Config)
-			}
-			list = append(list, item)
-			seen[b.id] = true
-		}
-		// Include any extra plugin entries not in builtins
-		for name, p := range cfg.Plugins {
-			if seen[name] {
-				continue
-			}
-			list = append(list, map[string]interface{}{
-				"id":      name,
-				"title":   name,
-				"enabled": p.Enable,
-				"nav":     map[string]interface{}{},
-				"configKeys": func() []string {
-					if p.Config != nil {
-						return keysOf(p.Config)
-					}
-					return nil
-				}(),
-			})
-		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"plugins": list})
-		return
-	}
-	if r.Method == http.MethodPut || r.Method == http.MethodPatch {
-		// PUT /api/v1/plugins/{id}
-		id := strings.TrimPrefix(r.URL.Path, "/api/v1/plugins/")
-		if id == "" || strings.Contains(id, "/") {
-			apiHTTPError(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		var body struct {
-			Enabled *bool                  `json:"enabled"`
-			Config  map[string]interface{} `json:"config"`
-		}
-		data, readErr := io.ReadAll(r.Body)
-		if readErr != nil || config.DecodeStrictJSON(data, &body) != nil {
-			apiHTTPError(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		s.cfgMu.Lock()
-		defer s.cfgMu.Unlock()
-		if !s.checkConfigRevisionLocked(w, r) {
-			return
-		}
-		cfg := cloneConfig(s.cfg)
-		cur := cfg.Plugins[id]
-		// Merge config with secret-preserve
-		if body.Config != nil {
-			resolved, err := config.ResolvePluginSecrets(s.cfg, map[string]config.PluginConfig{id: {Config: body.Config}})
-			if err != nil {
-				writeConfigError(w, err)
-				return
-			}
-			cur.Config = mergePreserveSecretsMap(cur.Config, resolved[id].Config)
-		}
-		if body.Enabled != nil {
-			cur.Enable = *body.Enabled
-		}
-		if cfg.Plugins == nil {
-			cfg.Plugins = map[string]config.PluginConfig{}
-		}
-		cfg.Plugins[id] = cur
-		// persist
-		if err := s.saveConfigLocked(w, &cfg); err != nil {
-			apiHTTPError(w, "failed to save config", http.StatusInternalServerError)
-			return
-		}
-		s.cfg = cfg
-		s.db.AddAudit("plugins", "update", fmt.Sprintf("%s enabled=%v", id, cur.Enable))
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"ok":     true,
-			"plugin": map[string]interface{}{"id": id, "enabled": cur.Enable, "configKeys": keysOf(cur.Config)},
-		})
-		return
-	}
-	apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
@@ -1074,7 +957,7 @@ func (s *Server) handleClientItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.saveConfigLocked(w, &cfg); err != nil {
-		apiHTTPError(w, "failed to save config", http.StatusInternalServerError)
+		writeConfigSaveError(w, err)
 		return
 	}
 	s.cfg = cfg
@@ -1583,7 +1466,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.saveConfigLocked(w, &newCfg); err != nil {
-		apiHTTPError(w, "failed to save config", http.StatusInternalServerError)
+		writeConfigSaveError(w, err)
 		return
 	}
 	s.cfg = newCfg
@@ -1685,6 +1568,9 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		_ = s.db.UpdateJobStatus(jid, "failed", "failed to load config: "+err.Error())
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "invalid_config", "jobId": jid})
 		return
+	}
+	if s.applyReload {
+		for id,pc:=range cfg.Plugins { if pc.Enable {writeConfigError(w,&config.ValidationError{Path:"plugins."+id+".enable",Code:"module_unavailable",Message:"module runtime requires managed executor mode"});return} }
 	}
 	// create running job
 	jid := newSessionID()
@@ -1840,6 +1726,9 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 				dns += fmt.Sprintf("dhcp-host=%s,%s\n", sl.MAC, sl.IP)
 			}
 		}
+	}
+	if pc:=cfg.Plugins["adblock"];pc.Enable {
+		rules,err:=modules.RenderDNS(pc.Config);if err!=nil{return err};dns+=rules
 	}
 	if err := os.WriteFile(filepath.Join(dir, "dnsmasq.conf.fragment"), []byte(dns), 0o644); err != nil {
 		return err
@@ -2027,33 +1916,13 @@ func (s *Server) generateFragments(cfg config.Config, dir string) error {
 	pdir := filepath.Join(dir, "plugins")
 	_ = os.MkdirAll(pdir, 0o755)
 	// adblock
-	genAdblock := func() {
-		id := "adblock"
-		pc, ok := cfg.Plugins[id]
-		if !ok || !pc.Enable {
-			_ = os.WriteFile(filepath.Join(pdir, id+".DISABLED"), []byte("# disabled\n"), 0o644)
-			return
-		}
-		var lines []string
-		lines = append(lines, "# adblock fragment (generate-only)")
-		lines = append(lines, "# units: dnsmasq.service (reload: try-reload-or-restart)")
-		if lists, ok := pc.Config["lists"].([]interface{}); ok {
-			for _, v := range lists {
-				if s, ok := v.(string); ok {
-					lines = append(lines, "# list: "+s)
-				}
-			}
-		}
-		if entries, ok := pc.Config["entries"].([]interface{}); ok {
-			for _, v := range entries {
-				if d, ok := v.(string); ok && d != "" {
-					lines = append(lines, "address=/"+d+"/0.0.0.0")
-				}
-			}
-		}
-		_ = os.WriteFile(filepath.Join(pdir, "adblock.conf.fragment"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	if pc:=cfg.Plugins["adblock"];pc.Enable {
+		rules,err:=modules.RenderDNS(pc.Config)
+		if err!=nil{return err}
+		if err=os.WriteFile(filepath.Join(pdir,"adblock.conf.fragment"),[]byte(rules),0600);err!=nil{return err}
+	} else {
+		if err:=os.WriteFile(filepath.Join(pdir,"adblock.DISABLED"),[]byte("# disabled\n"),0600);err!=nil{return err}
 	}
-	genAdblock()
 	// traffic
 	genTraffic := func() {
 		id := "traffic"
@@ -2400,68 +2269,9 @@ func (s *Server) reloadCoreUnits() (bool, string) {
 // orchestratePlugins performs best-effort unit orchestration per plugin.
 // It NEVER fails the apply; instead it returns human-readable notes.
 func (s *Server) orchestratePlugins(cfg config.Config) []string {
-	notes := []string{}
-	// If systemctl is missing, skip silently with a note.
-	if err := s.runner.LookPath("systemctl"); err != nil {
-		return append(notes, "systemctl not found, skipped plugin orchestration")
-	}
-	type plug struct {
-		name           string
-		units          []string
-		enabled        bool
-		extraHeadscale bool
-	}
-	var planned []plug
-	// mihomo
-	if pc, ok := cfg.Plugins["mihomo"]; ok {
-		planned = append(planned, plug{name: "mihomo", enabled: pc.Enable, units: []string{"mihomo.service"}})
-	}
-	// tailscale
-	if pc, ok := cfg.Plugins["tailscale"]; ok {
-		cp, _ := pc.Config["controlPlane"].(string)
-		p := plug{name: "tailscale", enabled: pc.Enable, units: []string{"tailscaled.service"}}
-		if strings.EqualFold(cp, "headscale") {
-			p.extraHeadscale = true
-			p.units = append(p.units, "headscale.service")
-		}
-		planned = append(planned, p)
-	}
-	// zerotier
-	if pc, ok := cfg.Plugins["zerotier"]; ok {
-		planned = append(planned, plug{name: "zerotier", enabled: pc.Enable, units: []string{"zerotier-one.service"}})
-	}
-	// vlan: notes-only, no units
-	if pc, ok := cfg.Plugins["vlan"]; ok {
-		if pc.Enable {
-			notes = append(notes, "vlan: notes-only; manage via systemd-networkd if configured")
-		} else {
-			notes = append(notes, "vlan: disabled; no units to stop")
-		}
-	}
-	for _, p := range planned {
-		if len(p.units) == 0 {
-			continue
-		}
-		if p.enabled {
-			for _, u := range p.units {
-				if err := s.runner.Run("systemctl", "-q", "try-reload-or-restart", u); err != nil {
-					notes = append(notes, fmt.Sprintf("%s: unit %s missing or not reloadable (%v)", p.name, u, err))
-				} else {
-					notes = append(notes, fmt.Sprintf("%s: reloaded %s", p.name, u))
-				}
-			}
-		} else {
-			for _, u := range p.units {
-				if err := s.runner.Run("systemctl", "-q", "try-stop", u); err != nil {
-					notes = append(notes, fmt.Sprintf("%s: unit %s not running or absent (%v)", p.name, u, err))
-				} else {
-					notes = append(notes, fmt.Sprintf("%s: stopped %s", p.name, u))
-				}
-			}
-		}
-	}
-	return notes
+	return []string{"Optional system services remain managed by NixOS; generated files alone are not runtime activation"}
 }
+
 func (s *Server) clientKey(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
