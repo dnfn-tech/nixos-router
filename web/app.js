@@ -653,6 +653,46 @@
       }
     }
   }
+  let candidateStatus = null;
+  let candidatePoll = null;
+  async function refreshCandidate() {
+    if (!state.loggedIn || state.health?.deployment?.profile !== "managed-router") return;
+    const panel = $("#candidate-banner");
+    try {
+      const response = await api("/api/v1/apply/candidate", {timeout: 5000});
+      candidateStatus = response.confirmation;
+      panel.replaceChildren();
+      panel.classList.toggle("hidden", !candidateStatus);
+      if (!candidateStatus) return;
+      const current = candidateStatus;
+      if (current.state === "pending") {
+        const seconds = Math.max(0, Math.ceil((Date.parse(current.deadline) - Date.now()) / 1000));
+        panel.append(document.createTextNode(`候选配置尚未确认，约 ${seconds} 秒后自动恢复旧配置。请先验证所需网络与管理路径，再确认保留。`));
+        const button = document.createElement("button");
+        button.className = "btn"; button.textContent = "确认保留当前网络配置";
+        button.disabled = seconds === 0;
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            await api("/api/v1/apply/confirm", {method: "POST", body: {id: current.id}});
+            feedback("当前网络配置已确认保留。", "good");
+            state.pending = state.configCache?.revision !== current.revision;
+            syncActions();
+          } catch (error) { feedback(`确认未完成：${error.message}；请重新查询候选状态。`, "error"); }
+          await refreshCandidate();
+        });
+        panel.append(button);
+      } else {
+        const labels = {confirmed:"配置已确认保留。", "rolled-back":"未确认的候选已恢复为上一份确认配置；保存的草稿仍保留。", "rollback-failed":"恢复失败，请使用独立控制台处理；已禁止继续应用。", activating:"候选配置正在应用。", confirming:"正在持久化确认。", "rolling-back":"正在恢复上一份确认配置。"};
+        panel.textContent = labels[current.state] || "候选状态未知，请核查设备。";
+      }
+    } catch (error) {
+      // Loss of observation never means confirmed; retain the last warning.
+      if (candidateStatus) { panel.classList.remove("hidden"); panel.textContent = "暂时无法查询候选状态；请连接新 LAN 地址或获准管理路径后刷新。未确认配置仍可能超时恢复。"; }
+    }
+    clearTimeout(candidatePoll);
+    if (state.loggedIn && candidateStatus && !["confirmed", "rolled-back"].includes(candidateStatus.state)) candidatePoll = setTimeout(refreshCandidate, 3000);
+  }
   function resultMessage(result) {
     const notes = [
       ...(Array.isArray(result.warnings) ? result.warnings : []),
@@ -660,6 +700,7 @@
     ].join("；");
     if (result.error || result.status === "failed")
       return `应用失败：${result.message || result.error || "未知错误"}${notes ? "；" + notes : ""}`;
+    if (result.confirmation?.state === "pending") return "候选网络配置已应用，尚未确认；请验证连接后使用上方按钮确认，否则自动恢复。";
     if (result.appliedRuntime === true)
       return `${result.mode === "managed-runtime" ? "网络配置应用完成（SSH 与系统设置仍由 NixOS 管理）" : "运行配置应用完成"}${notes ? "；提示：" + notes : ""}`;
     if (result.mode === "generate-only" && result.appliedRuntime === false)
@@ -754,6 +795,7 @@
     } finally {
       state.busy = false;
       syncActions();
+      await refreshCandidate();
     }
   }
   const unavailable = (text) =>
@@ -2150,6 +2192,7 @@
       state.modules = manifest?.plugins || null;
       navigation(id);
       deployment();
+      refreshCandidate();
       let content;
       if (id === "ssh") content = card("SSH 由系统管理", notice("请通过 NixOS 的 services.openssh 配置监听端口、认证策略和授权公钥。"));
       else if (id === "overview") content = overview(cfg, status, clients);

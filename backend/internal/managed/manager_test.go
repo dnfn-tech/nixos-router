@@ -376,7 +376,7 @@ func TestManagementPortsProtectedWithFirewallDisabled(t *testing.T) {
 	for _, port := range []int{22, 2222} {
 		m.opts.SSHPorts = []int{port}
 		rules := m.render(c)["firewall.nft"]
-		want := fmt.Sprintf(`iifname != { "lo", "br-lan" } tcp dport { 8080, %d } drop`, port)
+		want := fmt.Sprintf(`iifname { "lo", "br-lan" } tcp dport { 8080, %d } accept`, port)
 		if !strings.Contains(rules, want) {
 			t.Fatalf("missing SSH/API LAN-only guard %s:\n%s", want, rules)
 		}

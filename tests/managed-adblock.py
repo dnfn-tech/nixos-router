@@ -33,6 +33,12 @@ def apply(cfg):
         result = api("GET", "/jobs/" + job["jobId"])
         if result["status"] in ("success", "failed"):
             assert result["status"] == "success", result
+            payload = result["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if payload.get("confirmation"):
+                confirmation = api("POST", "/apply/confirm", {"id": payload["confirmation"]["id"]})
+                assert confirmation["confirmation"]["state"] == "confirmed", confirmation
             return
         time.sleep(1)
     raise Exception("module apply timed out")

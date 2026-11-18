@@ -79,3 +79,24 @@ func (c *Client) Leases(ctx context.Context) ([]managed.Lease, error) {
 	err := c.call(ctx, "GET", "/v1/leases", nil, &leases)
 	return leases, err
 }
+
+func (c *Client) Candidate(ctx context.Context) (*managed.Confirmation, error) {
+	var res struct {
+		Confirmation *managed.Confirmation `json:"confirmation"`
+	}
+	err := c.call(ctx, "GET", "/v1/candidate", nil, &res)
+	return res.Confirmation, err
+}
+func (c *Client) Confirm(ctx context.Context, id string) (*managed.Confirmation, error) {
+	var res struct {
+		Confirmation *managed.Confirmation `json:"confirmation"`
+	}
+	err := c.call(ctx, "POST", "/v1/confirm", map[string]string{"id": id}, &res)
+	return res.Confirmation, err
+}
+
+func (c *Client) ManagementPort(ctx context.Context) (int, error) {
+	var response appliedResponse
+	err := c.call(ctx, "GET", "/v1/applied", nil, &response)
+	return response.ManagementPort, err
+}

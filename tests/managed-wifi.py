@@ -41,6 +41,10 @@ def apply(configuration, expect_success=True):
         job = api("GET", "/jobs/" + job_id)
         if job["status"] in ("success", "failed"):
             assert job["status"] == ("success" if expect_success else "failed"), job
+            payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
+            if expect_success and payload.get("confirmation"):
+                confirmation = api("POST", "/apply/confirm", {"id": payload["confirmation"]["id"]})
+                assert confirmation["confirmation"]["state"] == "confirmed", confirmation
             return job
         time.sleep(1)
     raise AssertionError("managed WiFi apply did not finish")

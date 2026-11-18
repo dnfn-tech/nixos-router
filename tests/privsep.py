@@ -31,6 +31,10 @@ def await_job(jid, expected):
             job = json.loads(raw)
             if job.get("status") in ("success", "failed"):
                 assert job["status"] == expected, job
+                payload = json.loads(job["payload"]) if isinstance(job["payload"], str) else job["payload"]
+                if expected == "success" and payload.get("confirmation"):
+                    confirmation = api("POST", "/apply/confirm", {"id": payload["confirmation"]["id"]})
+                    assert confirmation["confirmation"]["state"] == "confirmed", confirmation
                 return job
         time.sleep(1)
     raise Exception("executor job did not settle: " + jid)

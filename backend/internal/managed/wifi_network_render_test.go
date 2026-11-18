@@ -49,13 +49,13 @@ func TestRoutedWiFiAccessAndNAT(t *testing.T) {
 		if strings.Index(nft, `iifname "wlan0" oifname "br-lan" drop`) > strings.Index(nft, "ct state established,related accept\n") {
 			t.Fatal("cross-subnet policy follows established accept")
 		}
-		if !strings.Contains(nft, `iifname != { "lo", "br-lan" } tcp dport`) {
+		if !strings.Contains(nft, `iifname { "lo", "br-lan" } tcp dport`) {
 			t.Fatal("untrusted WiFi gained management")
 		}
 		c.WiFi.Network.AllowManagement = true
 		c.WiFi.Network.AllowWiredAccess = true
 		nft = m.render(c)["firewall.nft"]
-		if !strings.Contains(nft, `iifname != { "lo", "br-lan", "wlan0" } tcp dport`) {
+		if !strings.Contains(nft, `iifname { "lo", "br-lan", "wlan0" } tcp dport`) {
 			t.Fatal("explicit management permission missing")
 		}
 		for _, want := range []string{`iifname "wlan0" oifname "br-lan" accept`, `iifname "br-lan" oifname "wlan0" accept`} {

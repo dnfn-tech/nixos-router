@@ -192,3 +192,38 @@ test("dual-stack managed profile describes independent WiFi without claiming liv
   assert.doesNotMatch(description,/IPv4 单内网|不支持 IPv6|已联网/);
  }finally{await context.close()}
 });
+
+test("managed candidate survives page reload and requires explicit confirmation", async () => {
+ const {page,context}=await pageAt("wifi");
+ try {
+  let confirmations=0;
+  let candidate={id:"a".repeat(48),state:"pending",deadline:new Date(Date.now()+60000).toISOString(),revision:"revision-test"};
+  const health={...managedHealth,deployment:{mode:"runtime",profile:"managed-router"}};
+  await page.route("**/api/v1/health",route=>route.fulfill({json:health}));
+  await page.route("**/api/v1/apply/candidate",route=>route.fulfill({json:{confirmation:candidate}}));
+  await page.route("**/api/v1/apply/confirm",async route=>{
+   confirmations++;
+   assert.equal(route.request().postDataJSON().id,candidate.id);
+   candidate={...candidate,state:"confirmed"};
+   await route.fulfill({json:{confirmation:candidate}});
+  });
+  await page.reload();
+  await page.getByRole("button",{name:"确认保留当前网络配置",exact:true}).waitFor();
+  assert.equal(confirmations,0,"reload and polling must never auto-confirm");
+  assert.match(await page.locator("#candidate-banner").innerText(),/自动恢复/);
+  await page.getByRole("button",{name:"确认保留当前网络配置",exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector("#candidate-banner").textContent.includes("已确认保留"));
+  assert.equal(confirmations,1);
+ }finally{await context.close()}
+});
+
+test("expired managed candidate cannot be confirmed in the browser", async () => {
+ const {page,context}=await pageAt("wifi");
+ try {
+  await page.route("**/api/v1/health",route=>route.fulfill({json:{...managedHealth,deployment:{mode:"runtime",profile:"managed-router"}}}));
+  await page.route("**/api/v1/apply/candidate",route=>route.fulfill({json:{confirmation:{id:"b".repeat(48),state:"pending",deadline:new Date(Date.now()-1000).toISOString()}}}));
+  await page.locator("#page-refresh").click();
+  await page.getByRole("button",{name:"确认保留当前网络配置",exact:true}).waitFor();
+  assert.equal(await page.getByRole("button",{name:"确认保留当前网络配置",exact:true}).isDisabled(),true);
+ }finally{await context.close()}
+});

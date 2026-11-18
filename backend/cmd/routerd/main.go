@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -51,7 +52,16 @@ func main() {
 	moduleList := flag.String("modules", getEnv("NIXOS_ROUTER_MODULES", "adblock"), "Allowed compiled-in router modules")
 	managedSSHPorts := flag.String("managed-ssh-ports", getEnv("NIXOS_ROUTER_MANAGED_SSH_PORTS", ""), "Trusted NixOS sshd ports to preserve, comma-separated (not HTTP draft SSH settings)")
 	executorSocket := flag.String("executor-socket", os.Getenv("NIXOS_ROUTER_EXECUTOR_SOCKET"), "Authenticated local executor socket; requires unprivileged managed API")
+	managementAccess := flag.String("managed-management-access", getEnv("NIXOS_ROUTER_MANAGEMENT_ACCESS", "[]"), "Trusted JSON management interface/source grants")
+	confirmationTimeout := flag.Duration("confirmation-timeout", 120*time.Second, "Candidate confirmation window (10s..10m)")
 	flag.Parse()
+	if *managedMode {
+		normalized, err := managedListenAddress(*addr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		*addr = normalized
+	}
 	allowedModules := []string{}
 	if *moduleList != "" {
 		allowedModules = strings.Split(*moduleList, ",")
@@ -119,7 +129,14 @@ func main() {
 		if remote != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_, ready, e := remote.Applied(ctx)
+			protectedPort, portErr := remote.ManagementPort(ctx)
 			cancel()
+			if portErr != nil {
+				log.Fatalf("executor management policy unavailable: %v", portErr)
+			}
+			if err := checkManagementPort(*addr, protectedPort); err != nil {
+				log.Fatal(err)
+			}
 			if e != nil || !ready {
 				log.Fatalf("executor is not ready: %v", e)
 			}
@@ -141,7 +158,14 @@ func main() {
 			if e != nil {
 				log.Fatalf("managed SSH ports: %v", e)
 			}
-			manager, e := managed.New(managed.Options{StateDir: opts.StateDir, Interfaces: strings.Split(*managedInterfaces, ","), WiFiInterface: *wifiInterface, ManagementPort: port, CountryCode: *country, SSHPorts: sshPorts, Modules: allowedModules})
+			var grants []managed.ManagementAccess
+			if e = json.Unmarshal([]byte(*managementAccess), &grants); e != nil {
+				log.Fatal("invalid management access policy")
+			}
+			if *confirmationTimeout < 10*time.Second || *confirmationTimeout > 10*time.Minute {
+				log.Fatal("confirmation timeout must be 10s..10m")
+			}
+			manager, e := managed.New(managed.Options{StateDir: opts.StateDir, Interfaces: strings.Split(*managedInterfaces, ","), WiFiInterface: *wifiInterface, ManagementPort: port, ManagementAccess: grants, ConfirmationTimeout: *confirmationTimeout, CountryCode: *country, SSHPorts: sshPorts, Modules: allowedModules})
 			if e != nil {
 				log.Fatalf("managed initialization: %v", e)
 			}
@@ -154,6 +178,7 @@ func main() {
 			if e = database.InterruptRunningJobs(); e != nil {
 				log.Fatalf("recover job state: %v", e)
 			}
+			defer manager.Close()
 			runtime = manager
 		}
 	}
@@ -343,4 +368,30 @@ func parseManagedSSHPorts(value string) ([]int, error) {
 		ports = append(ports, port)
 	}
 	return ports, nil
+}
+
+// Managed startup only serves after executor recovery installed the mandatory
+// management-plane firewall. Bind all local addresses to survive LAN renumbering.
+func managedListenAddress(addr string) (string, error) {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", errors.New("invalid managed HTTP port")
+	}
+	return net.JoinHostPort("", port), nil
+}
+
+func checkManagementPort(addr string, protectedPort int) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n != protectedPort || protectedPort == 0 {
+		return errors.New("managed HTTP listener must match executor protected port")
+	}
+	return nil
 }

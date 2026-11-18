@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,11 +32,13 @@ type options struct {
 	port                                                                        int
 	sshPorts                                                                    []int
 	wanUDPPorts                                                                 []int
+	managementAccess                                                            []managed.ManagementAccess
+	confirmationTimeout                                                         time.Duration
 }
 
 func parseOptions(args []string) (options, error) {
 	var o options
-	var ports, udpPorts, moduleList string
+	var ports, udpPorts, moduleList, accessJSON string
 	fs := flag.NewFlagSet("router-executor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&o.prepareAPI, "prepare-api-state", "", "Initialize or migrate the API state directory offline, then exit")
@@ -50,8 +53,16 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&moduleList, "modules", "adblock", "Allowed compiled-in router modules")
 	fs.StringVar(&ports, "ssh-ports", "", "Trusted host SSH listener ports")
 	fs.StringVar(&udpPorts, "wan-udp-ports", "", "Trusted host UDP listeners allowed on the actual WAN exit")
+	fs.StringVar(&accessJSON, "management-access", "[]", "Trusted JSON management interface/source grants")
+	fs.DurationVar(&o.confirmationTimeout, "confirmation-timeout", 120*time.Second, "Candidate confirmation window (10s..10m)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
+	}
+	if err := json.Unmarshal([]byte(accessJSON), &o.managementAccess); err != nil {
+		return o, errors.New("invalid management access policy")
+	}
+	if o.confirmationTimeout < 10*time.Second || o.confirmationTimeout > 10*time.Minute {
+		return o, errors.New("confirmation timeout must be 10s..10m")
 	}
 	o.modules = []string{}
 	if moduleList != "" {
@@ -160,7 +171,7 @@ func run(o options) error {
 	if err = os.Chown(o.socket, int(uid), int(gid)); err != nil {
 		return err
 	}
-	manager, err := managed.New(managed.Options{StateDir: o.stateDir, Interfaces: strings.Split(o.interfaces, ","), WiFiInterface: o.wifi, ManagementPort: o.port, SSHPorts: o.sshPorts, Modules: o.modules, WANUDPPorts: o.wanUDPPorts, CountryCode: o.country})
+	manager, err := managed.New(managed.Options{StateDir: o.stateDir, Interfaces: strings.Split(o.interfaces, ","), WiFiInterface: o.wifi, ManagementPort: o.port, ManagementAccess: o.managementAccess, ConfirmationTimeout: o.confirmationTimeout, SSHPorts: o.sshPorts, Modules: o.modules, WANUDPPorts: o.wanUDPPorts, CountryCode: o.country})
 	if err != nil {
 		return err
 	}
@@ -169,6 +180,7 @@ func run(o options) error {
 		return err
 	}
 	defer executor.Close()
+	defer manager.Close()
 	var bootstrap config.Config
 	if _, err = os.Stat(filepath.Join(o.stateDir, "managed", "last-good.json")); os.IsNotExist(err) {
 		bootstrap, err = readBootstrap(o.bootstrap)

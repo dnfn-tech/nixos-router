@@ -44,3 +44,16 @@ func TestWANUDPServiceArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestConfirmationPolicyArguments(t *testing.T) {
+	good := []string{"--state-dir", "/var/lib/router-executor", "--socket", "/run/router-executor/control.sock", "--bootstrap", "/run/secrets/router.json", "--api-user", "router-api", "--interfaces", "wan0,lan0"}
+	o, err := parseOptions(append(append([]string{}, good...), "--management-access", `[{"interface":"zt0","sources":["10.0.0.0/24"]}]`, "--confirmation-timeout", "30s"))
+	if err != nil || len(o.managementAccess) != 1 || o.confirmationTimeout.Seconds() != 30 {
+		t.Fatal(o, err)
+	}
+	for _, timeout := range []string{"0s", "9s", "601s"} {
+		if _, err := parseOptions(append(append([]string{}, good...), "--confirmation-timeout", timeout)); err == nil {
+			t.Fatal(timeout)
+		}
+	}
+}

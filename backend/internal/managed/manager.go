@@ -35,21 +35,25 @@ func (commandRunner) Run(ctx context.Context, name string, args ...string) (stri
 }
 
 type Options struct {
-	StateDir       string
-	Interfaces     []string
-	WiFiInterface  string
-	ManagementPort int
-	Modules        []string // Trusted deployment allowlist; nil defaults to adblock.
-	SSHPorts       []int
-	WANUDPPorts    []int // Trusted deployment policy, outside Config/RPC.
-	CountryCode    string
-	Runner         Runner
-	Clock          func() time.Time
+	StateDir            string
+	Interfaces          []string
+	WiFiInterface       string
+	ManagementPort      int
+	ManagementAccess    []ManagementAccess
+	ConfirmationTimeout time.Duration
+	Modules             []string // Trusted deployment allowlist; nil defaults to adblock.
+	SSHPorts            []int
+	WANUDPPorts         []int // Trusted deployment policy, outside Config/RPC.
+	CountryCode         string
+	Runner              Runner
+	Clock               func() time.Time
 }
 type Result struct {
-	Stage          string   `json:"stage"`
-	RollbackStatus string   `json:"rollbackStatus"`
-	Warnings       []string `json:"warnings,omitempty"`
+	Stage           string        `json:"stage"`
+	RollbackStatus  string        `json:"rollbackStatus"`
+	Warnings        []string      `json:"warnings,omitempty"`
+	Confirmation    *Confirmation `json:"confirmation,omitempty"`
+	ActivationStage string        `json:"activationStage,omitempty"`
 }
 type Manager struct {
 	opts      Options
@@ -57,6 +61,7 @@ type Manager struct {
 	mu        sync.Mutex
 	good      *config.Config
 	published atomic.Pointer[config.Config]
+	timer     *time.Timer
 }
 
 func New(o Options) (*Manager, error) {
@@ -112,6 +117,9 @@ func New(o Options) (*Manager, error) {
 	if o.Clock == nil {
 		o.Clock = time.Now
 	}
+	if o.ConfirmationTimeout != 0 && (o.ConfirmationTimeout < 10*time.Second || o.ConfirmationTimeout > 10*time.Minute) {
+		return nil, errors.New("confirmation timeout must be 10..600 seconds")
+	}
 	m := &Manager{opts: o, allowed: map[string]bool{}}
 	for _, s := range o.Interfaces {
 		if !ifname.MatchString(s) || s == "lo" || m.allowed[s] {
@@ -124,6 +132,9 @@ func New(o Options) (*Manager, error) {
 	}
 	if o.WiFiInterface != "" && (!ifname.MatchString(o.WiFiInterface) || o.WiFiInterface == "lo" || m.allowed[o.WiFiInterface]) {
 		return nil, errors.New("WiFi must be a distinct valid interface")
+	}
+	if err := m.validateManagementAccess(); err != nil {
+		return nil, err
 	}
 	if e := os.MkdirAll(m.base(), 0700); e != nil {
 		return nil, e
@@ -164,8 +175,9 @@ func (m *Manager) publish(c *config.Config) {
 	v := clone(*c)
 	m.published.Store(&v)
 }
-func (m *Manager) base() string     { return filepath.Join(m.opts.StateDir, "managed") }
-func (m *Manager) lastGood() string { return filepath.Join(m.base(), "last-good.json") }
+func (m *Manager) ManagementPort() int { return m.opts.ManagementPort }
+func (m *Manager) base() string        { return filepath.Join(m.opts.StateDir, "managed") }
+func (m *Manager) lastGood() string    { return filepath.Join(m.base(), "last-good.json") }
 func (m *Manager) run(ctx context.Context, name string, args ...string) (string, error) {
 	timeout := 20 * time.Second
 	if name == "systemctl" && len(args) == 2 && (args[0] == "stop" || args[0] == "restart") {
@@ -240,7 +252,12 @@ func (m *Manager) Apply(ctx context.Context, c config.Config) (Result, error) {
 		return Result{Stage: "lock", RollbackStatus: "not-needed"}, e
 	}
 	defer lock.Close()
-	return m.apply(ctx, clone(c))
+	if pending, err := m.readCandidate(); err != nil {
+		return Result{Stage: "candidate-state"}, err
+	} else if pending != nil && pending.unsettled() {
+		return Result{Stage: "awaiting-confirmation", Confirmation: &pending.Confirmation}, errors.New("candidate requires confirmation or recovery")
+	}
+	return m.apply(ctx, clone(c), m.opts.ConfirmationTimeout > 0)
 }
 func (m *Manager) Restore(ctx context.Context, bootstrap config.Config) error {
 	m.mu.Lock()
@@ -254,10 +271,17 @@ func (m *Manager) Restore(ctx context.Context, bootstrap config.Config) error {
 	if m.good != nil {
 		c = clone(*m.good)
 	}
-	_, e = m.apply(ctx, c)
+	pending, err := m.readCandidate()
+	if err != nil {
+		return err
+	}
+	if pending != nil && pending.unsettled() {
+		return m.rollbackCandidate(ctx, pending)
+	}
+	_, e = m.apply(ctx, c, false)
 	return e
 }
-func (m *Manager) apply(ctx context.Context, c config.Config) (res Result, err error) {
+func (m *Manager) apply(ctx context.Context, c config.Config, candidate bool) (res Result, err error) {
 	// Called only under the process mutex and cross-process transaction lock.
 	// Defer until activation/recovery no longer needs intermediate candidates.
 	defer func() {
@@ -276,9 +300,19 @@ func (m *Manager) apply(ctx context.Context, c config.Config) (res Result, err e
 		return res, e
 	}
 	previous := m.good
+	var pending *candidateRecord
+	if candidate {
+		if previous == nil {
+			return res, errors.New("restore trusted bootstrap before candidate apply")
+		}
+		pending, err = m.beginCandidate(c, *previous)
+		if err != nil {
+			return res, err
+		}
+	}
 	res.Stage = "activate"
 	err = m.activate(ctx, c, previous, dir)
-	if err == nil {
+	if err == nil && !candidate {
 		res.Stage = "persist"
 		b, _ := json.MarshalIndent(c, "", "  ")
 		err = atomicFile(m.lastGood(), append(b, '\n'))
@@ -313,6 +347,13 @@ func (m *Manager) apply(ctx context.Context, c config.Config) (res Result, err e
 			}
 			re = errors.Join(re, pe)
 		}
+		if pending != nil {
+			pending.State = "rolled-back"
+			if re != nil {
+				pending.State = "rollback-failed"
+			}
+			re = errors.Join(re, m.writeCandidate(pending))
+		}
 		if re == nil {
 			res.RollbackStatus = "succeeded"
 			m.publish(previous)
@@ -322,7 +363,18 @@ func (m *Manager) apply(ctx context.Context, c config.Config) (res Result, err e
 		}
 		return
 	}
-	m.good = &c
+	if candidate {
+		pending.State = "pending"
+		pending.Deadline = m.opts.Clock().Add(m.opts.ConfirmationTimeout)
+		if err = m.writeCandidate(pending); err != nil {
+			recovery, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			return Result{Stage: "candidate-persist"}, errors.Join(err, m.rollbackCandidate(recovery, pending))
+		}
+		m.armCandidate(pending)
+	} else {
+		m.good = &c
+	}
 	m.publish(&c)
 	res.Stage = "complete"
 	res.Warnings = []string{"SSH and system identity remain controlled by NixOS"}
@@ -345,6 +397,11 @@ func (m *Manager) apply(ctx context.Context, c config.Config) (res Result, err e
 			res.Stage = "awaiting-wan-lease"
 			res.Warnings = append(res.Warnings, "WAN DHCP client started; awaiting an IPv4 lease; WAN connectivity is unverified")
 		}
+	}
+	if candidate {
+		res.ActivationStage = res.Stage
+		res.Stage = "awaiting-confirmation"
+		res.Confirmation = &pending.Confirmation
 	}
 	return
 }
@@ -504,6 +561,9 @@ func (m *Manager) switchFiles(ctx context.Context, dir string) error {
 	})
 }
 func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Config, dir string) error {
+	if err := m.cmd(ctx, "nft", "-f", filepath.Join(dir, "firewall.nft")); err != nil {
+		return err
+	}
 	for _, unit := range []string{"wan6", "hostapd", "dnsmasq", "wan", "pppoe"} {
 		if e := m.cmd(ctx, "systemctl", "stop", "nixos-router-"+unit+".service"); e != nil {
 			return e
@@ -630,9 +690,6 @@ func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Con
 		return e
 	}
 	if e = m.cmd(ctx, "ip", "link", "set", "dev", c.WAN.Interface, "up"); e != nil {
-		return e
-	}
-	if e = m.cmd(ctx, "nft", "-f", filepath.Join(dir, "firewall.nft")); e != nil {
 		return e
 	}
 	if e = m.setIPv6Forwarding(ctx, c.LAN.BridgeName, c.IPv6.Enable && c.IPv6.LANPD); e != nil {
@@ -764,7 +821,7 @@ func (m *Manager) cleanup(ctx context.Context, c config.Config) error {
 	}
 	errs = append(errs, m.detach(ctx, c), m.removeBridge(ctx, c.LAN.BridgeName))
 	if _, e := m.run(ctx, "nft", "list", "table", "inet", "nixos_router"); e == nil {
-		errs = append(errs, m.cmd(ctx, "nft", "delete", "table", "inet", "nixos_router"))
+		errs = append(errs, m.installManagementGuard(ctx))
 	}
 	return errors.Join(errs...)
 }

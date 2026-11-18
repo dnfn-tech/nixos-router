@@ -186,6 +186,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/account/password", s.handlePasswordChange) // alias
 	mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("/api/v1/apply", s.handleApply)
+	mux.HandleFunc("/api/v1/apply/candidate", s.handleConfirmation)
+	mux.HandleFunc("/api/v1/apply/confirm", s.handleConfirmation)
 	mux.HandleFunc("/api/v1/jobs/", s.handleJobByID)
 	mux.HandleFunc("/api/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/api/v1/audit", s.handleAudit)

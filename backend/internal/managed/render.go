@@ -23,6 +23,9 @@ func ipv4(s string) bool {
 }
 func clean(s string) bool { return !strings.ContainsAny(s, "\r\n\x00") }
 func (m *Manager) validate(c config.Config) error {
+	if err := m.validateManagementConfig(c); err != nil {
+		return err
+	}
 	if e := c.Validate(); e != nil {
 		return e
 	}
@@ -285,7 +288,19 @@ func (m *Manager) render(c config.Config) map[string]string {
 	if routedWiFi(c) && c.WiFi.Network.AllowManagement {
 		managementInterfaces = append(managementInterfaces, fmt.Sprintf("%q", m.opts.WiFiInterface))
 	}
-	nft += fmt.Sprintf(" chain input { type filter hook input priority 0; policy accept; iifname != { %s } tcp dport { %s } drop;", strings.Join(managementInterfaces, ", "), strings.Join(managementPorts, ", "))
+	nft += " chain input { type filter hook input priority 0; policy accept;"
+	// Management gating precedes established-flow acceptance and optional firewall.
+	nft += fmt.Sprintf(" iifname { %s } tcp dport { %s } accept;", strings.Join(managementInterfaces, ", "), strings.Join(managementPorts, ", "))
+	for _, grant := range m.opts.ManagementAccess {
+		for _, prefix := range grant.Sources {
+			family := "ip"
+			if strings.Contains(prefix, ":") {
+				family = "ip6"
+			}
+			nft += fmt.Sprintf(" iifname %q %s saddr %s tcp dport { %s } accept;", grant.Interface, family, prefix, strings.Join(managementPorts, ", "))
+		}
+	}
+	nft += fmt.Sprintf(" tcp dport { %s } drop;", strings.Join(managementPorts, ", "))
 	if routedWiFi(c) {
 		wifi := fmt.Sprintf(" iifname %q ", m.opts.WiFiInterface)
 		nft += wifi + "ct state established,related accept;"

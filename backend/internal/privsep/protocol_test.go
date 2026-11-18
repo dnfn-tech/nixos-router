@@ -525,3 +525,43 @@ func TestExecutorExcludesLegacyDaemon(t *testing.T) {
 		t.Fatal("executor shared state with legacy daemon")
 	}
 }
+
+func TestConfirmationSurvivesAPIClientReplacement(t *testing.T) {
+	r := &protocolRunner{}
+	_, cfg, state := protocolFixture(t, r)
+	m, err := managed.New(managed.Options{StateDir: state, Interfaces: []string{"wan0", "lan0"}, ManagementPort: 8080, Runner: r, ConfirmationTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err = m.Restore(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	_, client, closeService := protocolService(t, m, state)
+	defer closeService()
+	cfg.System.Hostname = "pending-confirmation"
+	result, err := client.ApplyJob(context.Background(), "pending-job", cfg)
+	if err != nil || result.Confirmation == nil {
+		t.Fatal(result, err)
+	}
+	status, err := client.Candidate(context.Background())
+	if err != nil || status.ID != result.Confirmation.ID {
+		t.Fatal(status, err)
+	}
+	for i := 0; i < 2; i++ {
+		status, err = client.Confirm(context.Background(), status.ID)
+		if err != nil || status.State != "confirmed" {
+			t.Fatal(status, err)
+		}
+	}
+}
+
+func TestExecutorAdvertisesProtectedManagementPort(t *testing.T) {
+	m, _, state := protocolFixture(t, &protocolRunner{})
+	_, client, closeService := protocolService(t, m, state)
+	defer closeService()
+	port, err := client.ManagementPort(context.Background())
+	if err != nil || port != 8080 {
+		t.Fatal(port, err)
+	}
+}

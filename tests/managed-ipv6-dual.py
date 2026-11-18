@@ -39,6 +39,12 @@ def apply(config):
         result = json.loads(raw)
         if result["status"] in ("success", "failed"):
             assert result["status"] == "success", result
+            payload = result["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if payload.get("confirmation"):
+                confirmation = api("POST", "/apply/confirm", {"id": payload["confirmation"]["id"]})
+                assert confirmation["confirmation"]["state"] == "confirmed", confirmation
             return
     raise AssertionError("dual-stack configuration transaction timed out")
 

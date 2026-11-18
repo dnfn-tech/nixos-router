@@ -9,6 +9,8 @@ let
     "--bootstrap" "%d/bootstrap" "--interfaces" (lib.concatStringsSep "," m.interfaces)
     "--wifi-interface" m.wifiInterface "--country-code" m.countryCode
     "--management-port" (toString port)
+    "--management-access" (builtins.toJSON m.managementAccess)
+    "--confirmation-timeout" "${toString m.confirmationTimeoutSeconds}s"
     "--ssh-ports" (lib.concatMapStringsSep "," toString sshPorts)
     "--wan-udp-ports" (lib.concatMapStringsSep "," toString m.wanUDPPorts)
     "--modules" (lib.concatStringsSep "," m.modules) ];
@@ -17,6 +19,17 @@ let
   sshPorts = lib.optionals config.services.openssh.enable (lib.unique (config.services.openssh.ports
     ++ map (address: address.port)
       (lib.filter (address: address.port != null) config.services.openssh.listenAddresses)));
+  managementPorts = lib.unique ([ port ] ++ sshPorts);
+  bootGuard = pkgs.writeText "router-management-boot-guard.nft" ''
+    add table inet nixos_router
+    flush table inet nixos_router
+    table inet nixos_router {
+      chain input {
+        type filter hook input priority 0; policy accept;
+        iifname != "lo" tcp dport { ${lib.concatMapStringsSep ", " toString managementPorts} } drop;
+      }
+    }
+  '';
   current = "${cfg.stateDir}/managed/current";
   matchPort = builtins.match ".*:([0-9]+)$" cfg.address;
   port = if matchPort == null then 8080 else builtins.fromJSON (builtins.head matchPort);
@@ -169,12 +182,24 @@ in {
       default = [];
       description = "Trusted host UDP listeners allowed on the actual WAN exit (both address families), at most 64 entries. Does not trust overlay interfaces or permit forwarded traffic. Existing established connections follow connection tracking when an entry is removed.";
     };
+    managementAccess = lib.mkOption {
+      type = lib.types.listOf (lib.types.submodule {
+        options = {
+          interface = lib.mkOption { type = lib.types.str; description = "Exact externally managed ingress interface; no wildcard or owned WAN/LAN member."; };
+          sources = lib.mkOption { type = lib.types.listOf lib.types.str; description = "1..32 canonical IPv4/IPv6 source prefixes, no default route. Interface AND source must match."; };
+        };
+      });
+      default = [];
+      description = "At most 32 explicit external management grants for configured SSH/Web ports only. Empty trusts no overlays. Does not own or configure the nominated interfaces.";
+    };
+    confirmationTimeoutSeconds = lib.mkOption { type = lib.types.ints.between 10 600; default = 120; description = "Executor-owned candidate confirmation window; unconfirmed changes roll back. Bootstrap establishes the initial recovery baseline and requires independent console access."; };
     countryCode = lib.mkOption { type = lib.types.str; default = "CN"; description = "Regulatory country for the dedicated AP."; };
     bootstrapConfigFile = lib.mkOption { type = lib.types.str; default = ""; description = "Runtime path to initial JSON, copied only when config.json does not exist. Keep real secrets outside the Nix store."; };
     adminPasswordFile = lib.mkOption { type = lib.types.str; default = ""; description = "Runtime secret file for initial administrator creation; ignored after an account exists."; };
   };
   config = lib.mkIf (cfg.enable && m.enable) {
     assertions = [
+      { assertion = builtins.length m.managementAccess <= 32 && lib.all (grant: builtins.length grant.sources >= 1 && builtins.length grant.sources <= 32 && !(lib.elem grant.interface m.interfaces) && grant.interface != m.wifiInterface) m.managementAccess; message = "nixos-router management grants must be bounded and separate from owned interfaces."; }
       { assertion = builtins.length m.wanUDPPorts <= 64 && lib.all (port: port >= 1) m.wanUDPPorts; message = "nixos-router managed WAN UDP allowlist permits at most 64 ports in 1..65535."; }
       { assertion = m.apiStateDir != cfg.stateDir && !(lib.hasPrefix "${cfg.stateDir}/" m.apiStateDir) && !(lib.hasPrefix "${m.apiStateDir}/" cfg.stateDir); message = "nixos-router API and executor state directories must not overlap."; }
       { assertion = !cfg.allowReboot; message = "nixos-router managed API does not yet support a privileged reboot RPC; leave allowReboot disabled."; }
@@ -198,6 +223,20 @@ in {
     boot.kernelModules = [ "ppp_generic" "pppoe" ];
     users.groups.nixos-router-api = {};
     users.users.nixos-router-api = { isSystemUser = true; group = "nixos-router-api"; };
+    # Protect system-owned SSH even before interface setup/executor readiness.
+    systemd.services.nixos-router-management-guard = {
+      description = "Install early fail-closed router management guard";
+      wantedBy = [ "network-pre.target" ];
+      requiredBy = [ "nixos-router-executor.service" ] ++ lib.optional config.services.openssh.enable (if config.services.openssh.startWhenNeeded then "sshd.socket" else "sshd.service");
+      before = [ "network-pre.target" "nixos-router-executor.service" "sshd.service" "sshd.socket" ];
+      after = [ "local-fs.target" ];
+      unitConfig.DefaultDependencies = false;
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${pkgs.nftables}/bin/nft -f ${bootGuard}";
+      };
+    };
     systemd.services.nixos-router-state-init = {
       description = "Prepare private router API state without moving runtime configuration";
       before = [ "nixos-router-executor.service" "nixos-router-backend.service" ];

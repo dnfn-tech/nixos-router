@@ -21,12 +21,30 @@ let
   cfg = evaluate {};
   failures = c: lib.filter (a: !a.assertion) c.assertions;
 in {
+  managementPolicy = let c = evaluate {services.nixos-router.backend.managed = {
+    confirmationTimeoutSeconds = 45;
+    managementAccess = [{ interface = "zt-test"; sources = [ "10.66.0.2/32" "fd66::2/128" ]; }];
+  };}; in
+    assert lib.assertMsg (failures c == []) "management policy evaluation failed";
+    assert lib.hasInfix "--management-access" c.systemd.services.nixos-router-executor.serviceConfig.ExecStart;
+    assert lib.hasInfix "zt-test" c.systemd.services.nixos-router-executor.serviceConfig.ExecStart;
+    assert lib.hasInfix "45s" c.systemd.services.nixos-router-executor.serviceConfig.ExecStart;
+    true;
+  socketSSHGuard = let c = evaluate {services.openssh = {enable=true;startWhenNeeded=true;};}; in
+    assert lib.elem "sshd.socket" c.systemd.services.nixos-router-management-guard.requiredBy;
+    assert lib.elem "sshd.socket" c.systemd.services.nixos-router-management-guard.before;
+    true;
+  ownedManagementRejected = failures (evaluate {services.nixos-router.backend.managed.managementAccess = [{interface="eth1"; sources=["10.0.0.1/32"];}];}) != [];
   integrated = assert lib.assertMsg (failures cfg == []) (lib.concatMapStringsSep "\n" (a:a.message) (failures cfg));
     assert !cfg.services.nixos-router.backend.applyReload;
     assert !cfg.services.nixos-router.backend.privilegedApply;
     assert !cfg.services.nixos-router.backend.consumeGenerated;
     assert cfg.systemd.services.nixos-router-backend.environment.NIXOS_ROUTER_MANAGED == "1";
     assert cfg.systemd.services.nixos-router-executor.environment.NIXOS_ROUTER_MANAGED_SSH_PORTS == "";
+    assert lib.elem "network-pre.target" cfg.systemd.services.nixos-router-management-guard.before;
+    assert lib.elem "sshd.service" cfg.systemd.services.nixos-router-management-guard.before;
+    assert lib.elem "nixos-router-executor.service" cfg.systemd.services.nixos-router-management-guard.requiredBy;
+    assert cfg.systemd.services.nixos-router-management-guard.unitConfig.DefaultDependencies == false;
     assert cfg.systemd.services.nixos-router-dnsmasq.serviceConfig.Type == "forking";
     assert builtins.hasAttr "nixos-router-wan" cfg.systemd.services;
     assert builtins.hasAttr "nixos-router-wan6" cfg.systemd.services;

@@ -42,6 +42,7 @@ jobs:
           # Run one VM suite at a time on the shared runner.
           nix build --keep-going --max-jobs 1 \
             .#checks.x86_64-linux.vm-router \
+            .#checks.x86_64-linux.vm-management-safety \
             .#checks.x86_64-linux.vm-privsep \
             .#checks.x86_64-linux.vm-managed-router \
             .#checks.x86_64-linux.vm-managed-adblock \

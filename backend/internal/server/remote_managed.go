@@ -56,7 +56,7 @@ func (s *Server) reconcileRemoteJob(ctx context.Context, j db.Job) (db.Job, erro
 	if status == "interrupted" {
 		status = "failed"
 	}
-	payload := map[string]interface{}{"jobId": j.ID, "mode": "managed-runtime", "executor": true, "configRevision": marker.ConfigRevision, "status": status, "executorStatus": remote.Status, "stage": remote.Result.Stage, "appliedRuntime": remote.Status == "success", "rollbackStatus": remote.Result.RollbackStatus, "warnings": remote.Result.Warnings}
+	payload := map[string]interface{}{"jobId": j.ID, "mode": "managed-runtime", "executor": true, "configRevision": marker.ConfigRevision, "status": status, "executorStatus": remote.Status, "stage": remote.Result.Stage, "appliedRuntime": remote.Status == "success", "rollbackStatus": remote.Result.RollbackStatus, "warnings": remote.Result.Warnings, "confirmation": remote.Result.Confirmation, "activationStage": remote.Result.ActivationStage}
 	if remote.Error != "" {
 		payload["error"] = remote.Error
 	}

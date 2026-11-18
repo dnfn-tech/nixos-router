@@ -46,6 +46,10 @@ def apply(config):
             payload = result["payload"]
             if isinstance(payload, str):
                 payload = json.loads(payload)
+            if payload.get("confirmation"):
+                confirmation = api("POST", "/apply/confirm", {"id": payload["confirmation"]["id"]})
+                assert confirmation["confirmation"]["state"] == "confirmed", confirmation
+                payload["stage"] = payload["activationStage"]
             return payload
     raise Exception("configuration transaction timed out")
 

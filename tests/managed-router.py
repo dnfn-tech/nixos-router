@@ -46,6 +46,10 @@ def apply(config, success=True):
             payload = json.loads(result["payload"]) if isinstance(result["payload"], str) else result["payload"]
             assert payload["configRevision"] == revision, result
             if success:
+                if payload.get("confirmation"):
+                    confirmation = api("POST", "/apply/confirm", {"id": payload["confirmation"]["id"]})
+                    assert confirmation["confirmation"]["state"] == "confirmed", confirmation
+                    payload["stage"] = payload["activationStage"]
                 assert payload["stage"] in ("complete", "awaiting-wan-lease"), result
                 if payload["stage"] == "awaiting-wan-lease":
                     assert payload["warnings"], result
@@ -281,6 +285,7 @@ for node in [client, observer]:
 base = "http://192.168.60.1:8080/api/v1"
 api("POST", "/session", {"username":"admin", "password":"test-password-123"})
 assert api("GET", "/jobs/" + moved_job)["status"] == "success"
+assert api("POST", "/apply/confirm", {"id": payload["confirmation"]["id"]})["confirmation"]["state"] == "confirmed"
 client.succeed("dig +short @192.168.60.1 test.isp | grep -Fx 10.0.0.1")
 router.fail("ip -4 addr show br-lan | grep 192.168.50.1")
 print("MANAGED_NETWORK_BASELINE_PASS")

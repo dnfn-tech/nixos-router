@@ -45,8 +45,9 @@ type applyRequest struct {
 	Config *config.Config `json:"config"`
 }
 type appliedResponse struct {
-	Config    config.Config `json:"config"`
-	Available bool          `json:"available"`
+	ManagementPort int           `json:"managementPort"`
+	Config         config.Config `json:"config"`
+	Available      bool          `json:"available"`
 }
 type Executor struct {
 	runtime    Runtime
@@ -147,6 +148,35 @@ func (e *Executor) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.Method == "GET" && r.URL.Path == "/v1/candidate":
+		control, ok := e.runtime.(managed.ConfirmationControl)
+		if !ok {
+			rpcError(w, 503, "confirmation_unavailable")
+			return
+		}
+		status, err := control.Candidate(r.Context())
+		if err != nil {
+			rpcError(w, 503, "candidate_unavailable")
+			return
+		}
+		rpcJSON(w, 200, map[string]any{"confirmation": status})
+	case r.Method == "POST" && r.URL.Path == "/v1/confirm":
+		control, ok := e.runtime.(managed.ConfirmationControl)
+		if !ok {
+			rpcError(w, 503, "confirmation_unavailable")
+			return
+		}
+		id, err := managed.DecodeConfirmationID(http.MaxBytesReader(w, r.Body, 4096))
+		if err != nil {
+			rpcError(w, 400, "invalid_confirmation")
+			return
+		}
+		status, err := control.Confirm(r.Context(), id)
+		if err != nil {
+			rpcError(w, 409, "confirmation_rejected")
+			return
+		}
+		rpcJSON(w, 200, map[string]any{"confirmation": status})
 	case r.Method == "POST" && r.URL.Path == "/v1/jobs":
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 		dec := json.NewDecoder(r.Body)
@@ -217,7 +247,11 @@ func (e *Executor) handle(w http.ResponseWriter, r *http.Request) {
 		rpcJSON(w, 200, leases)
 	case r.Method == "GET" && r.URL.Path == "/v1/applied":
 		c, ok := e.runtime.AppliedConfig()
-		rpcJSON(w, 200, appliedResponse{Config: c, Available: ok})
+		port := 0
+		if policy, ok := e.runtime.(interface{ ManagementPort() int }); ok {
+			port = policy.ManagementPort()
+		}
+		rpcJSON(w, 200, appliedResponse{Config: c, Available: ok, ManagementPort: port})
 	default:
 		rpcError(w, 404, "unknown_operation")
 	}

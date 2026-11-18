@@ -71,7 +71,7 @@ func (s *Server) handleManagedApply(w http.ResponseWriter, r *http.Request) {
 			status = "failed"
 			message = runErr.Error()
 		}
-		payload := map[string]interface{}{"jobId": id, "mode": "managed-runtime", "configRevision": cfg.Revision, "status": status, "stage": result.Stage, "appliedRuntime": runErr == nil, "rollbackStatus": result.RollbackStatus, "warnings": result.Warnings}
+		payload := map[string]interface{}{"jobId": id, "mode": "managed-runtime", "configRevision": cfg.Revision, "status": status, "stage": result.Stage, "appliedRuntime": runErr == nil, "rollbackStatus": result.RollbackStatus, "warnings": result.Warnings, "confirmation": result.Confirmation, "activationStage": result.ActivationStage}
 		if durable {
 			payload["executor"] = true
 		}
