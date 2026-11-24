@@ -181,6 +181,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/clients", s.handleClients)
 	mux.HandleFunc("/api/v1/clients/", s.handleClientItem)
 	mux.HandleFunc("/api/v1/capabilities/wifi", s.handleWifiCaps)
+	mux.HandleFunc("/api/v1/wifi/stations", s.handleWiFiStations)
+	mux.HandleFunc("/api/v1/wifi/channel", s.handleWiFiChannel)
+	mux.HandleFunc("/api/v1/wifi/reevaluate", s.handleWiFiReevaluate)
 	mux.HandleFunc("/api/v1/session", s.handleSession)
 	mux.HandleFunc("/api/v1/session/password", s.handlePasswordChange)
 	mux.HandleFunc("/api/v1/account/password", s.handlePasswordChange) // alias

@@ -995,8 +995,32 @@
         field(lease,"mac","无线租约 MAC"), field(lease,"comment","无线租约备注"),
       ], () => ({hostname:"",ip:"",mac:"",comment:""}));
       const originalNames = new WeakMap(d.aps.map((ap) => [ap, ap.ssid]));
+      const channelStatus = state.wifiChannel;
+      const stations = state.wifiStations;
+      const channelReasons = {
+        "last legal channel": "沿用上次仍合法的信道",
+        "deterministic legal fallback": "按固定顺序选择合法信道",
+        "survey and neighbor interference": "根据忙碌度与邻居干扰选择",
+        "fixed configuration": "手动固定配置",
+        "current channel remains preferred": "当前信道仍较合适",
+        "waiting for sustained congestion": "等待确认持续拥塞",
+        "channel change cooling down": "换台冷却中",
+        "associated clients present; change deferred": "存在关联客户端，已延后换台",
+        "scan unavailable; kept current channel": "扫描不可用，保持当前信道",
+        "observed channel differs from last selection": "实际信道与上次选择不同",
+      };
+      const channelReason = channelStatus?.reason?.startsWith("sustained congestion;") ? "持续拥塞，已选择更合适的信道" : channelReasons[channelStatus?.reason] || channelStatus?.reason || "未提供";
+      const live = card("无线运行状态",
+        channelStatus?.available ? notice(`模式：${channelStatus.mode === "auto" ? "自动" : "固定"} · 当前信道：${channelStatus.channel || "未知"} · 原因：${channelReason}`) : unavailable(channelStatus?.reason || "当前信道无法查询"),
+        btn("立即重新评估", async () => {
+          try { await api("/api/v1/wifi/reevaluate", { method: "POST", timeout: 45000 }); await renderRoute(); }
+          catch (e) { alert(e.message || "重新评估失败"); }
+        }),
+        stations?.available ? (stations.stations?.length ? table(["MAC", "IP", "主机名", "信号", "连接时长"], stations.stations.map(s => [s.mac, s.ip || "—", s.hostname || "—", s.signalDBm ? `${s.signalDBm} dBm` : "—", `${s.connectedSeconds || 0} 秒`]), "真实关联客户端") : notice("当前没有关联客户端")) : unavailable(stations?.reason || "关联客户端查询失败"),
+      );
       const form = editor(
         wifiCapabilitiesNotice(),
+        live,
         formCard(
           "无线设置",
           fields(
@@ -1010,6 +1034,14 @@
           "接入点",
           d.aps,
           (ap) => {
+            ap.channelMode ||= ap.channel ? "fixed" : "auto";
+            const fixedChannel = field(ap, "channel", "固定信道", { type: "number", help: "固定模式只允许监管域和硬件支持的信道。" });
+            const fixedInput = fixedChannel.querySelector("input");
+            fixedInput.disabled = ap.channelMode !== "fixed";
+            const channelMode = field(ap, "channelMode", "信道模式", { choices: [["auto", "自动"], ["fixed", "固定"]], change: () => {
+              fixedInput.disabled = ap.channelMode !== "fixed";
+              if (ap.channelMode === "auto") { ap.channel = 0; fixedInput.value = "0"; }
+            } });
             const originalSSID = originalNames.get(ap);
             const password = field(ap, "psk", "无线密码", {
               type: "password",
@@ -1039,13 +1071,12 @@
               }),
               field(ap, "channelWidthMHz", "信道带宽", {
                 type: "number",
-                choices: [[0, "默认（20 MHz）"], [20, "20 MHz"], [40, "40 MHz"], [80, "80 MHz"]],
-                help: "80 MHz 需要 5 GHz 和 WiFi 5 或更新标准；全部子信道均须允许发射。",
+                choices: [[0, "默认（20 MHz）"], [-1, "自动"], [20, "20 MHz"], [40, "40 MHz"], [80, "80 MHz"]],
+                help: "自动选择实时可用的非 DFS 20、40 或 80 MHz 带宽；全部子信道均须允许发射。",
               }),
-              field(ap, "channel", "信道", {
-                type: "number",
-                help: "受管模式需要显式信道；5 GHz 当前支持列出的非 DFS 信道，165 仅支持 20 MHz。",
-              }),
+              node("details", {}, node("summary", {}, "高级信道设置"),
+                channelMode, fixedChannel,
+              ),
               field(ap, "security", "安全模式", {
                 choices: [
                   ["", "WPA2-PSK（兼容现有配置）"],
@@ -1070,6 +1101,7 @@
             channelWidthMHz: 0,
             band: "2g",
             channel: 0,
+            channelMode: "auto",
             psk: "",
             enable: true,
             guest: false,
@@ -2164,7 +2196,7 @@
       });
     try {
       const needsStatus = ["overview", "wan", "lan", "system"].includes(id);
-      const [response, health, status, clients, jobs, audit, wifiCaps, manifest] =
+      const [response, health, status, clients, jobs, audit, wifiCaps, manifest, wifiChannel, wifiStations] =
         await Promise.all([
           api("/api/v1/config"),
           optional(api("/api/v1/health")),
@@ -2180,6 +2212,8 @@
             : null,
           id === "wifi" ? optional(api("/api/v1/capabilities/wifi")) : null,
           optional(api("/api/v1/plugins")),
+          id === "wifi" ? optional(api("/api/v1/wifi/channel")) : null,
+          id === "wifi" ? optional(api("/api/v1/wifi/stations")) : null,
         ]);
       if (epoch !== state.epoch || !state.loggedIn) return;
       const cfg = response.config || response;
@@ -2189,6 +2223,8 @@
       if (health?.deployment?.mode)
         state.confirmedCapabilities = clone(health.capabilities || {});
       state.wifiCaps = wifiCaps;
+      state.wifiChannel = wifiChannel;
+      state.wifiStations = wifiStations;
       state.modules = manifest?.plugins || null;
       navigation(id);
       deployment();
@@ -2244,17 +2280,34 @@
     if (epoch === state.epoch && id === "overview") scheduleOverviewRefresh(epoch);
   }
   function scheduleOverviewRefresh(epoch) {
-    refreshTimer = setTimeout(() => {
-      if (epoch !== state.epoch || !state.loggedIn || state.route !== "overview") return;
-      if (
+    refreshTimer = setTimeout(async () => {
+      const current = () =>
+        epoch === state.epoch && state.loggedIn && state.route === "overview";
+      const canRefresh = () =>
         document.visibilityState === "visible" &&
         !state.busy &&
-        !document.querySelector("dialog[open]")
-      ) {
-        renderRoute();
-      } else {
-        // Pausing a tick must not stop future polling after visibility or work changes.
-        scheduleOverviewRefresh(epoch);
+        !document.querySelector("dialog[open]");
+      if (!current()) return;
+      try {
+        if (!canRefresh()) return;
+        const [status, clients] = await Promise.all([
+          api("/api/v1/status"),
+          api("/api/v1/clients"),
+        ]);
+        if (!current() || !canRefresh()) return;
+        const target = $("#page-content");
+        const content = overview(state.configCache, status, clients);
+        if (
+          !target.contains(document.activeElement) &&
+          !target.firstElementChild?.isEqualNode(content)
+        ) {
+          target.replaceChildren(content);
+        }
+      } catch {
+        // Keep the last rendered data during a transient polling failure.
+        // The API helper still handles expired sessions.
+      } finally {
+        if (current()) scheduleOverviewRefresh(epoch);
       }
     }, 15000);
   }

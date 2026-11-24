@@ -613,7 +613,7 @@ func TestFailedBridgeTaggingRemovesOnlyJustCreatedBridge(t *testing.T) {
 }
 
 func TestFiveGHzRejectsDFSAndInvalidChannelsBeforeCommands(t *testing.T) {
-	for _, channel := range []int{0, 37, 52, 56, 60, 64, 100, 116, 132, 144, 166} {
+	for _, channel := range []int{37, 52, 56, 60, 64, 100, 116, 132, 144, 166} {
 		t.Run(fmt.Sprint(channel), func(t *testing.T) {
 			m, r, c := fixture(t)
 			c.WiFi.Enable = true

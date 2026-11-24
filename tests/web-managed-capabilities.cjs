@@ -80,6 +80,31 @@ async function waitAction(page, id) {
 }
 
 const managedHealth = {ok:true,deployment:{mode:"runtime",profile:"ipv4-single-lan"},capabilities:{managedNetwork:true,unsupported:["pppoe","ipv6","qos","ddns","parental","plugins","upnp","guest"],hostManaged:["ssh","system"]}};
+test("WiFi page shows measured stations and automatic channel status",async()=>{
+ const {page,context}=await pageAt("wifi");
+ try {
+  await page.route("**/api/v1/wifi/channel",route=>route.fulfill({json:{available:true,mode:"auto",channel:6,reason:"survey and neighbor interference"}}));
+  await page.route("**/api/v1/wifi/stations",route=>route.fulfill({json:{available:true,source:"iw",stations:[{mac:"aa:bb:cc:dd:ee:ff",ip:"192.0.2.10",hostname:"device",signalDBm:-55,connectedSeconds:42}]}}));
+  await page.locator("#page-refresh").click();
+  await page.waitForFunction(()=>!window.app.state.loading);
+  const content=await page.locator("#page-content").innerText();
+  assert.match(content,/当前信道：6/);
+  assert.match(content,/aa:bb:cc:dd:ee:ff/);
+  assert.match(content,/192.0.2.10/);
+ } finally {await context.close()}
+});
+test("WiFi page distinguishes zero stations from query failure",async()=>{
+ const {page,context}=await pageAt("wifi");
+ try {
+  await page.route("**/api/v1/wifi/stations",route=>route.fulfill({json:{available:true,source:"iw",stations:[]}}));
+  await page.locator("#page-refresh").click();await page.waitForFunction(()=>!window.app.state.loading);
+  assert.match(await page.locator("#page-content").innerText(),/当前没有关联客户端/);
+  await page.unroute("**/api/v1/wifi/stations");
+  await page.route("**/api/v1/wifi/stations",route=>route.fulfill({json:{available:false,reason:"Cannot query associated stations"}}));
+  await page.locator("#page-refresh").click();await page.waitForFunction(()=>!window.app.state.loading);
+  assert.match(await page.locator("#page-content").innerText(),/Cannot query associated stations/);
+ } finally {await context.close()}
+});
 test("managed UI identifies detected radio and NixOS-owned settings",async()=>{
  const {page,context}=await pageAt("wifi");
  try {

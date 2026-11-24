@@ -56,12 +56,18 @@ type Result struct {
 	ActivationStage string        `json:"activationStage,omitempty"`
 }
 type Manager struct {
-	opts      Options
-	allowed   map[string]bool
-	mu        sync.Mutex
-	good      *config.Config
-	published atomic.Pointer[config.Config]
-	timer     *time.Timer
+	opts              Options
+	allowed           map[string]bool
+	mu                sync.Mutex
+	wifiSelectedWidth int // resolved automatic width, guarded by mu
+	wifiSelected      int // guarded by mu; effective channel is never persisted as user intent
+	wifiReason        string
+	wifiBusySamples   int
+	wifiLastSwitch    time.Time
+	wifiMonitor       *time.Timer
+	good              *config.Config
+	published         atomic.Pointer[config.Config]
+	timer             *time.Timer
 }
 
 func New(o Options) (*Manager, error) {
@@ -283,6 +289,7 @@ func (m *Manager) Restore(ctx context.Context, bootstrap config.Config) error {
 }
 func (m *Manager) apply(ctx context.Context, c config.Config, candidate bool) (res Result, err error) {
 	// Called only under the process mutex and cross-process transaction lock.
+	previousChannel, previousWidth, previousReason := m.wifiSelected, m.wifiSelectedWidth, m.wifiReason
 	// Defer until activation/recovery no longer needs intermediate candidates.
 	defer func() {
 		if cleanupErr := m.pruneGenerations(2); cleanupErr != nil {
@@ -297,6 +304,7 @@ func (m *Manager) apply(ctx context.Context, c config.Config, candidate bool) (r
 	res.Stage = "preflight"
 	dir, e := m.prepare(ctx, c)
 	if e != nil {
+		m.wifiSelected, m.wifiSelectedWidth, m.wifiReason = previousChannel, previousWidth, previousReason
 		return res, e
 	}
 	previous := m.good
@@ -357,8 +365,16 @@ func (m *Manager) apply(ctx context.Context, c config.Config, candidate bool) (r
 		if re == nil {
 			res.RollbackStatus = "succeeded"
 			m.publish(previous)
+			if previous != nil {
+				m.recordWiFiSelection(*previous)
+			} else {
+				m.wifiSelected = 0
+				m.wifiReason = ""
+			}
 		} else {
 			m.publish(nil)
+			m.wifiSelected = 0
+			m.wifiReason = "runtime channel unknown after failed rollback"
 			err = fmt.Errorf("%w; rollback failed: %v", err, re)
 		}
 		return
@@ -376,6 +392,9 @@ func (m *Manager) apply(ctx context.Context, c config.Config, candidate bool) (r
 		m.good = &c
 	}
 	m.publish(&c)
+	if !candidate {
+		m.recordWiFiSelection(c)
+	}
 	res.Stage = "complete"
 	res.Warnings = []string{"SSH and system identity remain controlled by NixOS"}
 	if c.WAN.Mode == "pppoe" {

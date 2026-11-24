@@ -44,7 +44,7 @@ func (c Capabilities) Supports(ap config.WiFiAP) error {
 	}
 	for _, ch := range p.Channels {
 		observed := c.Channels[frequency(ch)]
-		if observed == nil || observed.Number != ch || observed.Band != band || observed.Restricted || !observed.Widths["20MHz"] {
+		if observed == nil || observed.Number != ch || observed.Band != band || observed.Restricted || observed.Disabled || observed.NoIR || observed.Radar || !observed.Widths["20MHz"] {
 			return fmt.Errorf("channel %d unavailable for AP transmission", ch)
 		}
 		if p.WidthMHz == 80 && !observed.Widths["VHT80"] {

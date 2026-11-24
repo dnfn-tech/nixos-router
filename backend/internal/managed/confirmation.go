@@ -162,6 +162,7 @@ func (m *Manager) Confirm(ctx context.Context, id string) (*Confirmation, error)
 	c := clone(r.Candidate)
 	m.good = &c
 	m.publish(&c)
+	m.recordWiFiSelection(c)
 	if m.timer != nil {
 		m.timer.Stop()
 	}
@@ -221,6 +222,7 @@ func (m *Manager) rollbackCandidate(ctx context.Context, r *candidateRecord) err
 		return err
 	}
 	m.publish(&r.Previous)
+	m.recordWiFiSelection(r.Previous)
 	return nil
 }
 

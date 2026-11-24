@@ -1195,6 +1195,83 @@ test("overview polling resumes after hidden or busy ticks and stops on navigatio
   }
 });
 
+test("overview polling keeps content through slow and failed requests, ignores stale responses, and preserves focus", async () => {
+  const { page, context } = await pageAt("plugins");
+  try {
+    await page.evaluate(() => {
+      const originalSet = window.setTimeout, originalClear = window.clearTimeout;
+      const timers = new Map();
+      let serial = -1;
+      window.setTimeout = (fn, delay, ...args) => {
+        if (delay !== 15000) return originalSet(fn, delay, ...args);
+        const id = serial--;
+        timers.set(id, () => fn(...args));
+        return id;
+      };
+      window.clearTimeout = (id) => {
+        if (!timers.delete(id)) originalClear(id);
+      };
+      window.overviewTimers = timers;
+      window.fireOverviewTick = () => {
+        const [id, fn] = timers.entries().next().value;
+        timers.delete(id);
+        fn();
+      };
+    });
+    await navigate(page, "overview");
+    const pending = [];
+    await page.route("**/api/v1/clients", route => pending.push(route));
+    const tick = async () => {
+      const count = pending.length;
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+        window.app.state.busy = false;
+        window.fireOverviewTick();
+      });
+      await page.waitForFunction(async count => (await window.pendingClientsCount()) > count, count);
+    };
+    await page.exposeFunction("pendingClientsCount", () => pending.length);
+    const oldContent = await page.locator("#page-content").innerText();
+    await tick();
+    assert.equal(await page.locator("#page-content").innerText(), oldContent);
+    assert.equal(await page.locator("#page-content").getAttribute("aria-busy"), "false");
+    assert.equal(await page.getByText("页面加载中").count(), 0);
+    await pending.shift().fulfill({ status: 503, json: { error: "temporary" } });
+    await page.waitForFunction(() => window.overviewTimers.size === 1);
+    assert.equal(await page.locator("#page-content").innerText(), oldContent);
+
+    await tick();
+    const focus = await page.evaluate(() => {
+      const input = document.createElement("input");
+      input.id = "overview-focus-probe";
+      document.querySelector("#page-content").append(input);
+      input.focus();
+      return document.activeElement === input;
+    });
+    assert.equal(focus, true);
+    await pending.shift().fulfill({ json: { source: "leases", clients: [{ hostname: "poll-client" }] } });
+    await page.waitForFunction(() => window.overviewTimers.size === 1);
+    assert.equal(await page.locator("#overview-focus-probe").evaluate(el => document.activeElement === el), true);
+    assert.equal(await page.locator("#page-content").innerText(), oldContent);
+
+    await page.evaluate(() => document.activeElement.blur());
+    await tick();
+    await pending.shift().fulfill({ json: { source: "leases", clients: [{ hostname: "poll-client" }] } });
+    await page.waitForFunction(() => document.querySelector("#page-content .metric-value") &&
+      [...document.querySelectorAll("#page-content .metric-value")].some(el => el.textContent === "1"));
+    assert.equal(await page.locator("#overview-focus-probe").count(), 0);
+
+    await tick();
+    await navigate(page, "wan");
+    const wanContent = await page.locator("#page-content").innerText();
+    await pending.shift().fulfill({ json: { source: "leases", clients: [] } });
+    assert.equal(await page.locator("#page-content").innerText(), wanContent);
+    assert.equal(await page.evaluate(() => window.overviewTimers.size), 0);
+  } finally {
+    await context.close();
+  }
+});
+
 for (const persistent of [false, true]) {
   test(`apply polling survives ${persistent ? "persistent" : "transient"} disconnect without resubmitting`, async () => {
     const { page, context } = await pageAt("plugins");

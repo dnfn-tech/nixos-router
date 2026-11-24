@@ -20,6 +20,7 @@ import (
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
+	"github.com/dnfn-tech/nixos-router/backend/internal/wifi"
 )
 
 // Leave room for the fixed RPC envelope and bounded job ID around a full draft.
@@ -112,7 +113,7 @@ func (e *Executor) Serve(l net.Listener) error {
 		e.mu.Unlock()
 		return errors.New("executor already serving or closed")
 	}
-	srv := &http.Server{Handler: http.HandlerFunc(e.handle), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	srv := &http.Server{Handler: http.HandlerFunc(e.handle), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	e.http = srv
 	e.mu.Unlock()
 	return srv.Serve(l)
@@ -148,6 +149,48 @@ func (e *Executor) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.Method == "GET" && r.URL.Path == "/v1/wifi/channel":
+		observer, ok := e.runtime.(interface {
+			WiFiChannel(context.Context) (managed.WiFiChannelStatus, error)
+		})
+		if !ok {
+			rpcError(w, 503, "wifi_unavailable")
+			return
+		}
+		status, err := observer.WiFiChannel(r.Context())
+		if err != nil {
+			rpcError(w, 503, "wifi_query_failed")
+			return
+		}
+		rpcJSON(w, 200, status)
+	case r.Method == "POST" && r.URL.Path == "/v1/wifi/reevaluate":
+		observer, ok := e.runtime.(interface {
+			ReevaluateWiFi(context.Context) (managed.WiFiChannelStatus, error)
+		})
+		if !ok {
+			rpcError(w, 503, "wifi_unavailable")
+			return
+		}
+		status, err := observer.ReevaluateWiFi(r.Context())
+		if err != nil {
+			rpcError(w, 409, "wifi_evaluation_failed")
+			return
+		}
+		rpcJSON(w, 200, status)
+	case r.Method == "GET" && r.URL.Path == "/v1/wifi/stations":
+		observer, ok := e.runtime.(interface {
+			Stations(context.Context) ([]wifi.Station, error)
+		})
+		if !ok {
+			rpcError(w, 503, "wifi_unavailable")
+			return
+		}
+		stations, err := observer.Stations(r.Context())
+		if err != nil {
+			rpcError(w, 503, "wifi_query_failed")
+			return
+		}
+		rpcJSON(w, 200, stations)
 	case r.Method == "GET" && r.URL.Path == "/v1/candidate":
 		control, ok := e.runtime.(managed.ConfirmationControl)
 		if !ok {

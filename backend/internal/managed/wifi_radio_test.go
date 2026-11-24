@@ -3,9 +3,11 @@ package managed
 import (
 	"context"
 	"fmt"
-	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 )
 
 func TestAdvancedWiFiFailsClosedWithoutCapabilityObservation(t *testing.T) {
@@ -22,9 +24,161 @@ func TestAdvancedWiFiFailsClosedWithoutCapabilityObservation(t *testing.T) {
 	}
 }
 
+func TestAutomaticWiFiUsesLegalFallbackWhenScanUnavailable(t *testing.T) {
+	m, rec, c := fixture(t)
+	m.opts.Runner = &radioRunner{recorder: rec}
+	c.WiFi.Enable = true
+	c.WiFi.APs = []config.WiFiAP{{Enable: true, SSID: "radio", PSK: "private-password", Band: "5g", Standard: "wifi6", ChannelWidthMHz: 80, ChannelMode: "auto"}}
+	_, err := m.Apply(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.wifiSelected != 149 {
+		t.Fatalf("selected %d", m.wifiSelected)
+	}
+	status, _ := m.WiFiChannel(context.Background())
+	if status.Mode != "auto" || status.Channel != 149 {
+		t.Fatal(status)
+	}
+}
+
+func TestAutomaticWidthRendersResolvedPlanAndKeepsSavedIntent(t *testing.T) {
+	m, rec, c := fixture(t)
+	m.opts.Runner = &radioRunner{recorder: rec}
+	c.WiFi.Enable = true
+	c.WiFi.APs = []config.WiFiAP{{Enable: true, SSID: "radio", PSK: "private-password", Band: "5g", Standard: "wifi6", ChannelWidthMHz: config.WiFiAutoWidthMHz}}
+	if _, err := m.Apply(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if m.wifiSelectedWidth != 80 || m.good.WiFi.APs[0].ChannelWidthMHz != config.WiFiAutoWidthMHz || m.good.WiFi.APs[0].Channel != 0 {
+		t.Fatalf("resolved width %d or saved intent is incorrect", m.wifiSelectedWidth)
+	}
+	if host := m.render(c)["hostapd.conf"]; !strings.Contains(host, "vht_oper_chwidth=1\n") {
+		t.Fatal("resolved 80 MHz missing from hostapd configuration")
+	}
+}
+
 type radioRunner struct {
 	*recorder
 	restricted bool
+}
+
+type congestedRadioRunner struct {
+	*radioRunner
+	emptyStations bool
+	switchFails   bool
+	channel       int
+}
+
+func (r *congestedRadioRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	if name == "hostapd_cli" {
+		command := strings.Join(args, " ")
+		if strings.Contains(command, " chan_switch ") {
+			if r.switchFails {
+				return "FAIL\n", nil
+			}
+			r.channel = 153
+			return "OK\n", nil
+		}
+		if strings.HasSuffix(command, " status") {
+			return fmt.Sprintf("state=ENABLED\nfreq=%d\n", 5000+5*r.channel), nil
+		}
+	}
+	if name == "iw" {
+		switch strings.Join(args, " ") {
+		case "dev wlan0 info":
+			if r.channel == 0 {
+				r.channel = 149
+			}
+			return fmt.Sprintf("Interface wlan0\n wiphy 0\n channel %d\n", r.channel), nil
+		case "dev wlan0 scan":
+			return "BSS 00:11:22:33:44:55 (on wlan0)\n signal: -35.00 dBm\n DS Parameter set: channel 149\n", nil
+		case "dev wlan0 survey dump":
+			return "frequency: 5745 MHz\n channel active time: 1000 ms\n channel busy time: 900 ms\nfrequency: 5765 MHz\n channel active time: 1000 ms\n channel busy time: 100 ms\n", nil
+		case "dev wlan0 station dump":
+			if r.emptyStations {
+				return "", nil
+			}
+			return "Station aa:bb:cc:dd:ee:ff (on wlan0)\n signal: -50 dBm\n", nil
+		}
+	}
+	return r.radioRunner.Run(ctx, name, args...)
+}
+func TestAutomaticReevaluationDefersWhileClientAssociated(t *testing.T) {
+	m, rec, c := fixture(t)
+	r := &radioRunner{recorder: rec}
+	m.opts.Runner = r
+	c.WiFi.Enable = true
+	c.WiFi.APs = []config.WiFiAP{{Enable: true, SSID: "radio", PSK: "private-password", Band: "5g", Standard: "wifi6", ChannelWidthMHz: 20, ChannelMode: "auto"}}
+	if _, err := m.Apply(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	m.opts.Runner = &congestedRadioRunner{radioRunner: r, channel: 149}
+	m.wifiLastSwitch = m.opts.Clock().Add(-time.Hour)
+	for i := 0; i < 2; i++ {
+		status, err := m.ReevaluateWiFi(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.Channel != 149 {
+			t.Fatal(status)
+		}
+	}
+	if m.wifiSelected != 149 {
+		t.Fatal("changed channel with associated client")
+	}
+}
+
+func TestAutomaticReevaluationChangesOnlyRadioAndHandlesRejection(t *testing.T) {
+	for _, reject := range []bool{false, true} {
+		t.Run(fmt.Sprint(reject), func(t *testing.T) {
+			m, rec, c := fixture(t)
+			base := &radioRunner{recorder: rec}
+			m.opts.Runner = base
+			c.WiFi.Enable = true
+			c.WiFi.APs = []config.WiFiAP{{Enable: true, SSID: "radio", PSK: "private-password", Band: "5g", Standard: "wifi6", ChannelWidthMHz: 20, ChannelMode: "auto"}}
+			if _, err := m.Apply(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			r := &congestedRadioRunner{radioRunner: base, emptyStations: true, switchFails: reject, channel: 149}
+			m.opts.Runner = r
+			m.wifiLastSwitch = m.opts.Clock().Add(-time.Hour)
+			before := len(rec.calls)
+			for i := 0; i < 2; i++ {
+				_, err := m.ReevaluateWiFi(context.Background())
+				if i == 1 && (err != nil) != reject {
+					t.Fatalf("result %v reject=%v", err, reject)
+				}
+			}
+			want := 153
+			if reject {
+				want = 149
+			}
+			if m.wifiSelected != want {
+				t.Fatalf("selected %d want %d", m.wifiSelected, want)
+			}
+			for _, call := range rec.calls[before:] {
+				if strings.Contains(call, "ip link") || strings.Contains(call, "nft ") || strings.Contains(call, "systemctl") {
+					t.Fatal("network mutation during radio reevaluation", call)
+				}
+			}
+		})
+	}
+}
+
+func TestChannelSwitchKeepsRequestedWidth(t *testing.T) {
+	args := channelSwitchArgs("/control", "wlan0", config.WiFiAP{Band: "5g", Standard: "wifi6", ChannelWidthMHz: 80}, 149)
+	joined := strings.Join(args, " ")
+	for _, part := range []string{"chan_switch 5 5745", "bandwidth=80", "center_freq1=5775"} {
+		if !strings.Contains(joined, part) {
+			t.Fatal(joined)
+		}
+	}
+}
+func TestChannelSwitchRequiresHostapdAcceptance(t *testing.T) {
+	if !hostapdAccepted("Selected interface 'wlan0'\nOK\n") || hostapdAccepted("FAIL\n") || hostapdAccepted("Selected interface 'wlan0'\n") {
+		t.Fatal("unexpected hostapd response handling")
+	}
 }
 
 func (r *radioRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
@@ -34,7 +188,7 @@ func (r *radioRunner) Run(ctx context.Context, name string, args ...string) (str
 	r.calls = append(r.calls, name+" "+strings.Join(args, " "))
 	switch strings.Join(args, " ") {
 	case "dev wlan0 info":
-		return "Interface wlan0\n wiphy 0\n", nil
+		return "Interface wlan0\n wiphy 0\n channel 149 (5745 MHz), width: 80 MHz\n", nil
 	case "phy phy0 info":
 		return `Wiphy phy0
  Supported interface modes:

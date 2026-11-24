@@ -151,6 +151,9 @@ func (m *Manager) validate(c config.Config) error {
 					return errors.New("WiFi passphrase must be printable ASCII")
 				}
 			}
+			if a.Channel == 0 {
+				continue
+			} // actual channel is selected in preflight
 			if a.Band == "5g" {
 				// DFS CAC may legitimately exceed the bounded AP-ready wait.
 				// This initial profile supports only explicit non-DFS channels;
@@ -250,6 +253,13 @@ func (m *Manager) render(c config.Config) map[string]string {
 				continue
 			}
 			mode := "g"
+			if a.Channel == 0 {
+				a.Channel = m.wifiSelected
+				a.ChannelMode = "fixed"
+			}
+			if a.ChannelWidthMHz == config.WiFiAutoWidthMHz {
+				a.ChannelWidthMHz = m.wifiSelectedWidth
+			}
 			if a.Band == "5g" {
 				mode = "a"
 			}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 	"github.com/dnfn-tech/nixos-router/backend/internal/managed"
+	"github.com/dnfn-tech/nixos-router/backend/internal/wifi"
 )
 
 type Client struct {
@@ -21,7 +22,7 @@ type Client struct {
 
 func NewClient(path string, serverUID uint32) *Client {
 	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return DialContext(ctx, path, serverUID) }}
-	return &Client{http: &http.Client{Transport: tr, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, transport: tr}
+	return &Client{http: &http.Client{Transport: tr, Timeout: 45 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, transport: tr}
 }
 func (c *Client) Close() { c.transport.CloseIdleConnections() }
 func (c *Client) Submit(ctx context.Context, id string, cfg config.Config) (Job, error) {
@@ -78,6 +79,23 @@ func (c *Client) Leases(ctx context.Context) ([]managed.Lease, error) {
 	var leases []managed.Lease
 	err := c.call(ctx, "GET", "/v1/leases", nil, &leases)
 	return leases, err
+}
+
+func (c *Client) Stations(ctx context.Context) ([]wifi.Station, error) {
+	var stations []wifi.Station
+	err := c.call(ctx, "GET", "/v1/wifi/stations", nil, &stations)
+	return stations, err
+}
+
+func (c *Client) WiFiChannel(ctx context.Context) (managed.WiFiChannelStatus, error) {
+	var status managed.WiFiChannelStatus
+	err := c.call(ctx, "GET", "/v1/wifi/channel", nil, &status)
+	return status, err
+}
+func (c *Client) ReevaluateWiFi(ctx context.Context) (managed.WiFiChannelStatus, error) {
+	var status managed.WiFiChannelStatus
+	err := c.call(ctx, "POST", "/v1/wifi/reevaluate", nil, &status)
+	return status, err
 }
 
 func (c *Client) Candidate(ctx context.Context) (*managed.Confirmation, error) {

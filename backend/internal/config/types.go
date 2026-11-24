@@ -95,6 +95,7 @@ type WiFiConfig struct {
 }
 
 type WiFiAP struct {
+	ChannelMode     string `json:"channelMode,omitempty"` // empty/auto or fixed
 	Standard        string `json:"standard,omitempty"`
 	ChannelWidthMHz int    `json:"channelWidthMHz,omitempty"`
 	Security        string `json:"security,omitempty"` // empty/wpa2-psk or pure wpa3-sae

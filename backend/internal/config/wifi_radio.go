@@ -2,6 +2,8 @@ package config
 
 import "fmt"
 
+const WiFiAutoWidthMHz = -1
+
 // validateWiFiRadio checks the portable radio request. Actual PHY, AP-mode and
 // regulatory capabilities must also be checked before applying it.
 func validateWiFiRadio(ap WiFiAP, index int, active bool) error {
@@ -14,15 +16,24 @@ func validateWiFiRadio(ap WiFiAP, index int, active bool) error {
 		return field("standard", "must be wifi4, wifi5, wifi6 or wifi7")
 	}
 	switch ap.ChannelWidthMHz {
-	case 0, 20, 40, 80:
+	case WiFiAutoWidthMHz, 0, 20, 40, 80:
 	default:
-		return field("channelWidthMHz", "must be 20, 40 or 80 MHz")
+		return field("channelWidthMHz", "must be automatic, 20, 40 or 80 MHz")
+	}
+	if ap.ChannelMode != "" && ap.ChannelMode != "auto" && ap.ChannelMode != "fixed" {
+		return field("channelMode", "must be auto or fixed")
+	}
+	if ap.ChannelMode == "fixed" && ap.Channel == 0 {
+		return field("channel", "fixed mode requires a channel")
+	}
+	if ap.ChannelMode == "auto" && ap.Channel != 0 {
+		return field("channel", "automatic mode cannot set a channel")
 	}
 	if !active {
 		return nil
 	}
 	width := ap.ChannelWidthMHz
-	if width == 0 {
+	if width == 0 || width == WiFiAutoWidthMHz {
 		width = 20
 	}
 	if ap.Standard == "" {
@@ -39,6 +50,9 @@ func validateWiFiRadio(ap WiFiAP, index int, active bool) error {
 	}
 	if width == 80 && (ap.Band != "5g" || ap.Standard == "wifi4") {
 		return field("channelWidthMHz", "80 MHz requires 5g and wifi5 or later")
+	}
+	if ap.Channel == 0 {
+		return nil // resolved against actual PHY before rendering
 	}
 	if ap.Band == "5g" {
 		switch ap.Channel {
@@ -66,6 +80,9 @@ type WiFiRadioPlan struct {
 }
 
 func PlanWiFiRadio(ap WiFiAP) (WiFiRadioPlan, error) {
+	if ap.ChannelWidthMHz == WiFiAutoWidthMHz {
+		return WiFiRadioPlan{}, fmt.Errorf("automatic width must be resolved against the live PHY")
+	}
 	if err := validateWiFiRadio(ap, 0, true); err != nil {
 		return WiFiRadioPlan{}, err
 	}

@@ -3,6 +3,8 @@ package managed
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -64,7 +66,7 @@ func (m *Manager) preflightWiFiRadio(ctx context.Context, c config.Config) error
 		return nil
 	}
 	for _, ap := range c.WiFi.APs {
-		if !ap.Enable || ap.Standard == "" && ap.ChannelWidthMHz == 0 {
+		if !ap.Enable || ap.Channel != 0 && ap.Standard == "" && ap.ChannelWidthMHz == 0 {
 			continue
 		}
 		check := func() error {
@@ -100,6 +102,35 @@ func (m *Manager) preflightWiFiRadio(ctx context.Context, c config.Config) error
 			observed, err := wifi.ParseCapabilities(info, channels)
 			if err != nil {
 				return err
+			}
+			if ap.Channel == 0 || ap.ChannelWidthMHz == config.WiFiAutoWidthMHz {
+				var neighbors []wifi.Neighbor
+				scanOK := false
+				if raw, e := m.run(ctx, "iw", "dev", m.opts.WiFiInterface, "scan"); e == nil {
+					neighbors = wifi.ParseScan(raw)
+					scanOK = true
+				}
+				busy := map[int]float64{}
+				if raw, e := m.run(ctx, "iw", "dev", m.opts.WiFiInterface, "survey", "dump"); e == nil {
+					busy = wifi.ParseSurvey(raw)
+				}
+				if !scanOK {
+					busy = nil
+				}
+				previous := m.wifiSelected
+				if previous == 0 {
+					if raw, e := os.ReadFile(filepath.Join(m.base(), "wifi-channel")); e == nil {
+						previous, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+					}
+				}
+				selection, e := wifi.SelectChannel(ap, observed, neighbors, busy, previous)
+				if e != nil {
+					return e
+				}
+				m.wifiSelected = selection.Channel
+				m.wifiSelectedWidth = selection.WidthMHz
+				m.wifiReason = selection.Reason
+				return nil
 			}
 			return observed.Supports(ap)
 		}
