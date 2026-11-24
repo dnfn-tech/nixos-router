@@ -38,8 +38,14 @@ func (s *Server) handleNetworkLive(w http.ResponseWriter, r *http.Request) {
 		apiHTTPError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	draft := s.configSnapshot()
-	cfg, applied := s.networkRuntimeConfig(r.Context(), draft)
+	w.Header().Set("Cache-Control", "no-store")
+	if snapshot, ok := s.monitoringSnapshot(r.Context()); ok {
+		writeJSON(w, http.StatusOK, snapshot)
+	}
+}
+
+func (s *Server) collectNetworkLive(ctx context.Context, draft config.Config) monitoringSnapshot {
+	cfg, applied := s.networkRuntimeConfig(ctx, draft)
 	if !applied {
 		cfg = draft
 	}
@@ -57,21 +63,18 @@ func (s *Server) handleNetworkLive(w http.ResponseWriter, r *http.Request) {
 			return s.ifaceValue(name, "type") == "512" &&
 				(s.managedRuntime == nil || s.ifaceValue(name, "ifalias") == managed.PPPLinkAlias)
 		}
-		egress := s.defaultEgress(r.Context(), eligible)
+		egress := s.defaultEgress(ctx, eligible)
 		wan = s.liveInterface(egress, "")
 		if egress == "" && s.linkState(cfg.WAN.Interface) == "down" {
 			wan.Link = "down"
 		}
 		lan = s.liveInterface(cfg.LAN.BridgeName, "bridge")
 	}
-	ports := s.physicalPorts(cfg.WAN.Interface, cfg.LAN.Ports)
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"clock": strconv.FormatInt(networkSampleClock.UnixNano(), 10),
-		"wan":   wan, "lan": lan, "ports": ports,
-		"contractDownMbps": draft.WAN.ContractDownMbps,
-		"contractUpMbps":   draft.WAN.ContractUpMbps,
-	})
+	return monitoringSnapshot{
+		WAN: wan, LAN: lan, Ports: s.portObservations(cfg.WAN.Interface, cfg.LAN.Ports),
+		ContractDownMbps: draft.WAN.ContractDownMbps,
+		ContractUpMbps:   draft.WAN.ContractUpMbps,
+	}
 }
 
 func (s *Server) networkRuntimeConfig(ctx context.Context, draft config.Config) (config.Config, bool) {
@@ -142,7 +145,8 @@ func (s *Server) ifaceHas(name, key string) bool {
 }
 
 func (s *Server) linkState(name string) string {
-	switch s.ifaceValue(name, "operstate") {
+	state := s.ifaceValue(name, "operstate")
+	switch state {
 	case "down", "lowerlayerdown", "dormant", "notpresent":
 		return "down"
 	}
@@ -152,7 +156,7 @@ func (s *Server) linkState(name string) string {
 	case "1":
 		return "up"
 	}
-	if s.ifaceValue(name, "operstate") == "up" {
+	if state == "up" {
 		return "up"
 	}
 	return "unknown"
@@ -181,37 +185,4 @@ func (s *Server) liveInterface(name, marker string) liveInterface {
 	sample.Identity = index + "/" + changes
 	sample.SampleMs = time.Since(networkSampleClock).Milliseconds()
 	return sample
-}
-
-func (s *Server) physicalPorts(wan string, lan []string) []physicalPort {
-	ports := []physicalPort{}
-	entries, _ := os.ReadDir(s.sysClassNet)
-	for _, entry := range entries {
-		name := entry.Name()
-		if s.ifaceValue(name, "type") != "1" || !s.ifaceHas(name, "device") ||
-			s.ifaceHas(name, "phy80211") || s.ifaceHas(name, "wireless") ||
-			s.ifaceHas(name, "bridge") {
-			continue
-		}
-		port := physicalPort{Name: name, Role: "other", Link: s.linkState(name)}
-		for _, member := range lan {
-			if member == name {
-				port.Role = "lan"
-			}
-		}
-		if name == wan {
-			port.Role = "wan"
-		}
-		if port.Link == "up" {
-			if speed, err := strconv.Atoi(s.ifaceValue(name, "speed")); err == nil && speed > 0 && speed < 4294967295 {
-				port.SpeedMbps = speed
-			}
-			switch duplex := s.ifaceValue(name, "duplex"); duplex {
-			case "full", "half":
-				port.Duplex = duplex
-			}
-		}
-		ports = append(ports, port)
-	}
-	return ports
 }

@@ -1,12 +1,14 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
 )
@@ -69,5 +71,26 @@ func TestNetworkLiveUsesPPPAndBridgeCounters(t *testing.T) {
 	if len(body.Ports) != 2 || body.Ports[0].Name != "lan1" || body.Ports[0].Link != "down" || body.Ports[0].SpeedMbps != 0 ||
 		body.Ports[1].Name != "wan0" || body.Ports[1].SpeedMbps != 1000 || body.Ports[1].Duplex != "full" {
 		t.Fatalf("wrong port observations: %s", w.Body)
+	}
+	poll := func() liveInterface {
+		t.Helper()
+		srv.monitor.mu.Lock()
+		srv.monitor.expires = time.Time{}
+		srv.monitor.mu.Unlock()
+		value, ok := srv.monitoringSnapshot(context.Background())
+		if !ok {
+			t.Fatal("snapshot unavailable")
+		}
+		return value.WAN
+	}
+	if err := os.RemoveAll(filepath.Join(root, "ppp7")); err != nil {
+		t.Fatal(err)
+	}
+	if gone := poll(); gone.RXBytes != "" || gone.TXBytes != "" || gone.Identity != "" {
+		t.Fatalf("disconnected PPP retained stale counters: %+v", gone)
+	}
+	add("ppp7", "512", "22", "unknown")
+	if changed := poll(); changed.Name != "ppp7" || changed.Identity != "22/" || changed.RXBytes != "1000" {
+		t.Fatalf("reconnected PPP did not replace its identity and counters: %+v", changed)
 	}
 }

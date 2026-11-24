@@ -1642,7 +1642,7 @@ test("network overview samples rates and gaps, pauses, and respects session expi
     const live = await context.request.get(base + "/api/v1/network/live");
     assert.equal(live.status(), 200);
     assert.deepEqual(Object.keys(await live.json()).sort(),
-      ["clock", "contractDownMbps", "contractUpMbps", "lan", "ports", "wan"]);
+      ["clock", "contractDownMbps", "contractUpMbps", "cpuPercent", "lan", "memory", "ports", "sampleMs", "wan"]);
     const replies = [];
     let hits = 0;
     await page.route(endpoint, route => {
@@ -1655,7 +1655,7 @@ test("network overview samples rates and gaps, pauses, and respects session expi
       const set = window.setTimeout, clear = window.clearTimeout;
       let action;
       window.setTimeout = (fn, delay, ...args) => {
-        if (delay !== 2000) return set(fn, delay, ...args);
+        if (delay < 250 || delay > 2100) return set(fn, delay, ...args);
         action = () => fn(...args);
         return -100;
       };
@@ -1671,7 +1671,9 @@ test("network overview samples rates and gaps, pauses, and respects session expi
       };
     });
     const sample = (ms, rxBytes, txBytes, identity = "4/1") => ({ json: {
-      clock: "test", contractDownMbps: 300, contractUpMbps: 30,
+      clock: "test", sampleMs: ms, contractDownMbps: 300, contractUpMbps: 30,
+      cpuPercent: ms === 100 ? null : 0,
+      memory: { totalBytes: 1073741824, usedBytes: ms === 100 ? 0 : 536870912 },
       wan: { name: "ppp7", identity, link: "up", sampleMs: ms, rxBytes, txBytes },
       lan: { name: "br0", link: "down" },
       ports: [{ name: "eth0", role: "wan", link: "up", speedMbps: 2500, duplex: "full" }],
@@ -1684,6 +1686,10 @@ test("network overview samples rates and gaps, pauses, and respects session expi
     await selector.focus();
     const wan = page.locator(".traffic .grid > .card").first();
     assert.match(await wan.innerText(), /下载 未采集/);
+    const cpu = page.locator(".traffic .grid > .card").filter({ has: page.getByRole("heading", { name: "CPU", exact: true }) });
+    const memory = page.locator(".traffic .grid > .card").filter({ has: page.getByRole("heading", { name: "内存", exact: true }) });
+    assert.match(await cpu.innerText(), /使用率 未采集/);
+    assert.match(await memory.innerText(), /0 B \/ 1 GiB（0%）/);
     assert.match(await page.locator(".traffic").innerText(), /br0[\s\S]*接收 未连接/);
     assert.match(await page.locator(".traffic-ports").innerText(), /2500 Mbps\s+全双工/);
     const pulse = async reply => {
@@ -1693,6 +1699,11 @@ test("network overview samples rates and gaps, pauses, and respects session expi
     };
     await pulse(sample(2100, "1000100", "200"));
     assert.match(await wan.innerText(), /下载 4.00 Mbps\s+上传 0 Mbps/);
+    assert.match(await cpu.innerText(), /使用率 0%/);
+    assert.match(await memory.innerText(), /512 MiB \/ 1 GiB（50.0%）/);
+    assert.match(await memory.innerText(), /5 分钟前/);
+    await pulse(sample(2100, "1000100", "200"));
+    assert.match(await wan.innerText(), /下载 4.00 Mbps/);
     assert.equal(await selector.evaluate(el => el === document.activeElement && el.value === "300"), true);
     await pulse(sample(4100, "90", "200"));
     assert.match(await wan.innerText(), /下载 未采集\s+上传 未采集/);
@@ -1710,6 +1721,8 @@ test("network overview samples rates and gaps, pauses, and respects session expi
     assert.match(await wan.innerText(), /下载 未采集/);
     await pulse({ status: 503, json: {} });
     assert.match(await wan.innerText(), /下载 未采集/);
+    assert.match(await cpu.innerText(), /使用率 未采集/);
+    assert.match(await memory.innerText(), /使用量 未采集/);
     await page.getByRole("button", { name: "暂停" }).click();
     const before = hits;
     await page.evaluate(() => window.takeTrafficTick());

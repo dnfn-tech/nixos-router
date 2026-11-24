@@ -45,6 +45,7 @@ WebUI 会从以下位置确定后端 API 基址（优先级从高到低）：
 - 顶栏 Apply：脏状态、撤销（丢弃未保存草稿并重新载入）、保存（页面既有 `PUT /api/v1/config` 或插件 PUT）、应用配置（`POST /api/v1/apply`）。有未保存更改时，应用会先保存再提交作业
 - 概览：读取 `/api/v1/status`、`/api/v1/config`、`/api/v1/health`，展示主机名、运行时长、WAN/LAN 摘要、接口列表（按 role）、WiFi 能力（`/api/v1/capabilities/wifi`）；缺字段时优雅降级并清晰提示
 - 实时流量：登录后读取 `/api/v1/network/live`，按内核接口字节计数计算速率。WAN 采样主路由表默认出口（优先 IPv4），PPPoE 使用 PPP 接口。LAN 采样所配置的桥接口，范围不含桥内端口间转发。可在 WAN 的 JSON 配置中设置 `contractDownMbps` 和 `contractUpMbps`（Mbps，省略或为 0 时视为未配置）。趋势从打开总览后开始采集。
+- 系统资源：复用实时接口与暂停、时间范围控件。CPU 使用率取 Linux 全机 CPU tick 差分，内存用量为 `MemTotal - MemAvailable`。活跃请求共享约 2 秒的服务端快照，物理口协商信息约 15 秒复核，链路变化时提前刷新。
 - 外网（#/wan）：编辑 `config.wan`（mode dhcp/static/pppoe、接口名、静态地址/GW/DNS、PPPoE 账号/密码），显示状态摘要。PPPoE/WiFi/DDNS 等密钥型字段未更改时保留为 `****` 或留空，后端将保留原值
 - 内网（#/lan）：编辑 `config.lan`（桥、IPv4 CIDR、DHCP 范围/租约、ports[]、staticLeases[]），显示状态摘要
 - 无线（#/wifi）：编辑 `config.wifi`（启用/桥接、aps[ssid/band/channel/psk/guest/isolate]），capabilities.maxAP 限制 AP 数；显示状态摘要

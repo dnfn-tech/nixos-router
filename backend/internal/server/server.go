@@ -60,6 +60,7 @@ type Server struct {
 	applyMu          sync.Mutex
 	cfgMu            sync.RWMutex
 	samplesMu        sync.Mutex
+	monitor          monitoringCache
 	loginMu          sync.Mutex
 	runner           CommandRunner
 	// Live status helpers

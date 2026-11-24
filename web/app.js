@@ -1617,7 +1617,7 @@
     const period = node("select", { id: "traffic-period" },
       node("option", { value: 60 }, "最近 60 秒"),
       node("option", { value: 300 }, "最近 5 分钟"));
-    const sampleNote = node("p", { class: "help" }, "每 2 秒采样 · Mbps");
+    const sampleNote = node("p", { class: "help" }, "约每 2 秒采样");
     const ports = node("div", { class: "traffic-ports" },
       node("p", { class: "help" }, "物理网口未采集"));
     let paused = false, lastTime = performance.now(), sampleGeneration = 0;
@@ -1625,16 +1625,16 @@
       paused = !paused;
       pause.textContent = paused ? "继续" : "暂停";
       pause.setAttribute("aria-pressed", String(paused));
-      sampleNote.textContent = paused ? "已暂停 · Mbps" : "每 2 秒采样 · Mbps";
+      sampleNote.textContent = paused ? "已暂停" : "约每 2 秒采样";
       breakSample();
     }, "quiet");
     pause.setAttribute("aria-pressed", "false");
 
-    function panel(title, rxLabel, txLabel) {
+    function panel(title, rxLabel, txLabel, unit = "Mbps") {
       const name = node("span", { class: "traffic-interface" });
       const rx = node("strong", {}, "未采集"), tx = node("strong", {}, "未采集");
       const chart = node("canvas", { class: "traffic-chart", role: "img",
-        "aria-label": title + " " + rxLabel + "与" + txLabel + "趋势",
+        "aria-label": title + " " + (txLabel ? rxLabel + "与" + txLabel : rxLabel) + "趋势",
         width: 600, height: 150 });
       const ago = node("span", {}, "60 秒前");
       const scale = node("span", {}, "");
@@ -1643,16 +1643,22 @@
         name,
         node("div", { class: "traffic-rates" },
           node("span", { class: "traffic-rx" }, rxLabel, " ", rx),
-          node("span", { class: "traffic-tx" }, txLabel, " ", tx)),
+          txLabel ? node("span", { class: "traffic-tx" }, txLabel, " ", tx) : null),
         chart,
         node("div", { class: "traffic-axis help" }, ago, scale, node("span", {}, "现在")),
         detail);
-      return { element, name, rx, tx, chart, ago, scale, detail, points: [], previous: null };
+      return { element, name, rx, tx, chart, ago, scale, detail, unit, points: [], previous: null };
     }
     const wan = panel("外网 WAN", "下载", "上传");
     const lan = panel("内网 LAN", "接收", "发送");
-    const panels = [wan, lan];
+    const cpu = panel("CPU", "使用率", null, "%");
+    const memory = panel("内存", "使用量", null, "%");
+    cpu.detail.textContent = "主机 CPU 总使用率";
+    memory.detail.textContent = "趋势显示已使用内存占比";
+    const panels = [wan, lan, cpu, memory];
+    let previousSnapshot, timeOffset, gap = true;
     function breakSample() {
+      gap = true;
       sampleGeneration++;
       for (const panel of panels) panel.previous = null;
     }
@@ -1668,10 +1674,11 @@
       ago.textContent = seconds === 60 ? "60 秒前" : "5 分钟前";
       const visible = points.filter(p => p.time >= from);
       const { width, height } = chart;
-      const max = Math.ceil(Math.max(1, ...visible.flatMap(p => [p.rx ?? 0, p.tx ?? 0])));
+      const max = panel.unit === "%" ? 100 :
+        Math.ceil(Math.max(1, ...visible.flatMap(p => [p.rx ?? 0, p.tx ?? 0])));
       ctx.clearRect(0, 0, width, height);
       const hasRates = visible.some(p => p.rx !== null || p.tx !== null);
-      scale.textContent = hasRates ? "0–" + max + " Mbps" : "";
+      scale.textContent = hasRates ? "0–" + max + (panel.unit === "%" ? "%" : " Mbps") : "";
       if (!hasRates) return;
       ctx.strokeStyle = "rgba(150, 165, 185, 0.25)";
       ctx.lineWidth = 1;
@@ -1686,6 +1693,7 @@
         ctx.lineWidth = 2;
         let previous = null;
         for (const point of visible) {
+          if (point.breakBefore) previous = null;
           if (point[key] === null) {
             previous = null;
             continue;
@@ -1706,7 +1714,12 @@
     period.addEventListener("change", () => panels.forEach(draw));
     const counter = value => typeof value === "string" && /^\d+$/.test(value) ? BigInt(value) : null;
     const format = n => n === 0 ? "0 Mbps" : n < 0.01 ? "<0.01 Mbps" : n.toFixed(2) + " Mbps";
-    function updatePanel(panel, sample, data) {
+    function appendPoint(panel, point) {
+      panel.points.push(point);
+      panel.points = panel.points.filter(p => lastTime - p.time <= 300000);
+      draw(panel);
+    }
+    function updatePanel(panel, sample, data, pointTime) {
       if (sample?.name && sample.name !== panel.interfaceName) {
         panel.points = [];
         panel.interfaceName = sample?.name;
@@ -1722,7 +1735,9 @@
       const continuous = elapsed > 0 && elapsed <= 6000 && current.clock === prev.clock &&
         current.identity === prev.identity && current.name === prev.name &&
         !["rx", "tx"].some(key => current[key] !== null && prev[key] !== null && current[key] < prev[key]);
-      const point = { time: lastTime, rx: null, tx: null };
+      const measuredTime = current && Number.isFinite(timeOffset)
+        ? current.ms + timeOffset : pointTime;
+      const point = { time: measuredTime, rx: null, tx: null, breakBefore: gap };
       for (const key of ["rx", "tx"]) {
         if (continuous && current[key] !== null && prev[key] !== null)
           point[key] = Number(current[key] - prev[key]) * 0.008 / elapsed;
@@ -1730,9 +1745,7 @@
           ? (sample?.link === "down" ? "未连接" : "未采集")
           : format(point[key]);
       }
-      panel.points.push(point);
-      panel.points = panel.points.filter(p => lastTime - p.time <= 300000);
-      draw(panel);
+      appendPoint(panel, point);
     }
     function updateWANDetail(configured, observedPorts) {
       const contract = [];
@@ -1742,11 +1755,37 @@
       const physicalWAN = observedPorts?.find(p => p.role === "wan");
       if (physicalWAN) wan.detail.textContent += " · 配置的 WAN 物理口：" + physicalWAN.name;
     }
+    const percent = n => Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
+    const formatPercent = n => n === 0 ? "0%" : n < 0.1 ? "<0.1%" : n.toFixed(1) + "%";
+    const formatBytes = n => {
+      const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+      const index = n === 0 ? 0 : Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+      return (n / 1024 ** index).toLocaleString(undefined, { maximumFractionDigits: 1 }) + " " + units[index];
+    };
     function update(data) {
       if (paused) return;
-      lastTime = performance.now();
-      updatePanel(wan, data?.wan, data);
-      updatePanel(lan, data?.lan, data);
+      const now = performance.now();
+      let pointTime = now;
+      if (Number.isFinite(data?.sampleMs)) {
+        const sameClock = previousSnapshot?.clock === data.clock;
+        if (sameClock && data.sampleMs <= previousSnapshot.ms) return;
+        if (!sameClock) timeOffset = now - data.sampleMs;
+        gap ||= !sameClock || data.sampleMs - previousSnapshot?.ms > 6000;
+        previousSnapshot = { clock: data.clock, ms: data.sampleMs };
+        pointTime = data.sampleMs + timeOffset;
+      }
+      lastTime = Math.max(lastTime, now, pointTime);
+      updatePanel(wan, data?.wan, data, pointTime);
+      updatePanel(lan, data?.lan, data, pointTime);
+      const cpuUse = percent(data?.cpuPercent);
+      const { totalBytes, usedBytes } = data?.memory || {};
+      const memoryUse = totalBytes > 0 ? percent(100 * usedBytes / totalBytes) : null;
+      cpu.rx.textContent = cpuUse === null ? "未采集" : formatPercent(cpuUse);
+      memory.rx.textContent = memoryUse === null ? "未采集" :
+        formatBytes(usedBytes) + " / " + formatBytes(totalBytes) + "（" + formatPercent(memoryUse) + "）";
+      appendPoint(cpu, { time: pointTime, rx: cpuUse, tx: null, breakBefore: gap });
+      appendPoint(memory, { time: pointTime, rx: memoryUse, tx: null, breakBefore: gap });
+      gap = !data;
       if (!data) {
         replaceIfChanged(ports, node("p", { class: "help" }, "物理网口未采集"));
         return;
@@ -1765,10 +1804,10 @@
     return {
       content: node("section", { class: "card stack traffic" },
         node("div", { class: "traffic-heading" },
-          node("h3", {}, "实时流量与链路"),
+          node("h3", {}, "实时流量与系统资源"),
           node("div", { class: "toolbar" },
             node("label", { for: period.id }, "时间范围"), period, pause)),
-        node("div", { class: "grid" }, wan.element, lan.element), sampleNote),
+        node("div", { class: "grid" }, wan.element, lan.element, cpu.element, memory.element), sampleNote),
       ports, update,
       breakSample,
       get paused() { return paused; },
@@ -1776,12 +1815,14 @@
     };
   }
 
-  function scheduleTraffic(epoch, delay = 2000) {
+  const trafficInterval = 2100;
+  function scheduleTraffic(epoch, delay = trafficInterval) {
     trafficTimer = setTimeout(async () => {
       const current = () => epoch === state.epoch && state.loggedIn &&
         state.route === "overview" && overviewView;
       if (!current()) return;
       const { traffic } = overviewView;
+      const started = performance.now();
       try {
         if (traffic.paused || trafficRequest) return;
         if (document.visibilityState !== "visible") {
@@ -1800,7 +1841,7 @@
           else traffic.breakSample();
         }
       } finally {
-        if (current()) scheduleTraffic(epoch);
+        if (current()) scheduleTraffic(epoch, Math.max(250, trafficInterval - (performance.now() - started)));
       }
     }, delay);
   }
