@@ -252,3 +252,48 @@ test("expired managed candidate cannot be confirmed in the browser", async () =>
   assert.equal(await page.getByRole("button",{name:"确认保留当前网络配置",exact:true}).isDisabled(),true);
  }finally{await context.close()}
 });
+
+test("host DDNS saves its switch independently of the router draft", async () => {
+  const { page, context } = await pageAt("ddns");
+  try {
+    let enabled = true;
+    const writes = [];
+    await page.route("**/api/v1/health", route => route.fulfill({
+      json: { ...managedHealth, capabilities: { ...managedHealth.capabilities, managedDDNS: true } },
+    }));
+    await page.route("**/api/v1/ddns", async route => {
+      const request = route.request();
+      if (request.method() === "PUT") {
+        writes.push(request.postDataJSON());
+        enabled = writes.at(-1).enabled;
+      }
+      await route.fulfill({ json: { enabled, record: "s01.example.com" } });
+    });
+    await page.locator("#page-refresh").click();
+    await page.waitForFunction(() => !window.app.state.loading);
+    const content = page.locator("#page-content");
+    const toggle = content.getByRole("checkbox", { name: "启用动态 DNS" });
+    const save = content.getByRole("button", { name: "保存 DDNS" });
+    assert.equal(await toggle.isChecked(), true);
+    assert.equal(await save.isDisabled(), true);
+    assert.equal(await content.locator('input[type="password"]').count(), 0);
+    assert.equal(await page.locator("#apply-run").isDisabled(), true);
+    assert.match(await content.innerText(), /s01\.example\.com/);
+    assert.doesNotMatch(await content.innerText(), /启用将被拒绝/);
+
+    await toggle.uncheck();
+    await save.click();
+    const result = content.getByRole("status");
+    await result.getByText("已停用后续定时检查。").waitFor();
+    assert.deepEqual(writes, [{ enabled: false }]);
+    await page.locator("#page-refresh").click();
+    await page.waitForFunction(() => !window.app.state.loading);
+    assert.equal(await toggle.isChecked(), false);
+    await toggle.check();
+    await save.click();
+    await result.getByText("已启用，等待下一次定时检查。").waitFor();
+    assert.deepEqual(writes, [{ enabled: false }, { enabled: true }]);
+  } finally {
+    await context.close();
+  }
+});

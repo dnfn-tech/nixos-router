@@ -186,6 +186,7 @@ func main() {
 		ManagedRuntime:      runtime,
 		StartupWarning:      startupWarning,
 		WiFiInterface:       *wifiInterface,
+		ManagedDDNSRecord:   os.Getenv("NIXOS_ROUTER_MANAGED_DDNS_RECORD"),
 		Config:              cfg,
 		ConfigPath:          cfgPath,
 		StateDir:            opts.StateDir,

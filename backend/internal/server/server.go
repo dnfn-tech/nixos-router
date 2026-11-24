@@ -38,31 +38,32 @@ const (
 )
 
 type Server struct {
-	modules          []string
-	startupWarning   string
-	managedRuntime   ManagedRuntime
-	wifiInterface    string
-	cfg              config.Config
-	cfgPath          string
-	stateDir         string
-	db               *db.DB
-	devMode          bool
-	startedAt        time.Time
-	version          string
-	allowedCORS      string // when set (dev) send Access-Control-Allow-Origin
-	embeddedFS       fs.FS  // compiled-in assets
-	webDir           string // when set, serve from local dir (dev override)
-	requireAuth      bool
-	loginFails       map[string][]time.Time
-	applyReload      bool
-	consumeGenerated bool
-	privilegedApply  bool
-	applyMu          sync.Mutex
-	cfgMu            sync.RWMutex
-	samplesMu        sync.Mutex
-	monitor          monitoringCache
-	loginMu          sync.Mutex
-	runner           CommandRunner
+	modules           []string
+	startupWarning    string
+	managedRuntime    ManagedRuntime
+	wifiInterface     string
+	managedDDNSRecord string
+	cfg               config.Config
+	cfgPath           string
+	stateDir          string
+	db                *db.DB
+	devMode           bool
+	startedAt         time.Time
+	version           string
+	allowedCORS       string // when set (dev) send Access-Control-Allow-Origin
+	embeddedFS        fs.FS  // compiled-in assets
+	webDir            string // when set, serve from local dir (dev override)
+	requireAuth       bool
+	loginFails        map[string][]time.Time
+	applyReload       bool
+	consumeGenerated  bool
+	privilegedApply   bool
+	applyMu           sync.Mutex
+	cfgMu             sync.RWMutex
+	samplesMu         sync.Mutex
+	monitor           monitoringCache
+	loginMu           sync.Mutex
+	runner            CommandRunner
 	// Live status helpers
 	sysClassNet string               // base dir for /sys/class/net (overridable by env)
 	ifPrev      map[string]ifacePrev // in-memory last counters sample
@@ -71,9 +72,10 @@ type Server struct {
 }
 
 type Options struct {
-	Modules        []string
-	StartupWarning string
-	WiFiInterface  string // Trusted managed radio; never selected from request input.
+	Modules           []string
+	StartupWarning    string
+	WiFiInterface     string // Trusted managed radio; never selected from request input.
+	ManagedDDNSRecord string // Trusted DNS-only record served by a host updater.
 
 	ManagedRuntime ManagedRuntime
 	Config         config.Config
@@ -148,6 +150,7 @@ func New(opts Options) *Server {
 		modules:             append([]string{}, opts.Modules...),
 		startupWarning:      opts.StartupWarning,
 		wifiInterface:       opts.WiFiInterface,
+		managedDDNSRecord:   opts.ManagedDDNSRecord,
 		cfg:                 opts.Config,
 		cfgPath:             opts.ConfigPath,
 		stateDir:            opts.StateDir,
@@ -188,6 +191,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/config", s.handleConfig)
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
 	mux.HandleFunc("/api/v1/network/live", s.handleNetworkLive)
+	mux.HandleFunc("/api/v1/ddns", s.handleManagedDDNS)
 	mux.HandleFunc("/api/v1/ui/nav", s.handleUINav)
 	mux.HandleFunc("/api/v1/plugins", s.handlePlugins)
 	mux.HandleFunc("/api/v1/plugins/", s.handlePlugins)
@@ -494,7 +498,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.managedRuntime != nil {
 		resp["deployment"] = map[string]interface{}{"mode": "runtime", "runtimeApply": true, "rebootAllowed": s.rebootAllowed(), "profile": "managed-router"}
 		resp["startupWarning"] = s.startupWarning
-		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "modules": s.modules, "wanModes": []string{"dhcp", "static", "pppoe"}, "singleLAN": false, "singleWiredLAN": true, "independentWiFiLAN": true, "singleAP": true, "ipv6WanModes": []string{"slaac", "dhcpv6", "pppoe6"}, "unsupported": []string{"qos", "ddns", "parental", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
+		resp["capabilities"] = map[string]interface{}{"managedNetwork": true, "managedDDNS": s.managedDDNSConfigured(), "modules": s.modules, "wanModes": []string{"dhcp", "static", "pppoe"}, "singleLAN": false, "singleWiredLAN": true, "independentWiFiLAN": true, "singleAP": true, "ipv6WanModes": []string{"slaac", "dhcpv6", "pppoe6"}, "unsupported": []string{"qos", "ddns", "parental", "upnp", "guest", "wifi-dfs"}, "hostManaged": []string{"ssh", "system"}}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -68,6 +68,7 @@
     configCache: null,
     health: null,
     confirmedCapabilities: null,
+    hostDDNS: false,
     modules: null,
     pending: false,
     epoch: 0,
@@ -500,7 +501,7 @@
     $("#apply-save").disabled =
       state.busy || state.loading || !state.section || !state.pageDirty || sectionReadOnly();
     $("#apply-undo").disabled = state.busy || state.loading || !state.pageDirty;
-    $("#apply-run").disabled = state.busy || state.loading;
+    $("#apply-run").disabled = state.busy || state.loading || state.hostDDNS;
     $("#page-refresh").disabled = state.busy || state.loading;
     $("#logout-btn").disabled = state.busy;
     const fields = $("#editor-fields");
@@ -2410,6 +2411,37 @@
       ),
     );
   }
+  function managedDDNSPage(ddns) {
+    if (!ddns) return card("动态 DNS", notice("无法读取 DDNS 开关状态，请刷新重试。", "error"));
+    const id = `field-${++fieldId}`;
+    const enabled = node("input", { id, type: "checkbox" });
+    enabled.checked = ddns.enabled;
+    const result = node("p", { role: "status", class: "help" });
+    let saved = ddns.enabled;
+    const save = btn("保存 DDNS", async () => {
+      enabled.disabled = save.disabled = true;
+      try {
+        const current = await api("/api/v1/ddns", { method: "PUT", body: { enabled: enabled.checked } });
+        saved = enabled.checked = current.enabled;
+        result.textContent = saved ? "已启用，等待下一次定时检查。" : "已停用后续定时检查。";
+      } catch (e) {
+        result.textContent = `保存失败：${e.message}`;
+      } finally {
+        enabled.disabled = false;
+        save.disabled = enabled.checked === saved;
+      }
+    });
+    save.disabled = true;
+    enabled.addEventListener("change", () => { save.disabled = enabled.checked === saved; });
+    return card(
+      "动态 DNS",
+      node("p", {}, `Cloudflare · ${ddns.record} · DNS-only IPv4（A 记录）`),
+      node("p", { class: "help" }, "令牌由主机管理。保存后影响下一次定时检查。"),
+      node("label", { for: id }, enabled, "启用动态 DNS"),
+      save,
+      result,
+    );
+  }
   async function renderRoute() {
     clearTimeout(refreshTimer);
     clearTimeout(trafficTimer);
@@ -2440,7 +2472,7 @@
       });
     try {
       const needsStatus = ["overview", "wan", "lan", "system"].includes(id);
-      const [response, health, status, clients, jobs, audit, wifiCaps, manifest, wifiChannel, wifiStations] =
+      const [response, health, status, clients, jobs, audit, wifiCaps, manifest, wifiChannel, wifiStations, ddns] =
         await Promise.all([
           api("/api/v1/config"),
           optional(api("/api/v1/health")),
@@ -2458,6 +2490,7 @@
           optional(api("/api/v1/plugins")),
           id === "wifi" ? optional(api("/api/v1/wifi/channel")) : null,
           id === "wifi" ? optional(api("/api/v1/wifi/stations")) : null,
+          id === "ddns" ? optional(api("/api/v1/ddns")) : null,
         ]);
       if (epoch !== state.epoch || !state.loggedIn) return;
       const cfg = response.config || response;
@@ -2474,7 +2507,9 @@
       deployment();
       refreshCandidate();
       let content;
-      if (id === "ssh") content = card("SSH 由系统管理", notice("请通过 NixOS 的 services.openssh 配置监听端口、认证策略和授权公钥。"));
+      state.hostDDNS = id === "ddns" && Boolean(ddns || state.confirmedCapabilities?.managedDDNS);
+      if (state.hostDDNS) content = managedDDNSPage(ddns);
+      else if (id === "ssh") content = card("SSH 由系统管理", notice("请通过 NixOS 的 services.openssh 配置监听端口、认证策略和授权公钥。"));
       else if (id === "overview") content = overview(cfg, status, clients);
       else if (id === "clients") content = clientsPage(clients);
       else if (id === "plugins") content = pluginsEditor(cfg);
@@ -2490,7 +2525,7 @@
       else content = card("页面不存在", link("overview", "返回总览"));
       if (sectionReadOnly()) {
         content = stack(notice(ownershipNotice()), content);
-      } else if ((state.confirmedCapabilities?.unsupported || []).includes(id) || (state.confirmedCapabilities?.managedNetwork && (pluginIds.includes(id) || moduleSupport(id)) && !moduleSupport(id)?.runtimeSupported)) {
+      } else if ((!state.hostDDNS && (state.confirmedCapabilities?.unsupported || []).includes(id)) || (state.confirmedCapabilities?.managedNetwork && (pluginIds.includes(id) || moduleSupport(id)) && !moduleSupport(id)?.runtimeSupported)) {
         content = stack(notice("当前网络版本不支持应用此功能。可保留或导出历史设置；启用将被拒绝。"), content);
       }
       target.replaceChildren(content);
