@@ -191,6 +191,19 @@ try:
             machine.fail("ip netns exec wired ping -c1 -W2 " + station_address)
             machine.fail("ip netns exec isp ping -c1 -W2 " + station_address)
             machine.fail(NS + "curl --connect-timeout 2 --max-time 3 -fsS http://192.168.77.1:8080/api/v1/healthz")
+        with subtest("Changing the AP channel preserves the wired gateway generation"):
+            dns_invocation = "systemctl show -p InvocationID --value nixos-router-dnsmasq.service"
+            generation = "readlink /var/lib/nixos-router/managed/current"
+            before = machine.succeed(dns_invocation + "; " + generation)
+            ap = config["wifi"]["aps"][0]
+            channel = 153 if ap["band"] == "5g" else 11
+            ap["channel"] = channel
+            apply(config)
+            assert machine.succeed(dns_invocation + "; " + generation) == before
+            machine.succeed(f"iw dev wlan0 info | grep -F 'channel {channel} ('")
+            assert machine.succeed("ip netns exec wired curl --noproxy '*' -fsS --max-time 5 http://203.0.113.1:8090/").strip() == "10.99.0.2"
+            associated()
+            acquire_lease()
         with subtest("Explicit cross-subnet and management permissions apply and revoke"):
             config["wifi"]["network"]["allowManagement"] = True
             config["wifi"]["network"]["allowWiredAccess"] = True

@@ -580,6 +580,9 @@ func (m *Manager) switchFiles(ctx context.Context, dir string) error {
 	})
 }
 func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Config, dir string) error {
+	if applied, err := m.activateAPChange(ctx, c, old, dir); applied {
+		return err
+	}
 	if err := m.cmd(ctx, "nft", "-f", filepath.Join(dir, "firewall.nft")); err != nil {
 		return err
 	}
@@ -761,15 +764,7 @@ func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Con
 		}
 	}
 	if c.WiFi.Enable {
-		if e = m.cmd(ctx, "systemctl", "restart", "nixos-router-hostapd.service"); e != nil {
-			return e
-		}
-		if e = m.cmd(ctx, "systemctl", "is-active", "--quiet", "nixos-router-hostapd.service"); e != nil {
-			return e
-		}
-		if e = m.waitAPReady(ctx); e != nil {
-			return e
-		}
+		return m.restartAP(ctx)
 	}
 	return nil
 }
