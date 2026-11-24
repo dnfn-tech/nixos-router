@@ -91,6 +91,26 @@ with subtest("PPPoE inbound forwarding uses the logical interface"):
     address = connected()
     upstream.fail("curl --connect-timeout 2 --max-time 3 http://" + address + ":18080/")
 
+with subtest("unchanged topology preserves STP forwarding and the PPP session"):
+    router.succeed("ip link set dev br-lan type bridge stp_state 1")
+    router.wait_until_succeeds("test $(cat /sys/class/net/eth2/brport/state) = 3", timeout=40)
+    def live_identity():
+        return router.succeed("readlink /var/lib/nixos-router/managed/current; "
+                              "cat /sys/class/net/br-lan/ifindex /sys/class/net/nr-ppp0/ifindex; "
+                              "systemctl show -p MainPID -p NRestarts --value nixos-router-pppoe").strip()
+    before = live_identity()
+    apply(cfg)
+    assert live_identity() == before, "no-op Apply replaced bridge or WAN session"
+    router.succeed("test $(cat /sys/class/net/eth2/brport/state) = 3")
+    cfg["dns"]["upstreams"] = ["10.0.0.1"]
+    apply(cfg)
+    assert live_identity() == before, "DNS Apply replaced bridge or WAN session"
+    router.succeed("test $(cat /sys/class/net/eth2/brport/state) = 3")
+    connected()
+    cfg["dns"]["upstreams"] = []
+    apply(cfg)
+    assert live_identity() == before
+
 with subtest("upstream loss and reconnection preserve LAN management"):
     upstream.succeed("systemctl stop test-pppoe-server")
     router.wait_until_fails("ip -4 route show default | grep nr-ppp0", timeout=90)
@@ -164,6 +184,12 @@ with subtest("negotiated lower peer MRU clamps both directions and transfers bul
     upstream.succeed("systemctl daemon-reload && systemctl restart test-pppoe-server")
     router.wait_until_succeeds("test $(cat /sys/class/net/nr-ppp0/mtu) = 1400", timeout=120)
     connected()
+    before_pid = router.succeed("systemctl show -p MainPID --value nixos-router-pppoe").strip()
+    cfg["firewall"]["blockedMacs"] = ["02:00:00:00:00:01"]
+    apply(cfg)
+    assert router.succeed("systemctl show -p MainPID --value nixos-router-pppoe").strip() == before_pid
+    clamps = router.succeed("nft list chain inet nixos_router ppp_mss")
+    assert "maxseg size set 1360" in clamps and "maxseg size set 1340" in clamps, clamps
     # Put the TCP endpoint behind the ISP with Ethernet MTU 1500. A server
     # terminating TCP on the PPP peer can choose a small MSS itself and mask
     # the router's missing clamp.

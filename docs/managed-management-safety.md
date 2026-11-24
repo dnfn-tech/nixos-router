@@ -77,6 +77,32 @@ cannot cancel or extend the executor watchdog. An expired candidate cannot be
 promoted; recovery uses its journaled baseline, not the current saved draft.
 Saved drafts are retained for inspection and are not automatically replayed.
 
+## Applying changes without rebuilding unchanged links
+
+Within a running executor, Apply and candidate timeout recovery preserve an
+already verified WAN session and LAN bridge when their configuration and
+observed ownership/topology still agree. This retains STP forwarding state and
+the protocol generation used by DHCP/PPP callbacks. DNS, DHCP leases and
+firewall policy can be updated without detaching wired ports or restarting WAN;
+changed DNS or AP configuration restarts only the affected service. Changing
+an AP still interrupts its wireless clients.
+
+Every such activation atomically reloads the full intended firewall, even when
+its file is unchanged. PPP pre-up and warm activation share the private IPv6
+state lock; MTU is sampled while holding it so a reconnect cannot be overwritten
+with an older MSS ceiling. Service restarts occur after releasing that lock.
+Candidate confirmation and automatic rollback remain mandatory and unchanged.
+
+Cold executor restore, ownership/topology drift, WAN/IPv6 changes, and LAN
+address/port changes use full activation and can interrupt connectivity. This
+optimization does not shorten STP timers or disable loop protection.
+
+Deploy the backend and Nix module together. A running pppd retains the immutable
+hook path passed at process start: daemon-reload alone cannot install the new
+pre-up lock. Initial rollout therefore needs a planned PPP restart (normal
+executor restore also fully activates the network). Warm continuity applies
+only after that rollout; retain independent management access during it.
+
 ## Restart and failure behavior
 
 The root-private `managed/candidate.json` journal is persisted before mutation.

@@ -561,6 +561,9 @@ func (m *Manager) switchFiles(ctx context.Context, dir string) error {
 	})
 }
 func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Config, dir string) error {
+	if preserved, err := m.activatePreservingRuntime(ctx, c, old, dir); preserved || err != nil {
+		return err
+	}
 	if err := m.cmd(ctx, "nft", "-f", filepath.Join(dir, "firewall.nft")); err != nil {
 		return err
 	}
