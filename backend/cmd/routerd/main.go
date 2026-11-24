@@ -184,7 +184,7 @@ func main() {
 	}
 	var ddns server.ManagedDDNSConfig
 	if raw, set := os.LookupEnv("NIXOS_ROUTER_MANAGED_DDNS_CONFIG"); set {
-		if err := json.Unmarshal([]byte(raw), &ddns); err != nil || ddns.Record == "" {
+		if err := json.Unmarshal([]byte(raw), &ddns); err != nil || (ddns.Record == "" && !ddns.SettingsEditable) {
 			log.Print("Invalid managed DDNS metadata; DDNS controls are unavailable")
 			ddns = server.ManagedDDNSConfig{}
 		}

@@ -298,3 +298,41 @@ test("host DDNS saves its switch independently of the router draft", async () =>
     await context.close();
   }
 });
+
+test("host DDNS edits the domain and sends a write-only token", async () => {
+  const { page, context } = await pageAt("ddns");
+  try {
+    let settings = {
+      enabled: true, settingsEditable: true, provider: "Cloudflare",
+      record: "original.example.net", recordType: "A",
+    };
+    let saved;
+    await page.route("**/api/v1/health", route => route.fulfill({
+      json: { ...managedHealth, capabilities: { ...managedHealth.capabilities, managedDDNS: true } },
+    }));
+    await page.route("**/api/v1/ddns", async route => {
+      if (route.request().method() === "PATCH") {
+        saved = route.request().postDataJSON();
+        settings = { ...settings, record: saved.record, zoneId: saved.zoneId, tokenConfigured: true };
+      }
+      await route.fulfill({ json: settings });
+    });
+    await page.locator("#page-refresh").click();
+    const domain = page.getByLabel("DDNS 域名", { exact: true });
+    const zone = page.getByLabel("Cloudflare Zone ID", { exact: true });
+    const token = page.getByLabel("Cloudflare API Token", { exact: true });
+    await domain.waitFor();
+    assert.equal(await domain.inputValue(), "original.example.net");
+    await domain.fill("new.example.net");
+    await zone.fill("0123456789abcdef0123456789abcdef");
+    await token.fill("mock-token");
+    await page.getByRole("button", { name: "保存域名与凭据" }).click();
+    await page.getByText("DDNS 参数已保存，下次检查生效。", { exact: true }).waitFor();
+    assert.deepEqual(saved, { record: "new.example.net", zoneId: "0123456789abcdef0123456789abcdef", apiToken: "mock-token" });
+    assert.equal(await token.inputValue(), "");
+    assert.match(await page.locator("#page-content").innerText(), /Cloudflare · new\.example\.net/);
+    assert.equal(await page.locator("#apply-run").isDisabled(), true);
+  } finally {
+    await context.close();
+  }
+});

@@ -2420,6 +2420,63 @@
       ),
     );
   }
+  function managedDDNSSettings(ddns, onSaved) {
+    const input = (title, attr) => {
+      const id = `field-${++fieldId}`;
+      const control = node("input", { id, ...attr });
+      return { control, element: node("div", { class: "stack" }, node("label", { for: id }, title), control) };
+    };
+    const domain = input("DDNS 域名", { type: "text", maxlength: 254, placeholder: "edge.example.net", spellcheck: "false" });
+    const zone = input("Cloudflare Zone ID", { type: "text", maxlength: 32, autocomplete: "off", spellcheck: "false" });
+    const token = input("Cloudflare API Token", { type: "password", maxlength: 512, autocomplete: "new-password" });
+    const result = node("p", { role: "status", class: "help" });
+    const hint = node("p", { class: "help" });
+    const secure = window.isSecureContext;
+    let saved = ddns;
+    let saving = false;
+    token.control.disabled = !secure;
+    const sync = () => {
+      const dirty = domain.control.value.trim() !== (saved.record || "") ||
+        zone.control.value.trim() !== (saved.zoneId || "") || token.control.value !== "";
+      save.disabled = saving || !dirty;
+    };
+    const save = btn("保存域名与凭据", async () => {
+      saving = true;
+      for (const field of [domain, zone, token]) field.control.disabled = true;
+      sync();
+      try {
+        const current = await api("/api/v1/ddns", { method: "PATCH", body: {
+          record: domain.control.value.trim(),
+          zoneId: zone.control.value.trim(),
+          apiToken: token.control.value,
+        } });
+        render(current);
+        onSaved(current);
+        result.textContent = "DDNS 参数已保存，下次检查生效。";
+      } catch (e) {
+        result.textContent = `保存失败：${e.message}`;
+      } finally {
+        saving = false;
+        domain.control.disabled = zone.control.disabled = false;
+        token.control.disabled = !secure;
+        sync();
+      }
+    });
+    function render(current) {
+      saved = current;
+      domain.control.value = current.record || "";
+      zone.control.value = current.zoneId || "";
+      token.control.value = "";
+      hint.textContent = !secure ? "如需输入令牌，请使用 HTTPS 或本地 SSH 隧道。" :
+        current.tokenConfigured ? "已保存令牌。留空保留，填写新令牌可替换。" :
+          "留空沿用主机凭据（如有）。填写新令牌时需提供所属 Zone ID。";
+      sync();
+    }
+    for (const field of [domain, zone, token]) field.control.addEventListener("input", sync);
+    render(ddns);
+    return stack([domain.element, zone.element, token.element, hint, save, result]);
+  }
+
   function managedDDNSPage(ddns) {
     if (!ddns) return card("动态 DNS", notice("无法读取 DDNS 开关状态，请刷新重试。", "error"));
     const id = `field-${++fieldId}`;
@@ -2427,6 +2484,9 @@
     enabled.checked = ddns.enabled;
     const result = node("p", { role: "status", class: "help" });
     let saved = ddns.enabled;
+    const summaryText = current => [current.provider, current.record, current.recordType &&
+      `DNS-only ${current.recordType} 记录`].filter(Boolean).join(" · ");
+    const summary = node("p", {}, summaryText(ddns));
     const save = btn("保存 DDNS", async () => {
       enabled.disabled = save.disabled = true;
       try {
@@ -2444,11 +2504,13 @@
     enabled.addEventListener("change", () => { save.disabled = enabled.checked === saved; });
     return card(
       "动态 DNS",
-      node("p", {}, [ddns.provider, ddns.record, ddns.recordType && `DNS-only ${ddns.recordType} 记录`].filter(Boolean).join(" · ")),
+      summary,
       ddns.interface || ddns.intervalMinutes ? node("p", { class: "help" },
         [ddns.interface && `地址来源 ${ddns.interface}`,
           ddns.intervalMinutes && `每 ${ddns.intervalMinutes} 分钟检查`].filter(Boolean).join(" · ")) : null,
-      node("p", { class: "help" }, "令牌由主机管理。保存后影响下一次定时检查。"),
+      ddns.settingsEditable
+        ? managedDDNSSettings(ddns, current => { summary.textContent = summaryText(current); })
+        : node("p", { class: "help" }, "令牌由主机管理。保存后影响下一次定时检查。"),
       node("label", { for: id }, enabled, "启用动态 DNS"),
       save,
       result,
