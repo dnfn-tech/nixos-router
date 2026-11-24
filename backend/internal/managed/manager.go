@@ -44,6 +44,7 @@ type Options struct {
 	Modules             []string // Trusted deployment allowlist; nil defaults to adblock.
 	SSHPorts            []int
 	WANUDPPorts         []int // Trusted deployment policy, outside Config/RPC.
+	WANTCPPorts         []int // Trusted non-management host TCP listeners.
 	CountryCode         string
 	Runner              Runner
 	Clock               func() time.Time
@@ -109,6 +110,21 @@ func New(o Options) (*Manager, error) {
 		if !seenUDP[port] {
 			o.WANUDPPorts = append(o.WANUDPPorts, port)
 			seenUDP[port] = true
+		}
+	}
+	if len(o.WANTCPPorts) > 64 {
+		return nil, errors.New("too many host WAN TCP ports")
+	}
+	tcpPorts := o.WANTCPPorts
+	o.WANTCPPorts = nil
+	seenTCP := map[int]bool{}
+	for _, port := range tcpPorts {
+		if port < 1 || port > 65535 || port == o.ManagementPort || seenPorts[port] {
+			return nil, errors.New("invalid or protected host WAN TCP port")
+		}
+		if !seenTCP[port] {
+			o.WANTCPPorts = append(o.WANTCPPorts, port)
+			seenTCP[port] = true
 		}
 	}
 	if o.CountryCode == "" {

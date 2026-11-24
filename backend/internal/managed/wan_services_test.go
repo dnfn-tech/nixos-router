@@ -51,3 +51,28 @@ func TestWANUDPServicesFollowActualEgress(t *testing.T) {
 		}
 	}
 }
+
+func TestWANTCPServicesUseOnlyEgressAndProtectManagement(t *testing.T) {
+	m, _, c := fixture(t)
+	c.WAN.Mode = "pppoe"
+	opts := m.opts
+	opts.WANTCPPorts = []int{24443, 24443}
+	m, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	rules := m.render(c)["firewall.nft"]
+	allow := strings.Index(rules, `iifname "nr-ppp0" tcp dport { 24443 } accept`)
+	drop := strings.Index(rules, `iifname "nr-ppp0" drop`)
+	if allow < 0 || drop < allow || strings.Contains(rules, `iifname "wan0" tcp dport { 24443 }`) ||
+		strings.Contains(rules, "udp dport { 24443 }") {
+		t.Fatal("unexpected managed WAN listener policy")
+	}
+	for _, port := range []int{0, 65536, opts.ManagementPort, 22} {
+		opts.WANTCPPorts = []int{port}
+		if _, err := New(opts); err == nil {
+			t.Fatalf("invalid or protected port %d allowed", port)
+		}
+	}
+}

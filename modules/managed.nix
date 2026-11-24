@@ -13,6 +13,7 @@ let
     "--confirmation-timeout" "${toString m.confirmationTimeoutSeconds}s"
     "--ssh-ports" (lib.concatMapStringsSep "," toString sshPorts)
     "--wan-udp-ports" (lib.concatMapStringsSep "," toString m.wanUDPPorts)
+    "--wan-tcp-ports" (lib.concatMapStringsSep "," toString m.wanTCPPorts)
     "--modules" (lib.concatStringsSep "," m.modules) ];
   # ListenAddress may bind a port absent from the global Port directives.
   # Preserve every host SSH listener when optional WAN filtering is disabled.
@@ -189,6 +190,11 @@ in {
       default = [];
       description = "Trusted host UDP listeners allowed on the actual WAN exit (both address families), at most 64 entries. Does not trust overlay interfaces or permit forwarded traffic. Existing established connections follow connection tracking when an entry is removed.";
     };
+    wanTCPPorts = lib.mkOption {
+      type = lib.types.listOf lib.types.port;
+      default = [];
+      description = "Trusted host TCP listeners allowed on the actual WAN exit. SSH and the router management port are excluded.";
+    };
     managementAccess = lib.mkOption {
       type = lib.types.listOf (lib.types.submodule {
         options = {
@@ -208,6 +214,7 @@ in {
     assertions = [
       { assertion = builtins.length m.managementAccess <= 32 && lib.all (grant: builtins.length grant.sources >= 1 && builtins.length grant.sources <= 32 && !(lib.elem grant.interface m.interfaces) && grant.interface != m.wifiInterface) m.managementAccess; message = "nixos-router management grants must be bounded and separate from owned interfaces."; }
       { assertion = builtins.length m.wanUDPPorts <= 64 && lib.all (port: port >= 1) m.wanUDPPorts; message = "nixos-router managed WAN UDP allowlist permits at most 64 ports in 1..65535."; }
+      { assertion = builtins.length m.wanTCPPorts <= 64 && lib.all (p: p >= 1 && !(lib.elem p managementPorts)) m.wanTCPPorts; message = "nixos-router managed WAN TCP allowlist permits at most 64 non-management ports in 1..65535."; }
       { assertion = m.apiStateDir != cfg.stateDir && !(lib.hasPrefix "${cfg.stateDir}/" m.apiStateDir) && !(lib.hasPrefix "${m.apiStateDir}/" cfg.stateDir); message = "nixos-router API and executor state directories must not overlap."; }
       { assertion = !cfg.allowReboot; message = "nixos-router managed API does not yet support a privileged reboot RPC; leave allowReboot disabled."; }
       { assertion = m.interfaces != []; message = "nixos-router managed mode requires an explicit interface allowlist."; }

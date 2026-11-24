@@ -353,12 +353,20 @@ func (m *Manager) render(c config.Config) map[string]string {
 					nft += fmt.Sprintf(" iifname %q meta nfproto ipv6 udp sport 547 udp dport 546 accept;", iface)
 				}
 			}
-			if iface == egress && len(m.opts.WANUDPPorts) > 0 {
-				ports := make([]string, 0, len(m.opts.WANUDPPorts))
-				for _, port := range m.opts.WANUDPPorts {
-					ports = append(ports, fmt.Sprint(port))
+			if iface == egress {
+				for _, listener := range []struct {
+					protocol string
+					ports    []int
+				}{{"udp", m.opts.WANUDPPorts}, {"tcp", m.opts.WANTCPPorts}} {
+					if len(listener.ports) == 0 {
+						continue
+					}
+					ports := make([]string, 0, len(listener.ports))
+					for _, port := range listener.ports {
+						ports = append(ports, fmt.Sprint(port))
+					}
+					nft += fmt.Sprintf(" iifname %q %s dport { %s } accept;", iface, listener.protocol, strings.Join(ports, ", "))
 				}
-				nft += fmt.Sprintf(" iifname %q udp dport { %s } accept;", iface, strings.Join(ports, ", "))
 			}
 			nft += fmt.Sprintf(" iifname %q drop;", iface)
 		}

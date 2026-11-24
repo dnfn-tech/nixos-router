@@ -31,14 +31,14 @@ type options struct {
 	modules                                                                     []string
 	port                                                                        int
 	sshPorts                                                                    []int
-	wanUDPPorts                                                                 []int
+	wanUDPPorts, wanTCPPorts                                                    []int
 	managementAccess                                                            []managed.ManagementAccess
 	confirmationTimeout                                                         time.Duration
 }
 
 func parseOptions(args []string) (options, error) {
 	var o options
-	var ports, udpPorts, moduleList, accessJSON string
+	var ports, udpPorts, tcpPorts, moduleList, accessJSON string
 	fs := flag.NewFlagSet("router-executor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&o.prepareAPI, "prepare-api-state", "", "Initialize or migrate the API state directory offline, then exit")
@@ -53,6 +53,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&moduleList, "modules", "adblock", "Allowed compiled-in router modules")
 	fs.StringVar(&ports, "ssh-ports", "", "Trusted host SSH listener ports")
 	fs.StringVar(&udpPorts, "wan-udp-ports", "", "Trusted host UDP listeners allowed on the actual WAN exit")
+	fs.StringVar(&tcpPorts, "wan-tcp-ports", "", "Trusted host TCP listeners allowed on the actual WAN exit")
 	fs.StringVar(&accessJSON, "management-access", "[]", "Trusted JSON management interface/source grants")
 	fs.DurationVar(&o.confirmationTimeout, "confirmation-timeout", 120*time.Second, "Candidate confirmation window (10s..10m)")
 	if err := fs.Parse(args); err != nil {
@@ -106,6 +107,19 @@ func parseOptions(args []string) (options, error) {
 				return o, errors.New("invalid WAN UDP ports")
 			}
 			o.wanUDPPorts = append(o.wanUDPPorts, port)
+		}
+	}
+	if tcpPorts != "" {
+		parts := strings.Split(tcpPorts, ",")
+		if len(parts) > 64 {
+			return o, errors.New("too many WAN TCP ports")
+		}
+		for _, value := range parts {
+			port, err := strconv.Atoi(value)
+			if err != nil || port < 1 || port > 65535 {
+				return o, errors.New("invalid WAN TCP ports")
+			}
+			o.wanTCPPorts = append(o.wanTCPPorts, port)
 		}
 	}
 	return o, nil
@@ -171,7 +185,7 @@ func run(o options) error {
 	if err = os.Chown(o.socket, int(uid), int(gid)); err != nil {
 		return err
 	}
-	manager, err := managed.New(managed.Options{StateDir: o.stateDir, Interfaces: strings.Split(o.interfaces, ","), WiFiInterface: o.wifi, ManagementPort: o.port, ManagementAccess: o.managementAccess, ConfirmationTimeout: o.confirmationTimeout, SSHPorts: o.sshPorts, Modules: o.modules, WANUDPPorts: o.wanUDPPorts, CountryCode: o.country})
+	manager, err := managed.New(managed.Options{StateDir: o.stateDir, Interfaces: strings.Split(o.interfaces, ","), WiFiInterface: o.wifi, ManagementPort: o.port, ManagementAccess: o.managementAccess, ConfirmationTimeout: o.confirmationTimeout, SSHPorts: o.sshPorts, Modules: o.modules, WANUDPPorts: o.wanUDPPorts, WANTCPPorts: o.wanTCPPorts, CountryCode: o.country})
 	if err != nil {
 		return err
 	}
