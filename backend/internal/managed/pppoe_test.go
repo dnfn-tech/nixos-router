@@ -15,7 +15,7 @@ func TestPPPoEOptionsAndEgress(t *testing.T) {
 	c.WAN.Interface = "wan0"
 	for _, mode := range []string{"dhcp", "static"} {
 		c.WAN.Mode = mode
-		if got := wanEgress(c); got != "wan0" {
+		if got := WANEgress(c); got != "wan0" {
 			t.Fatal(got)
 		}
 		if got, err := renderPPPoE(c); err != nil || got != "" {
@@ -28,7 +28,7 @@ func TestPPPoEOptionsAndEgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wanEgress(c) != "nr-ppp0" {
+	if WANEgress(c) != "nr-ppp0" {
 		t.Fatal("physical WAN used for PPP traffic")
 	}
 	for _, line := range []string{`plugin pppoe.so`, `nic-wan0`, `ifname nr-ppp0`, `user "name with # and \"quote\""`, `password "secret\\with \"quotes\" # spaces"`, `mtu 1492`, `mru 1492`, `nodetach`, `persist`, `maxfail 0`, `holdoff 5`, `lcp-echo-interval 10`, `lcp-echo-failure 3`, `hide-password`} {

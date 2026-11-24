@@ -15,7 +15,12 @@ import (
 // reject foreign ownership before starting it, just as it does for the LAN bridge.
 const managedPPPInterface = "nr-ppp0"
 
-func wanEgress(c config.Config) string {
+// PPPLinkAlias is set by the managed PPP net-init hook before bringing up the link.
+const PPPLinkAlias = "nixos-router-managed-ppp"
+
+// WANEgress returns the interface owned by a managed WAN configuration.
+
+func WANEgress(c config.Config) string {
 	if c.WAN.Mode == "pppoe" {
 		return managedPPPInterface
 	}

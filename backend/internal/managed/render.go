@@ -284,7 +284,7 @@ func (m *Manager) render(c config.Config) map[string]string {
 	if c.WAN.Mode == "dhcp" {
 		wan = "WAN_INTERFACE='" + c.WAN.Interface + "'\n"
 	}
-	egress := wanEgress(c)
+	egress := WANEgress(c)
 	ppp, _ := renderPPPoE(c) // validated before generation
 	// add+flush+redefine runs as a single nft transaction and never touches foreign tables.
 	nft := "add table inet nixos_router\nflush table inet nixos_router\ntable inet nixos_router {\n"

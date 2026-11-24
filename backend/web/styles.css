@@ -839,3 +839,28 @@ td details > summary {
   overflow-wrap: anywhere;
 }
 .secret-clear input[type="checkbox"] { width: auto; flex: 0 0 auto; }
+
+.traffic-heading, .traffic-axis {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: .75rem;
+  flex-wrap: wrap;
+}
+.traffic-heading h3 { margin: 0; }
+.traffic-interface { color: var(--muted); }
+.traffic-rates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  margin: .75rem 0;
+}
+.traffic-rx { color: #38bdf8; }
+.traffic-tx { color: #34d399; }
+.traffic-chart {
+  display: block;
+  width: 100%;
+  height: 8rem;
+  border-bottom: 1px solid currentColor;
+}
+.traffic-ports { margin-top: 1rem; }

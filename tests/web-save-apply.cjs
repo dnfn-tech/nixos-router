@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
 const { mkdtempSync, rmSync } = require("node:fs");
 const { tmpdir } = require("node:os");
-const { join, resolve } = require("node:path");
+const { join } = require("node:path");
 const { createServer } = require("node:net");
 const { chromium } = require("playwright-core");
 let processHandle, browser, stateDir, base;
@@ -24,8 +24,6 @@ before(async () => {
       "--state-dir",
       stateDir,
       "--seed-default-config",
-      "--web-dir",
-      resolve(__dirname, "../backend/web"),
     ],
     {
       env: { ...process.env, NIXOS_ROUTER_ADMIN_PASSWORD: "web-test-only" },
@@ -1185,8 +1183,7 @@ test("overview polling resumes after hidden or busy ticks and stops on navigatio
         window.fireOverviewTick();
       });
       await refreshed;
-      await page.waitForFunction(() => !window.app.state.loading);
-      assert.equal(await page.evaluate(() => window.overviewTimers.size), 1);
+      await page.waitForFunction(() => window.overviewTimers.size === 1);
     }
     await navigate(page, "wan");
     assert.equal(await page.evaluate(() => window.overviewTimers.size), 0, "leaving overview must cancel its timer");
@@ -1231,14 +1228,15 @@ test("overview polling keeps content through slow and failed requests, ignores s
       await page.waitForFunction(async count => (await window.pendingClientsCount()) > count, count);
     };
     await page.exposeFunction("pendingClientsCount", () => pending.length);
-    const oldContent = await page.locator("#page-content").innerText();
+    const leaseMetric = page.locator(".metric-value").nth(1);
+    const oldContent = await leaseMetric.innerText();
     await tick();
-    assert.equal(await page.locator("#page-content").innerText(), oldContent);
+    assert.equal(await leaseMetric.innerText(), oldContent);
     assert.equal(await page.locator("#page-content").getAttribute("aria-busy"), "false");
     assert.equal(await page.getByText("页面加载中").count(), 0);
     await pending.shift().fulfill({ status: 503, json: { error: "temporary" } });
     await page.waitForFunction(() => window.overviewTimers.size === 1);
-    assert.equal(await page.locator("#page-content").innerText(), oldContent);
+    assert.equal(await leaseMetric.innerText(), oldContent);
 
     await tick();
     const focus = await page.evaluate(() => {
@@ -1252,14 +1250,8 @@ test("overview polling keeps content through slow and failed requests, ignores s
     await pending.shift().fulfill({ json: { source: "leases", clients: [{ hostname: "poll-client" }] } });
     await page.waitForFunction(() => window.overviewTimers.size === 1);
     assert.equal(await page.locator("#overview-focus-probe").evaluate(el => document.activeElement === el), true);
-    assert.equal(await page.locator("#page-content").innerText(), oldContent);
-
-    await page.evaluate(() => document.activeElement.blur());
-    await tick();
-    await pending.shift().fulfill({ json: { source: "leases", clients: [{ hostname: "poll-client" }] } });
-    await page.waitForFunction(() => document.querySelector("#page-content .metric-value") &&
-      [...document.querySelectorAll("#page-content .metric-value")].some(el => el.textContent === "1"));
-    assert.equal(await page.locator("#overview-focus-probe").count(), 0);
+    assert.equal(await leaseMetric.innerText(), "1");
+    assert.equal(await page.locator("#overview-focus-probe").count(), 1);
 
     await tick();
     await navigate(page, "wan");
@@ -1640,4 +1632,101 @@ test("registered module navigation works without a hardcoded page or existing co
   assert.equal(await page.getByLabel("高级配置（JSON）",{exact:true}).count(),1);
   assert.equal(await page.locator("#section-tabs").getByRole("link",{name:"新增模块",exact:true}).count(),1);
  } finally {await context.close()}
+});
+
+test("network overview samples rates and gaps, pauses, and respects session expiry", async () => {
+  const endpoint = "**/api/v1/network/live";
+  assert.equal((await fetch(base + "/api/v1/network/live")).status, 401);
+  const { page, context } = await pageAt("plugins");
+  try {
+    const live = await context.request.get(base + "/api/v1/network/live");
+    assert.equal(live.status(), 200);
+    assert.deepEqual(Object.keys(await live.json()).sort(),
+      ["clock", "contractDownMbps", "contractUpMbps", "lan", "ports", "wan"]);
+    const replies = [];
+    let hits = 0;
+    await page.route(endpoint, route => {
+      hits++;
+      const reply = replies.shift();
+      return route.fulfill(reply || { status: 503, json: {} });
+    });
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      const set = window.setTimeout, clear = window.clearTimeout;
+      let action;
+      window.setTimeout = (fn, delay, ...args) => {
+        if (delay !== 2000) return set(fn, delay, ...args);
+        action = () => fn(...args);
+        return -100;
+      };
+      window.clearTimeout = id => {
+        if (id === -100) action = null;
+        else clear(id);
+      };
+      window.hasTrafficTick = () => Boolean(action);
+      window.takeTrafficTick = () => {
+        const tick = action;
+        action = null;
+        tick();
+      };
+    });
+    const sample = (ms, rxBytes, txBytes, identity = "4/1") => ({ json: {
+      clock: "test", contractDownMbps: 300, contractUpMbps: 30,
+      wan: { name: "ppp7", identity, link: "up", sampleMs: ms, rxBytes, txBytes },
+      lan: { name: "br0", link: "down" },
+      ports: [{ name: "eth0", role: "wan", link: "up", speedMbps: 2500, duplex: "full" }],
+    } });
+    replies.push(sample(100, "100", "200"));
+    await navigate(page, "overview");
+    await page.waitForFunction(() => window.hasTrafficTick());
+    const selector = page.locator("#traffic-period");
+    await selector.selectOption("300");
+    await selector.focus();
+    const wan = page.locator(".traffic .grid > .card").first();
+    assert.match(await wan.innerText(), /下载 未采集/);
+    assert.match(await page.locator(".traffic").innerText(), /br0[\s\S]*接收 未连接/);
+    assert.match(await page.locator(".traffic-ports").innerText(), /2500 Mbps\s+全双工/);
+    const pulse = async reply => {
+      replies.push(reply);
+      await page.evaluate(() => window.takeTrafficTick());
+      await page.waitForFunction(() => window.hasTrafficTick());
+    };
+    await pulse(sample(2100, "1000100", "200"));
+    assert.match(await wan.innerText(), /下载 4.00 Mbps\s+上传 0 Mbps/);
+    assert.equal(await selector.evaluate(el => el === document.activeElement && el.value === "300"), true);
+    await pulse(sample(4100, "90", "200"));
+    assert.match(await wan.innerText(), /下载 未采集\s+上传 未采集/);
+    await pulse(sample(12100, "2000090", "200"));
+    assert.match(await wan.innerText(), /下载 未采集/);
+    await pulse(sample(14100, "3000090", "200"));
+    assert.match(await wan.innerText(), /下载 4.00 Mbps/);
+    await page.evaluate(() => {
+      for (const value of ["hidden", "visible"]) {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value });
+        document.dispatchEvent(new Event("visibilitychange"));
+      }
+    });
+    await pulse(sample(16100, "4000090", "200"));
+    assert.match(await wan.innerText(), /下载 未采集/);
+    await pulse({ status: 503, json: {} });
+    assert.match(await wan.innerText(), /下载 未采集/);
+    await page.getByRole("button", { name: "暂停" }).click();
+    const before = hits;
+    await page.evaluate(() => window.takeTrafficTick());
+    assert.equal(hits, before);
+    await page.getByRole("button", { name: "继续" }).click();
+    await pulse(sample(18100, "5000090", "200"));
+    assert.match(await wan.innerText(), /下载 未采集/);
+    await navigate(page, "wan");
+    assert.equal(await page.evaluate(() => window.hasTrafficTick()), false);
+    replies.push(sample(20100, "6000090", "200"));
+    await navigate(page, "overview");
+    await page.waitForFunction(() => window.hasTrafficTick());
+    replies.push({ status: 401, json: {} });
+    await page.evaluate(() => window.takeTrafficTick());
+    await page.locator("#login-submit").waitFor();
+    assert.equal(await page.evaluate(() => window.hasTrafficTick()), false);
+  } finally {
+    await context.close();
+  }
 });

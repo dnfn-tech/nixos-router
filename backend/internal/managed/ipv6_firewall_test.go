@@ -24,7 +24,7 @@ func TestIPv6WANProtocolFirewall(t *testing.T) {
 				c.WAN.Mode = "pppoe"
 			}
 			rules := m.render(c)["firewall.nft"]
-			egress := wanEgress(c)
+			egress := WANEgress(c)
 			guard := strings.Index(rules, `tcp dport { 8080, 22 } drop`)
 			drop := strings.Index(rules, `iifname "`+egress+`" drop`)
 			ra := strings.Index(rules, `iifname "`+egress+`" ip6 saddr fe80::/10 ip6 hoplimit 255 icmpv6 type nd-router-advert accept`)
@@ -114,7 +114,7 @@ func TestIPv6FirewallKernel(t *testing.T) {
 		run("--check", "-f", file)
 		run("-f", file)
 		run("list", "table", "inet", "foreign_sentinel")
-		probe := exec.Command("python", filepath.Join("..", "..", "..", "tests", "ipv6-firewall-packets.py"), mode, wanEgress(c))
+		probe := exec.Command("python", filepath.Join("..", "..", "..", "tests", "ipv6-firewall-packets.py"), mode, WANEgress(c))
 		if out, err := probe.CombinedOutput(); err != nil {
 			t.Fatalf("%s packet verdicts: %v\n%s", mode, err, out)
 		}

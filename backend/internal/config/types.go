@@ -41,10 +41,12 @@ type SystemConfig struct {
 
 // WAN: support dhcp|static|pppoe (stubs for now).
 type WANConfig struct {
-	Interface string       `json:"interface,omitempty"`
-	Mode      string       `json:"mode"` // "dhcp" | "static" | "pppoe"
-	Static    *StaticIP    `json:"static,omitempty"`
-	PPPoE     *PPPoEConfig `json:"pppoe,omitempty"`
+	ContractDownMbps uint32       `json:"contractDownMbps,omitempty"`
+	ContractUpMbps   uint32       `json:"contractUpMbps,omitempty"`
+	Interface        string       `json:"interface,omitempty"`
+	Mode             string       `json:"mode"` // "dhcp" | "static" | "pppoe"
+	Static           *StaticIP    `json:"static,omitempty"`
+	PPPoE            *PPPoEConfig `json:"pppoe,omitempty"`
 }
 
 type StaticIP struct {

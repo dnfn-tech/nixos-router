@@ -484,7 +484,7 @@ func (m *Manager) prepare(ctx context.Context, c config.Config) (string, error) 
 		return "", fmt.Errorf("read interface ownership: %w", e)
 	}
 	for _, l := range links {
-		if l.IfName == managedPPPInterface && l.IfAlias != "nixos-router-managed-ppp" {
+		if l.IfName == managedPPPInterface && l.IfAlias != PPPLinkAlias {
 			return "", errors.New("refusing to adopt an existing foreign PPP interface")
 		}
 		if l.IfName == c.WAN.Interface && l.Master != "" {

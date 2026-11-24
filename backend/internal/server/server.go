@@ -113,12 +113,23 @@ func (d defaultRunner) Run(name string, args ...string) error {
 	return cmd.Run()
 }
 func (d defaultRunner) Output(name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), d.deadline())
+	return d.outputContext(context.Background(), name, args...)
+}
+
+func (d defaultRunner) outputContext(ctx context.Context, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, d.deadline())
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.WaitDelay = time.Second
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
+}
+
+func (s *Server) commandOutput(ctx context.Context, name string, args ...string) (string, error) {
+	if runner, ok := s.runner.(defaultRunner); ok {
+		return runner.outputContext(ctx, name, args...)
+	}
+	return s.runner.Output(name, args...)
 }
 
 type ifacePrev struct {
@@ -175,6 +186,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/healthz", s.handleHealth) // alias for docs alignment
 	mux.HandleFunc("/api/v1/config", s.handleConfig)
 	mux.HandleFunc("/api/v1/status", s.handleStatus)
+	mux.HandleFunc("/api/v1/network/live", s.handleNetworkLive)
 	mux.HandleFunc("/api/v1/ui/nav", s.handleUINav)
 	mux.HandleFunc("/api/v1/plugins", s.handlePlugins)
 	mux.HandleFunc("/api/v1/plugins/", s.handlePlugins)
@@ -306,9 +318,10 @@ func (s *Server) readIfaceSysfs(name string) (map[string]interface{}, bool) {
 		"name": name,
 	}
 	source := "sysfs"
-	// operstate
-	if v, err := s.readFileTrim(filepath.Join(base, "operstate")); err == nil && v != "" {
-		out["up"] = strings.EqualFold(v, "up")
+	// Unknown link state is distinct from a confirmed disconnect.
+	switch state := s.linkState(name); state {
+	case "up", "down":
+		out["up"] = state == "up"
 	}
 	// speed (Mbps)
 	if v, err := s.readFileTrim(filepath.Join(base, "speed")); err == nil && v != "" {
@@ -608,7 +621,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// WiFi source (stub for now)
 	srcs["wifi"] = "stub"
 	// Units (core + plugins): best-effort via systemctl
-	units, unitsSource := s.collectUnitStatuses()
+	units, unitsSource := s.collectUnitStatuses(r.Context())
 	if unitsSource != "" {
 		srcs["units"] = unitsSource
 	}
@@ -711,7 +724,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // collectUnitStatuses queries known core/plugin units through systemctl (when present).
 // Returns list and a source marker: "systemctl" or "stub".
-func (s *Server) collectUnitStatuses() ([]map[string]string, string) {
+func (s *Server) collectUnitStatuses(ctx context.Context) ([]map[string]string, string) {
 	cfg := s.configSnapshot()
 	known := []struct {
 		id   string
@@ -767,7 +780,7 @@ func (s *Server) collectUnitStatuses() ([]map[string]string, string) {
 
 	out := make([]map[string]string, 0, len(known))
 	for _, k := range known {
-		stdout, err := s.runner.Output("systemctl", "is-active", k.unit)
+		stdout, err := s.commandOutput(ctx, "systemctl", "is-active", k.unit)
 		state := mapState(stdout, err)
 		out = append(out, map[string]string{
 			"id":    k.id,

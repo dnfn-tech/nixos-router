@@ -38,7 +38,7 @@ func TestWANUDPServicesFollowActualEgress(t *testing.T) {
 		c.WAN.Static = &config.StaticIP{AddressCIDR: "192.0.2.2/24"}
 		m.opts.WANUDPPorts = []int{9993}
 		rules := m.render(c)["firewall.nft"]
-		want := `iifname "` + wanEgress(c) + `" udp dport { 9993 } accept`
+		want := `iifname "` + WANEgress(c) + `" udp dport { 9993 } accept`
 		if !strings.Contains(rules, want) {
 			t.Fatal("missing explicit host service policy", rules)
 		}

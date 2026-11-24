@@ -126,8 +126,8 @@ in
       description = "NixOS Router Backend API";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
-      path = [ pkgs.systemd ]
-        ++ lib.optionals cfg.privilegedApply [ pkgs.nftables pkgs.iproute2 ];
+      path = [ pkgs.systemd pkgs.iproute2 ]
+        ++ lib.optionals cfg.privilegedApply [ pkgs.nftables ];
       serviceConfig = {
         ExecStart = lib.concatStringsSep " " (
           [ "${routerdPkg}/bin/routerd"

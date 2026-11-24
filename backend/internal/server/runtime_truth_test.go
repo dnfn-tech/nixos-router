@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/dnfn-tech/nixos-router/backend/internal/config"
@@ -20,7 +21,7 @@ func TestUnitStateRecognizesNonzeroExitOutput(t *testing.T) {
 		t.Run(tc.want+tc.out, func(t *testing.T) {
 			s := New(Options{Config: config.DefaultConfig()})
 			s.runner = &exitedStatusRunner{stdout: tc.out}
-			units, _ := s.collectUnitStatuses()
+			units, _ := s.collectUnitStatuses(context.Background())
 			for _, u := range units {
 				if u["state"] != tc.want {
 					t.Fatalf("got %v want %s", u, tc.want)
@@ -78,7 +79,7 @@ func TestManagedClientBlockUsesAppliedSnapshot(t *testing.T) {
 func TestManagedUnitsIncludeDedicatedPPPoE(t *testing.T) {
 	s := New(Options{Config: config.DefaultConfig(), ManagedRuntime: &runtimeStub{}})
 	s.runner = &exitedStatusRunner{stdout: "failed\n"}
-	units, source := s.collectUnitStatuses()
+	units, source := s.collectUnitStatuses(context.Background())
 	if source != "systemctl" {
 		t.Fatal(source)
 	}

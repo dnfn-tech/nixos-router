@@ -76,7 +76,7 @@
     skipHash: false,
   };
   let fieldId = 0,
-    refreshTimer;
+    refreshTimer, overviewView, trafficTimer, overviewRequest, trafficRequest;
   function node(tag, attrs = {}, ...children) {
     const e = document.createElement(tag);
     for (const [key, value] of Object.entries(attrs)) {
@@ -415,7 +415,7 @@
   }
   async function api(
     path,
-    { method = "GET", body, raw = false, timeout = 12000, revision } = {},
+    { method = "GET", body, raw = false, timeout = 12000, revision, onUnauthorized = showLogin } = {},
   ) {
     const controller = new AbortController(),
       timer = setTimeout(() => controller.abort(), timeout);
@@ -435,7 +435,7 @@
         cache: "no-store",
       });
       if (response.status === 401 && path !== "/api/v1/session/password") {
-        showLogin();
+        onUnauthorized();
         const error = new Error("登录已过期，请重新登录");
         error.status = 401;
         throw error;
@@ -1607,9 +1607,205 @@
     }
     return editor(parts);
   }
+  function replaceIfChanged(container, content) {
+    if (!container.contains(document.activeElement) &&
+        !container.firstElementChild?.isEqualNode(content))
+      container.replaceChildren(content);
+  }
+
+  function liveNetwork(wanConfig) {
+    const period = node("select", { id: "traffic-period" },
+      node("option", { value: 60 }, "最近 60 秒"),
+      node("option", { value: 300 }, "最近 5 分钟"));
+    const sampleNote = node("p", { class: "help" }, "每 2 秒采样 · Mbps");
+    const ports = node("div", { class: "traffic-ports" },
+      node("p", { class: "help" }, "物理网口未采集"));
+    let paused = false, lastTime = performance.now(), sampleGeneration = 0;
+    const pause = btn("暂停", () => {
+      paused = !paused;
+      pause.textContent = paused ? "继续" : "暂停";
+      pause.setAttribute("aria-pressed", String(paused));
+      sampleNote.textContent = paused ? "已暂停 · Mbps" : "每 2 秒采样 · Mbps";
+      breakSample();
+    }, "quiet");
+    pause.setAttribute("aria-pressed", "false");
+
+    function panel(title, rxLabel, txLabel) {
+      const name = node("span", { class: "traffic-interface" });
+      const rx = node("strong", {}, "未采集"), tx = node("strong", {}, "未采集");
+      const chart = node("canvas", { class: "traffic-chart", role: "img",
+        "aria-label": title + " " + rxLabel + "与" + txLabel + "趋势",
+        width: 600, height: 150 });
+      const ago = node("span", {}, "60 秒前");
+      const scale = node("span", {}, "");
+      const detail = node("p", { class: "help" });
+      const element = card(title,
+        name,
+        node("div", { class: "traffic-rates" },
+          node("span", { class: "traffic-rx" }, rxLabel, " ", rx),
+          node("span", { class: "traffic-tx" }, txLabel, " ", tx)),
+        chart,
+        node("div", { class: "traffic-axis help" }, ago, scale, node("span", {}, "现在")),
+        detail);
+      return { element, name, rx, tx, chart, ago, scale, detail, points: [], previous: null };
+    }
+    const wan = panel("外网 WAN", "下载", "上传");
+    const lan = panel("内网 LAN", "接收", "发送");
+    const panels = [wan, lan];
+    function breakSample() {
+      sampleGeneration++;
+      for (const panel of panels) panel.previous = null;
+    }
+    updateWANDetail(wanConfig);
+    lan.detail.textContent = "以路由器为方向基准，仅统计 LAN 桥接口。桥内端口间转发不在统计范围内。";
+
+    function draw(panel) {
+      const { chart, points, ago, scale } = panel;
+      const ctx = chart.getContext("2d");
+      if (!ctx) return;
+      const seconds = Number(period.value);
+      const from = lastTime - seconds * 1000;
+      ago.textContent = seconds === 60 ? "60 秒前" : "5 分钟前";
+      const visible = points.filter(p => p.time >= from);
+      const { width, height } = chart;
+      const max = Math.ceil(Math.max(1, ...visible.flatMap(p => [p.rx ?? 0, p.tx ?? 0])));
+      ctx.clearRect(0, 0, width, height);
+      const hasRates = visible.some(p => p.rx !== null || p.tx !== null);
+      scale.textContent = hasRates ? "0–" + max + " Mbps" : "";
+      if (!hasRates) return;
+      ctx.strokeStyle = "rgba(150, 165, 185, 0.25)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (const y of [4, height / 2, height - 4]) {
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+      }
+      ctx.stroke();
+      for (const [key, color] of [["rx", "#38bdf8"], ["tx", "#34d399"]]) {
+        ctx.strokeStyle = ctx.fillStyle = color;
+        ctx.lineWidth = 2;
+        let previous = null;
+        for (const point of visible) {
+          if (point[key] === null) {
+            previous = null;
+            continue;
+          }
+          const x = 3 + (point.time - from) / (seconds * 1000) * (width - 6);
+          const y = height - 4 - point[key] / max * (height - 8);
+          if (previous) {
+            ctx.beginPath();
+            ctx.moveTo(previous.x, previous.y);
+            ctx.lineTo(x, y);
+            ctx.stroke();
+          }
+          ctx.fillRect(x - 1, y - 1, 2, 2);
+          previous = { x, y };
+        }
+      }
+    }
+    period.addEventListener("change", () => panels.forEach(draw));
+    const counter = value => typeof value === "string" && /^\d+$/.test(value) ? BigInt(value) : null;
+    const format = n => n === 0 ? "0 Mbps" : n < 0.01 ? "<0.01 Mbps" : n.toFixed(2) + " Mbps";
+    function updatePanel(panel, sample, data) {
+      if (sample?.name && sample.name !== panel.interfaceName) {
+        panel.points = [];
+        panel.interfaceName = sample?.name;
+      }
+      if (sample) panel.name.textContent = sample.name || "接口未采集";
+      const current = sample?.identity ? {
+        identity: sample.identity, name: sample.name, clock: data.clock,
+        ms: sample.sampleMs, rx: counter(sample.rxBytes), tx: counter(sample.txBytes),
+      } : null;
+      const prev = panel.previous;
+      panel.previous = current;
+      const elapsed = current && prev ? current.ms - prev.ms : 0;
+      const continuous = elapsed > 0 && elapsed <= 6000 && current.clock === prev.clock &&
+        current.identity === prev.identity && current.name === prev.name &&
+        !["rx", "tx"].some(key => current[key] !== null && prev[key] !== null && current[key] < prev[key]);
+      const point = { time: lastTime, rx: null, tx: null };
+      for (const key of ["rx", "tx"]) {
+        if (continuous && current[key] !== null && prev[key] !== null)
+          point[key] = Number(current[key] - prev[key]) * 0.008 / elapsed;
+        panel[key].textContent = point[key] === null
+          ? (sample?.link === "down" ? "未连接" : "未采集")
+          : format(point[key]);
+      }
+      panel.points.push(point);
+      panel.points = panel.points.filter(p => lastTime - p.time <= 300000);
+      draw(panel);
+    }
+    function updateWANDetail(configured, observedPorts) {
+      const contract = [];
+      if (configured?.contractDownMbps > 0) contract.push("下载 " + configured?.contractDownMbps + " Mbps");
+      if (configured?.contractUpMbps > 0) contract.push("上传 " + configured?.contractUpMbps + " Mbps");
+      wan.detail.textContent = "运营商签约带宽：" + (contract.join(" / ") || "未配置");
+      const physicalWAN = observedPorts?.find(p => p.role === "wan");
+      if (physicalWAN) wan.detail.textContent += " · 配置的 WAN 物理口：" + physicalWAN.name;
+    }
+    function update(data) {
+      if (paused) return;
+      lastTime = performance.now();
+      updatePanel(wan, data?.wan, data);
+      updatePanel(lan, data?.lan, data);
+      if (!data) {
+        replaceIfChanged(ports, node("p", { class: "help" }, "物理网口未采集"));
+        return;
+      }
+      updateWANDetail(data, data.ports);
+      replaceIfChanged(ports, data.ports?.length ? table(
+        ["用途", "物理网口", "链路状态", "协商速率", "双工"],
+        data.ports.map(p => [
+          { wan: "外网 WAN", lan: "内网 LAN" }[p.role] || "其他",
+          p.name,
+          { up: "已连接", down: "未连接" }[p.link] || "未采集",
+          p.speedMbps ? p.speedMbps + " Mbps" : (p.link === "down" ? "—" : "未采集"),
+          { full: "全双工", half: "半双工" }[p.duplex] || (p.link === "down" ? "—" : "未采集"),
+        ]), "物理网口链路协商") : node("p", { class: "help" }, "物理网口未采集"));
+    }
+    return {
+      content: node("section", { class: "card stack traffic" },
+        node("div", { class: "traffic-heading" },
+          node("h3", {}, "实时流量与链路"),
+          node("div", { class: "toolbar" },
+            node("label", { for: period.id }, "时间范围"), period, pause)),
+        node("div", { class: "grid" }, wan.element, lan.element), sampleNote),
+      ports, update,
+      breakSample,
+      get paused() { return paused; },
+      get sampleGeneration() { return sampleGeneration; },
+    };
+  }
+
+  function scheduleTraffic(epoch, delay = 2000) {
+    trafficTimer = setTimeout(async () => {
+      const current = () => epoch === state.epoch && state.loggedIn &&
+        state.route === "overview" && overviewView;
+      if (!current()) return;
+      const { traffic } = overviewView;
+      try {
+        if (traffic.paused || trafficRequest) return;
+        if (document.visibilityState !== "visible") {
+          traffic.breakSample();
+          return;
+        }
+        const generation = traffic.sampleGeneration;
+        trafficRequest = api("/api/v1/network/live", {
+          timeout: 4000,
+          onUnauthorized: () => { if (current()) showLogin(); },
+        }).catch(() => null);
+        const data = await trafficRequest;
+        trafficRequest = null;
+        if (current() && generation === traffic.sampleGeneration) {
+          if (document.visibilityState === "visible") traffic.update(data);
+          else traffic.breakSample();
+        }
+      } finally {
+        if (current()) scheduleTraffic(epoch);
+      }
+    }, delay);
+  }
+
   function overview(cfg, status, clients) {
-    const items = clients?.clients || [],
-      measured = ["leases", "mixed"].includes(clients?.source);
     const metric = (label, value, detail) =>
       node(
         "section",
@@ -1625,29 +1821,38 @@
       missing: "未获取 / 不可用",
       unknown: "未采集",
     };
-    const services = card(
-      "服务运行状态",
-      status?.sources?.units === "systemctl"
-        ? table(
-            ["服务", "状态"],
-            (status.units || []).map((u) => [
-              u.unit,
-              unitNames[u.state] || "未采集",
-            ]),
-            "服务运行状态",
-          )
-        : empty("未采集服务状态", "当前部署没有提供系统服务查询结果。"),
-    );
-    const interfaces = (status?.interfaces || []).map((i) => [
-      i.role === "wan" ? "外网 WAN" : "内网 LAN",
-      i.name || "未提供",
-      i.source === "sysfs" && typeof i.up === "boolean"
-        ? i.up
-          ? "已连接"
-          : "未连接"
-        : "未采集",
-      i.source === "sysfs" ? "系统接口" : "配置值",
-    ]);
+    const leaseValue = node("span");
+    const leaseDetail = node("span");
+    const interfaceBody = node("div");
+    const servicesBody = node("div");
+    const traffic = liveNetwork(cfg.wan);
+    function update(nextStatus, nextClients) {
+      if (nextClients) {
+        const measured = ["leases", "mixed"].includes(nextClients.source);
+        leaseValue.textContent = measured ? String((nextClients.clients || []).length) : "未采集";
+        leaseDetail.textContent = measured ? "租约数量不等于当前在线数量" : "未接入有效租约数据";
+      }
+      if (nextStatus) refreshStatus(nextStatus);
+    }
+    function refreshStatus(nextStatus) {
+      const interfaces = (nextStatus.interfaces || []).map(i => [
+        i.role === "wan" ? "外网 WAN" : "内网 LAN",
+        i.name || "未提供",
+        i.source === "sysfs" && typeof i.up === "boolean"
+          ? (i.up ? "已连接" : "未连接") : "未采集",
+        i.source === "sysfs" ? "系统接口" : "配置值",
+      ]);
+      replaceIfChanged(interfaceBody, interfaces.length
+        ? table(["用途", "接口", "链路状态", "来源"], interfaces, "网络接口状态")
+        : empty("运行信息不可用", "请检查管理服务连接。"));
+      replaceIfChanged(servicesBody, nextStatus.sources?.units === "systemctl"
+        ? table(["服务", "状态"], (nextStatus.units || []).map(u => [
+            u.unit, unitNames[u.state] || "未采集",
+          ]), "服务运行状态")
+        : empty("未采集服务状态", "当前部署没有提供系统服务查询结果。"));
+    }
+    update(status || {}, clients || {});
+    overviewView = { update, traffic };
     return node(
       "div",
       { class: "dashboard stack" },
@@ -1661,8 +1866,8 @@
         ),
         metric(
           "客户端租约",
-          measured ? String(items.length) : "未采集",
-          measured ? "租约数量不等于当前在线数量" : "未接入有效租约数据",
+          leaseValue,
+          leaseDetail,
         ),
         metric(
           "已配置接入点",
@@ -1675,20 +1880,16 @@
           "保存值，不代表已应用到主机",
         ),
       ),
+      traffic.content,
+      card(
+        "网络接口",
+        interfaceBody,
+        traffic.ports,
+        node("div", { class: "toolbar" }, link("wan"), link("lan")),
+      ),
       node(
         "div",
         { class: "grid" },
-        card(
-          "网络接口",
-          interfaces.length
-            ? table(
-                ["用途", "接口", "链路状态", "来源"],
-                interfaces,
-                "网络接口状态",
-              )
-            : empty("运行信息不可用", "请检查管理服务连接。"),
-          node("div", { class: "toolbar" }, link("wan"), link("lan")),
-        ),
         kv("家庭网络配置", [
           ["内网网段", cfg.lan?.ipv4Cidr || "未设置"],
           [
@@ -1698,12 +1899,12 @@
           ["上网方式", cfg.wan?.mode || "未设置"],
           ["无线配置", cfg.wifi?.enable ? "已配置启用" : "已配置关闭"],
         ]),
+        card("服务运行状态", servicesBody),
       ),
-      services,
       card(
         "数据与生效说明",
         notice(
-          "接口链路连接不代表互联网可达。无线硬件、实时流量和设备在线状态尚未完整采集；这里不会使用模拟数据填充。",
+          "接口链路连接不代表互联网可达。无线硬件和设备在线状态尚未完整采集。",
         ),
         node(
           "div",
@@ -2170,6 +2371,8 @@
   }
   async function renderRoute() {
     clearTimeout(refreshTimer);
+    clearTimeout(trafficTimer);
+    overviewView = null;
     if (!state.loggedIn) return;
     const epoch = ++state.epoch;
     state.loading = true;
@@ -2277,7 +2480,10 @@
         syncActions();
       }
     }
-    if (epoch === state.epoch && id === "overview") scheduleOverviewRefresh(epoch);
+    if (epoch === state.epoch && overviewView && id === "overview") {
+      scheduleOverviewRefresh(epoch);
+      scheduleTraffic(epoch, 0);
+    }
   }
   function scheduleOverviewRefresh(epoch) {
     refreshTimer = setTimeout(async () => {
@@ -2289,23 +2495,19 @@
         !document.querySelector("dialog[open]");
       if (!current()) return;
       try {
-        if (!canRefresh()) return;
-        const [status, clients] = await Promise.all([
-          api("/api/v1/status"),
-          api("/api/v1/clients"),
+        if (!canRefresh() || overviewRequest) return;
+        const options = { onUnauthorized: () => { if (current()) showLogin(); } };
+        overviewRequest = Promise.allSettled([
+          api("/api/v1/status", options),
+          api("/api/v1/clients", options),
         ]);
+        const [status, clients] = await overviewRequest;
+        overviewRequest = null;
         if (!current() || !canRefresh()) return;
-        const target = $("#page-content");
-        const content = overview(state.configCache, status, clients);
-        if (
-          !target.contains(document.activeElement) &&
-          !target.firstElementChild?.isEqualNode(content)
-        ) {
-          target.replaceChildren(content);
-        }
-      } catch {
-        // Keep the last rendered data during a transient polling failure.
-        // The API helper still handles expired sessions.
+        overviewView?.update(
+          status.status === "fulfilled" ? status.value : null,
+          clients.status === "fulfilled" ? clients.value : null,
+        );
       } finally {
         if (current()) scheduleOverviewRefresh(epoch);
       }
@@ -2313,6 +2515,8 @@
   }
   function showLogin() {
     clearTimeout(refreshTimer);
+    clearTimeout(trafficTimer);
+    overviewView = null;
     state.epoch++;
     state.loggedIn = false;
     state.pageDirty = false;
@@ -2403,6 +2607,7 @@
       const open = $("#top-nav").classList.toggle("open");
       $("#nav-toggle").setAttribute("aria-expanded", String(open));
     });
+    document.addEventListener("visibilitychange", () => overviewView?.traffic.breakSample());
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") closeNav();
     });
