@@ -94,3 +94,45 @@ func TestNetworkLiveUsesPPPAndBridgeCounters(t *testing.T) {
 		t.Fatalf("reconnected PPP did not replace its identity and counters: %+v", changed)
 	}
 }
+
+func TestNetworkLiveIndependentWiFi(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("NIXOS_ROUTER_SYS_CLASS_NET", root)
+	writeIfaceSysfs(t, root, "wlan-test", true, 1000, "full", 0, 0)
+	if err := os.WriteFile(filepath.Join(root, "wlan-test", "ifindex"), []byte("8"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.WiFi.Enable, cfg.WiFi.BridgeToLan = true, false
+	cfg.WiFi.Network = &config.WiFiNetwork{IPv4CIDR: "192.168.2.1/24"}
+	srv := New(Options{Config: cfg, WiFiInterface: "wlan-test", ManagedRuntime: &networkLiveApplied{applied: cfg, known: true}})
+	draft := config.DefaultConfig()
+	value, _ := json.Marshal(srv.collectNetworkLive(context.Background(), draft))
+	var result struct{ WiFi *liveInterface }
+	if err := json.Unmarshal(value, &result); err != nil || result.WiFi == nil || result.WiFi.RXBytes != "1000" {
+		t.Fatalf("independent WiFi counter absent: %s", value)
+	}
+	cfg.WiFi.BridgeToLan = true
+	srv.managedRuntime = &networkLiveApplied{applied: cfg, known: true}
+	value, _ = json.Marshal(srv.collectNetworkLive(context.Background(), draft))
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(value, &fields); err != nil || fields["wifi"] != nil {
+		t.Fatalf("bridged WiFi should not be separately counted: %s", value)
+	}
+	srv.managedRuntime = &networkLiveApplied{applied: cfg}
+	value, _ = json.Marshal(srv.collectNetworkLive(context.Background(), config.Config{WiFi: config.WiFiConfig{Enable: true, Network: cfg.WiFi.Network}}))
+	fields = nil
+	if err := json.Unmarshal(value, &fields); err != nil || fields["wifi"] != nil {
+		t.Fatalf("unknown applied topology must not report draft counters: %s", value)
+	}
+}
+
+type networkLiveApplied struct {
+	runtimeStub
+	applied config.Config
+	known   bool
+}
+
+func (r networkLiveApplied) Applied(context.Context) (config.Config, bool, error) {
+	return r.applied, r.known, nil
+}

@@ -15,8 +15,17 @@ import (
 // Its absence preserves the existing enabled state on upgrade.
 const ddnsDisabledFile = "cloudflare-ddns.disabled"
 
+// ManagedDDNSConfig is public metadata supplied by the host updater's configuration.
+type ManagedDDNSConfig struct {
+	Provider        string `json:"provider,omitempty"`
+	Record          string `json:"record"`
+	RecordType      string `json:"recordType,omitempty"`
+	Interface       string `json:"interface,omitempty"`
+	IntervalMinutes int    `json:"intervalMinutes,omitempty"`
+}
+
 func (s *Server) managedDDNSConfigured() bool {
-	return s.managedRuntime != nil && s.managedDDNSRecord != "" && s.stateDir != ""
+	return s.managedRuntime != nil && s.managedDDNSConfig.Record != "" && s.stateDir != ""
 }
 
 func (s *Server) handleManagedDDNS(w http.ResponseWriter, r *http.Request) {
@@ -61,10 +70,10 @@ func (s *Server) handleManagedDDNS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled": errors.Is(err, os.ErrNotExist),
-		"record":  s.managedDDNSRecord,
-	})
+	writeJSON(w, http.StatusOK, struct {
+		ManagedDDNSConfig
+		Enabled bool `json:"enabled"`
+	}{s.managedDDNSConfig, errors.Is(err, os.ErrNotExist)})
 }
 
 func setManagedDDNSEnabled(path string, enabled bool) error {

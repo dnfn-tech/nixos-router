@@ -182,11 +182,20 @@ func main() {
 			runtime = manager
 		}
 	}
+	var ddns server.ManagedDDNSConfig
+	if raw, set := os.LookupEnv("NIXOS_ROUTER_MANAGED_DDNS_CONFIG"); set {
+		if err := json.Unmarshal([]byte(raw), &ddns); err != nil || ddns.Record == "" {
+			log.Print("Invalid managed DDNS metadata; DDNS controls are unavailable")
+			ddns = server.ManagedDDNSConfig{}
+		}
+	} else {
+		ddns.Record = os.Getenv("NIXOS_ROUTER_MANAGED_DDNS_RECORD")
+	}
 	s := server.New(server.Options{Modules: allowedModules,
 		ManagedRuntime:      runtime,
 		StartupWarning:      startupWarning,
 		WiFiInterface:       *wifiInterface,
-		ManagedDDNSRecord:   os.Getenv("NIXOS_ROUTER_MANAGED_DDNS_RECORD"),
+		ManagedDDNSConfig:   ddns,
 		Config:              cfg,
 		ConfigPath:          cfgPath,
 		StateDir:            opts.StateDir,

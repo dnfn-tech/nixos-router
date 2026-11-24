@@ -42,7 +42,7 @@ type Server struct {
 	startupWarning    string
 	managedRuntime    ManagedRuntime
 	wifiInterface     string
-	managedDDNSRecord string
+	managedDDNSConfig ManagedDDNSConfig
 	cfg               config.Config
 	cfgPath           string
 	stateDir          string
@@ -75,7 +75,7 @@ type Options struct {
 	Modules           []string
 	StartupWarning    string
 	WiFiInterface     string // Trusted managed radio; never selected from request input.
-	ManagedDDNSRecord string // Trusted DNS-only record served by a host updater.
+	ManagedDDNSConfig ManagedDDNSConfig // Non-secret metadata supplied by the host.
 
 	ManagedRuntime ManagedRuntime
 	Config         config.Config
@@ -150,7 +150,7 @@ func New(opts Options) *Server {
 		modules:             append([]string{}, opts.Modules...),
 		startupWarning:      opts.StartupWarning,
 		wifiInterface:       opts.WiFiInterface,
-		managedDDNSRecord:   opts.ManagedDDNSRecord,
+		managedDDNSConfig:   opts.ManagedDDNSConfig,
 		cfg:                 opts.Config,
 		cfgPath:             opts.ConfigPath,
 		stateDir:            opts.StateDir,

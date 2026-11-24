@@ -1652,11 +1652,14 @@
     }
     const wan = panel("外网 WAN", "下载", "上传");
     const lan = panel("内网 LAN", "接收", "发送");
+    const wifi = panel("独立 Wi‑Fi 网段", "接收", "发送");
+    wifi.element.hidden = true;
+    wifi.detail.textContent = "以路由器为方向基准，统计独立无线接口流量。";
     const cpu = panel("CPU", "使用率", null, "%");
     const memory = panel("内存", "使用量", null, "%");
     cpu.detail.textContent = "主机 CPU 总使用率";
     memory.detail.textContent = "趋势显示已使用内存占比";
-    const panels = [wan, lan, cpu, memory];
+    const panels = [wan, lan, wifi, cpu, memory];
     let previousSnapshot, timeOffset, gap = true;
     function breakSample() {
       gap = true;
@@ -1778,6 +1781,12 @@
       lastTime = Math.max(lastTime, now, pointTime);
       updatePanel(wan, data?.wan, data, pointTime);
       updatePanel(lan, data?.lan, data, pointTime);
+      if (data) wifi.element.hidden = !data.wifi;
+      if (!wifi.element.hidden) updatePanel(wifi, data?.wifi, data, pointTime);
+      else {
+        wifi.previous = null;
+        wifi.points.length = 0;
+      }
       const cpuUse = percent(data?.cpuPercent);
       const { totalBytes, usedBytes } = data?.memory || {};
       const memoryUse = totalBytes > 0 ? percent(100 * usedBytes / totalBytes) : null;
@@ -1808,7 +1817,7 @@
           node("h3", {}, "实时流量与系统资源"),
           node("div", { class: "toolbar" },
             node("label", { for: period.id }, "时间范围"), period, pause)),
-        node("div", { class: "grid" }, wan.element, lan.element, cpu.element, memory.element), sampleNote),
+        node("div", { class: "grid" }, wan.element, lan.element, wifi.element, cpu.element, memory.element), sampleNote),
       ports, update,
       breakSample,
       get paused() { return paused; },
@@ -2435,7 +2444,10 @@
     enabled.addEventListener("change", () => { save.disabled = enabled.checked === saved; });
     return card(
       "动态 DNS",
-      node("p", {}, `Cloudflare · ${ddns.record} · DNS-only IPv4（A 记录）`),
+      node("p", {}, [ddns.provider, ddns.record, ddns.recordType && `DNS-only ${ddns.recordType} 记录`].filter(Boolean).join(" · ")),
+      ddns.interface || ddns.intervalMinutes ? node("p", { class: "help" },
+        [ddns.interface && `地址来源 ${ddns.interface}`,
+          ddns.intervalMinutes && `每 ${ddns.intervalMinutes} 分钟检查`].filter(Boolean).join(" · ")) : null,
       node("p", { class: "help" }, "令牌由主机管理。保存后影响下一次定时检查。"),
       node("label", { for: id }, enabled, "启用动态 DNS"),
       save,

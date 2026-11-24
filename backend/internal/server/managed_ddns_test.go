@@ -37,7 +37,8 @@ func TestManagedDDNSControlPersistsWithoutNetworkApply(t *testing.T) {
 		return w
 	}
 	expect(s.Handler(), "GET", "", true, "", http.StatusNotFound)
-	s.managedDDNSRecord = "s01.example.com"
+	s.managedDDNSConfig = ManagedDDNSConfig{Provider: "Example DNS", Record: "s01.example.com",
+		RecordType: "AAAA", Interface: "ppp-test", IntervalMinutes: 10}
 	h := s.Handler()
 	expect(h, "PUT", `{"enabled":false}`, false, "", http.StatusUnauthorized)
 	expect(h, "PUT", `{"enabled":false}`, true, "https://elsewhere.example", http.StatusForbidden)
@@ -46,10 +47,10 @@ func TestManagedDDNSControlPersistsWithoutNetworkApply(t *testing.T) {
 	check := func(w *httptest.ResponseRecorder, enabled bool) {
 		t.Helper()
 		var result struct {
-			Enabled bool   `json:"enabled"`
-			Record  string `json:"record"`
+			Enabled bool `json:"enabled"`
+			ManagedDDNSConfig
 		}
-		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || result.Enabled != enabled || result.Record != "s01.example.com" {
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || result.Enabled != enabled || result.ManagedDDNSConfig != s.managedDDNSConfig {
 			t.Fatalf("unexpected state: %s, %v", w.Body, err)
 		}
 	}
@@ -57,7 +58,7 @@ func TestManagedDDNSControlPersistsWithoutNetworkApply(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		check(expect(h, "PUT", `{"enabled":false}`, true, "", http.StatusOK), false)
 	}
-	reloaded := New(Options{ManagedRuntime: &runtimeStub{}, StateDir: dir, DB: s.db, ManagedDDNSRecord: s.managedDDNSRecord})
+	reloaded := New(Options{ManagedRuntime: &runtimeStub{}, StateDir: dir, DB: s.db, ManagedDDNSConfig: s.managedDDNSConfig})
 	check(expect(reloaded.Handler(), "GET", "", true, "", http.StatusOK), false)
 	check(expect(h, "PUT", `{"enabled":true}`, true, "", http.StatusOK), true)
 	check(expect(reloaded.Handler(), "GET", "", true, "", http.StatusOK), true)

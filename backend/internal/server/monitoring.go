@@ -24,6 +24,7 @@ type monitoringSnapshot struct {
 	SampleMs         int64          `json:"sampleMs"`
 	WAN              liveInterface  `json:"wan"`
 	LAN              liveInterface  `json:"lan"`
+	WiFi             *liveInterface `json:"wifi,omitempty"`
 	Ports            []physicalPort `json:"ports"`
 	ContractDownMbps uint32         `json:"contractDownMbps"`
 	ContractUpMbps   uint32         `json:"contractUpMbps"`

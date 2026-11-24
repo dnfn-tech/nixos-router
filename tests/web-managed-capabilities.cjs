@@ -267,7 +267,7 @@ test("host DDNS saves its switch independently of the router draft", async () =>
         writes.push(request.postDataJSON());
         enabled = writes.at(-1).enabled;
       }
-      await route.fulfill({ json: { enabled, record: "s01.example.com" } });
+      await route.fulfill({ json: { enabled, record: "edge.example.net", provider: "Example DNS", recordType: "AAAA", interface: "ppp-test", intervalMinutes: 10 } });
     });
     await page.locator("#page-refresh").click();
     await page.waitForFunction(() => !window.app.state.loading);
@@ -278,7 +278,8 @@ test("host DDNS saves its switch independently of the router draft", async () =>
     assert.equal(await save.isDisabled(), true);
     assert.equal(await content.locator('input[type="password"]').count(), 0);
     assert.equal(await page.locator("#apply-run").isDisabled(), true);
-    assert.match(await content.innerText(), /s01\.example\.com/);
+    assert.match(await content.innerText(), /Example DNS · edge\.example\.net · DNS-only AAAA/);
+    assert.match(await content.innerText(), /地址来源 ppp-test · 每 10 分钟检查/);
     assert.doesNotMatch(await content.innerText(), /启用将被拒绝/);
 
     await toggle.uncheck();

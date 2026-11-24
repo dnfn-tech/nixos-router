@@ -50,6 +50,7 @@ func (s *Server) collectNetworkLive(ctx context.Context, draft config.Config) mo
 		cfg = draft
 	}
 	wan, lan := liveInterface{Link: "unknown"}, liveInterface{Link: "unknown"}
+	var wifiLAN *liveInterface
 	if applied {
 		// The primary route in each family must agree with the managed WAN.
 		// Never substitute the carrier Ethernet interface for a PPPoE session.
@@ -69,9 +70,14 @@ func (s *Server) collectNetworkLive(ctx context.Context, draft config.Config) mo
 			wan.Link = "down"
 		}
 		lan = s.liveInterface(cfg.LAN.BridgeName, "bridge")
+		if s.managedRuntime != nil && cfg.WiFi.Enable && !cfg.WiFi.BridgeToLan && cfg.WiFi.Network != nil &&
+			s.wifiInterface != "" && !s.ifaceHas(s.wifiInterface, "brport") {
+			sample := s.liveInterface(s.wifiInterface, "")
+			wifiLAN = &sample
+		}
 	}
 	return monitoringSnapshot{
-		WAN: wan, LAN: lan, Ports: s.portObservations(cfg.WAN.Interface, cfg.LAN.Ports),
+		WAN: wan, LAN: lan, WiFi: wifiLAN, Ports: s.portObservations(cfg.WAN.Interface, cfg.LAN.Ports),
 		ContractDownMbps: draft.WAN.ContractDownMbps,
 		ContractUpMbps:   draft.WAN.ContractUpMbps,
 	}

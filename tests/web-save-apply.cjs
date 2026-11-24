@@ -1670,12 +1670,13 @@ test("network overview samples rates and gaps, pauses, and respects session expi
         tick();
       };
     });
-    const sample = (ms, rxBytes, txBytes, identity = "4/1") => ({ json: {
+    const sample = (ms, rxBytes, txBytes, identity = "4/1", independentWiFi = true) => ({ json: {
       clock: "test", sampleMs: ms, contractDownMbps: 300, contractUpMbps: 30,
       cpuPercent: ms === 100 ? null : 0,
       memory: { totalBytes: 1073741824, usedBytes: ms === 100 ? 0 : 536870912 },
       wan: { name: "ppp7", identity, link: "up", sampleMs: ms, rxBytes, txBytes },
       lan: { name: "br0", link: "down" },
+      ...(independentWiFi ? { wifi: { name: "wlan-test", identity: "6/1", link: "up", sampleMs: ms, rxBytes: txBytes, txBytes: rxBytes } } : {}),
       ports: [{ name: "eth0", role: "wan", link: "up", speedMbps: 2500, duplex: "full" }],
     } });
     replies.push(sample(100, "100", "200"));
@@ -1699,13 +1700,16 @@ test("network overview samples rates and gaps, pauses, and respects session expi
     };
     await pulse(sample(2100, "1000100", "200"));
     assert.match(await wan.innerText(), /下载 4.00 Mbps\s+上传 0 Mbps/);
+    const wifi = page.getByRole("heading", { name: "独立 Wi‑Fi 网段", exact: true }).locator("..");
+    assert.match(await wifi.innerText(), /wlan-test[\s\S]*接收 0 Mbps\s+发送 4.00 Mbps/);
     assert.match(await cpu.innerText(), /使用率 0%/);
     assert.match(await memory.innerText(), /512 MiB \/ 1 GiB（50.0%）/);
     assert.match(await memory.innerText(), /5 分钟前/);
     await pulse(sample(2100, "1000100", "200"));
     assert.match(await wan.innerText(), /下载 4.00 Mbps/);
     assert.equal(await selector.evaluate(el => el === document.activeElement && el.value === "300"), true);
-    await pulse(sample(4100, "90", "200"));
+    await pulse(sample(4100, "90", "200", "4/1", false));
+    assert.equal(await wifi.isVisible(), false);
     assert.match(await wan.innerText(), /下载 未采集\s+上传 未采集/);
     await pulse(sample(12100, "2000090", "200"));
     assert.match(await wan.innerText(), /下载 未采集/);
