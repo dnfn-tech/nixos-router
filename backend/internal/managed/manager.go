@@ -580,7 +580,11 @@ func (m *Manager) switchFiles(ctx context.Context, dir string) error {
 	})
 }
 func (m *Manager) activate(ctx context.Context, c config.Config, old *config.Config, dir string) error {
+	// An AP-only recovery can proceed even if the candidate AP failed to start.
 	if applied, err := m.activateAPChange(ctx, c, old, dir); applied {
+		return err
+	}
+	if preserved, err := m.activatePreservingRuntime(ctx, c, old, dir); preserved || err != nil {
 		return err
 	}
 	if err := m.cmd(ctx, "nft", "-f", filepath.Join(dir, "firewall.nft")); err != nil {

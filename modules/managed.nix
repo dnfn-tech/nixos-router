@@ -102,6 +102,13 @@ let
         ${pkgs.procps}/bin/sysctl -qw "net/ipv6/conf/$1/$setting"
       done
     '' else if action == "pre-up" then ''
+      # Serialize MTU sampling and rule replacement with warm Apply/rollback.
+      # Never hold this lock while waiting for a service or a protocol callback.
+      umask 077
+      test ! -L ${lib.escapeShellArg "${cfg.stateDir}/managed/.ipv6.lock"} || exit 1
+      exec 9>>${lib.escapeShellArg "${cfg.stateDir}/managed/.ipv6.lock"}
+      ${pkgs.util-linux}/bin/flock --exclusive --timeout 20 9
+      test "$generation" = "$(${pkgs.coreutils}/bin/readlink ${lib.escapeShellArg current})" || exit 0
       # LCP has set the negotiated transmit MTU. net-pre-up runs before
       # either IPCP or IPv6CP, unlike ip-pre-up which only gates IPv4.
       read -r mtu < /sys/class/net/nr-ppp0/mtu
